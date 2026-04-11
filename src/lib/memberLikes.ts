@@ -1,3 +1,7 @@
+/**
+ * 浏览器本地「数据库」：IndexedDB `fmz-dashboard`，按金库/直播用户等成员 id 存点赞、点踩次数。
+ * 每次点击按钮 +1，多标签页可共享同一库（同源）。
+ */
 import { reactive } from "vue";
 
 const DB_NAME = "fmz-dashboard";

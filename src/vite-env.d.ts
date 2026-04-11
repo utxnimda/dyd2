@@ -8,9 +8,9 @@ declare module "*.vue" {
 
 interface ImportMetaEnv {
   readonly VITE_API_BASE?: string;
-  /** package.json version，如 0.2.0 */
+  /** package.json version，如 0.3.0 */
   readonly VITE_APP_VERSION?: string;
-  /** 发布标签，如 v0.2（见 package.json 的 fmzReleaseLabel） */
+  /** 发布标签，如 v0.3（见 package.json 的 fmzReleaseLabel） */
   readonly VITE_APP_RELEASE_LABEL?: string;
 }
 

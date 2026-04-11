@@ -48,10 +48,10 @@ function onClick(e: MouseEvent) {
   gap: 0.2rem;
   margin: 0;
   padding: 0.2rem 0.35rem;
-  border: 1px solid color-mix(in srgb, var(--danger, #ff6b6b) 45%, var(--border, #2d3a4d));
+  border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 40%, var(--border, #2d3a4d));
   border-radius: 999px;
   background: color-mix(in srgb, var(--surface, #1a2332) 88%, rgba(0, 0, 0, 0.35));
-  color: var(--danger, #ff8f8f);
+  color: color-mix(in srgb, var(--accent, #f472b6) 85%, #fff);
   cursor: pointer;
   line-height: 1;
   font: inherit;

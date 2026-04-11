@@ -35,7 +35,7 @@ const loading = ref(false);
 const err = ref("");
 const dateRanks = ref<PreliminaryDateRank[]>([]);
 const abilityRows = ref<PreliminaryAbilityRow[]>([]);
-const sub = ref<"total" | "nogf" | "perround" | "minusflow" | "logging">("total");
+const sub = ref<"total" | "nogf" | "perround" | "gf" | "logging">("total");
 const round = ref(1);
 
 async function load() {
@@ -100,9 +100,31 @@ const rankedTotal = computed(() =>
 const rankedNoGf = computed(() =>
   withRank(abilityRows.value, (r) => gameSum(r)),
 );
-const rankedMinusFlow = computed(() =>
-  withRank(abilityRows.value, (r) => r.total - r.flow),
-);
+/** 按伐木值积分（gf）排名，与总分表「伐木值积分 gf」列一致 */
+const rankedGf = computed(() => withRank(abilityRows.value, (r) => r.gf));
+
+/** 按日预赛日期列（与 dateRanks /「按日预赛伐木值」同源） */
+const gfDateColumns = computed(() => dateRanks.value.map((b) => b.date));
+
+/** 成员 id → 日期字符串 → 当日伐木值 */
+const gfDailyFlowByMember = computed(() => {
+  const out: Record<string, Record<string, number>> = {};
+  for (const block of dateRanks.value) {
+    const { date } = block;
+    for (const it of block.list) {
+      const id = String(it.id);
+      if (!out[id]) out[id] = {};
+      out[id][date] = it.value;
+    }
+  }
+  return out;
+});
+
+function cellDailyFlow(id: string | number, date: string): string {
+  const v = gfDailyFlowByMember.value[String(id)]?.[date];
+  if (v === undefined || !Number.isFinite(v)) return "—";
+  return v.toLocaleString();
+}
 
 const rankedRound = computed(() => {
   const k = `g${round.value}` as keyof PreliminaryAbilityRow;
@@ -123,7 +145,7 @@ defineExpose({ load });
     <p v-if="err" class="err">{{ err }}</p>
     <p class="note">
       聚合逻辑与官方页面一致：总分 = 游戏1–9 积分之和 + 伐木值积分（gf）；伐木值积分由「累计伐木值」排名位置固定为
-      48、47…（与房间人数有关）。
+      48、47…（与房间人数有关）。「按日预赛伐木值」等榜单接口只汇总每人当日分值，通常不包含「是哪位用户转赠/操作」的明细；要查具体来源请到「团员金库」点开对应成员，查看积分流水（流水表里「来源（解析）」列会尽量从接口字段与文案中解析操作者昵称）。
     </p>
 
     <div class="tabs">
@@ -132,8 +154,8 @@ defineExpose({ load });
         除掉伐木值积分（仅九轮之和）
       </button>
       <button :class="{ on: sub === 'perround' }" type="button" @click="sub = 'perround'">每轮游戏排名</button>
-      <button :class="{ on: sub === 'minusflow' }" type="button" @click="sub = 'minusflow'">
-        总分 − 累计伐木值
+      <button :class="{ on: sub === 'gf' }" type="button" @click="sub = 'gf'">
+        伐木值积分
       </button>
       <button :class="{ on: sub === 'logging' }" type="button" @click="sub = 'logging'">按日预赛伐木值</button>
     </div>
@@ -252,20 +274,27 @@ defineExpose({ load });
         </tbody>
       </table>
 
-      <table v-else-if="sub === 'minusflow'" class="wide-table">
+      <table v-else-if="sub === 'gf'" class="wide-table gf-daily-table">
         <thead>
           <tr>
             <th class="col-avatar">头像</th>
             <th>排名</th>
             <th class="col-name">名称</th>
             <th class="col-react">赞 / 踩</th>
-            <th v-for="n in GAME_INDEXES" :key="'mh-g' + n" class="num game-col">游戏{{ n }}</th>
-            <th class="num">总分 − 累计伐木值</th>
-            <th>说明</th>
+            <th
+              v-for="d in gfDateColumns"
+              :key="'gf-dh-' + d"
+              class="num col-daily"
+              :title="d"
+            >
+              {{ d }}
+            </th>
+            <th class="num">累计伐木值</th>
+            <th class="num">伐木值积分</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="r in rankedMinusFlow" :key="r.id">
+          <tr v-for="r in rankedGf" :key="r.id">
             <td class="avatar-cell">
               <img
                 v-if="rowAvatarUrl(r)"
@@ -279,9 +308,15 @@ defineExpose({ load });
             <td class="col-react">
               <MemberReactionsInline :member-id="r.id" />
             </td>
-            <td v-for="n in GAME_INDEXES" :key="'mg' + n" class="num game-col">{{ cellG(r, n) }}</td>
-            <td class="num strong">{{ (r.total - r.flow).toLocaleString() }}</td>
-            <td class="muted small">辅助视图：从总分中减去「累计伐木值」数值</td>
+            <td
+              v-for="d in gfDateColumns"
+              :key="'gf-dd-' + r.id + '-' + d"
+              class="num col-daily"
+            >
+              {{ cellDailyFlow(r.id, d) }}
+            </td>
+            <td class="num">{{ r.flow.toLocaleString() }}</td>
+            <td class="num strong">{{ r.gf.toLocaleString() }}</td>
           </tr>
         </tbody>
       </table>
@@ -338,7 +373,7 @@ button.primary {
   border-radius: 8px;
   border: none;
   background: var(--primary);
-  color: #0a1628;
+  color: var(--on-primary);
   font-weight: 600;
   cursor: pointer;
 }
@@ -392,6 +427,15 @@ button.primary:disabled {
 }
 .wide-table {
   min-width: 1100px;
+}
+.gf-daily-table th.col-daily,
+.gf-daily-table td.col-daily {
+  min-width: 5.25rem;
+  max-width: 8rem;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 th.col-avatar,
 td.avatar-cell {

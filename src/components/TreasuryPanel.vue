@@ -12,8 +12,12 @@ import {
   TEAM_SIZE,
   type CaptainMoneyCard,
 } from "../lib/captainTeams";
+import { extractRecordSourceLabel } from "../lib/recordSource";
 import { formatRecordContent } from "../lib/treasuryFormat";
 import type { ApiListResponse, MoneyCard, MoneyRecord } from "../types";
+
+/** 流水行：展示用 content 已格式化，sourceLabel 自原始记录解析 */
+type TreasuryRecordRow = MoneyRecord & { sourceLabel: string };
 import MemberDislikeButton from "./MemberDislikeButton.vue";
 import MemberLikeButton from "./MemberLikeButton.vue";
 type TreasuryCard = CaptainMoneyCard;
@@ -66,7 +70,7 @@ const err = ref("");
 
 const dlg = ref(false);
 const detail = ref<MoneyCard | null>(null);
-const records = ref<MoneyRecord[]>([]);
+const records = ref<TreasuryRecordRow[]>([]);
 const recPage = ref(1);
 const recSize = ref(32);
 const recTotal = ref(0);
@@ -154,6 +158,7 @@ async function loadRecords() {
     recTotal.value = res.data.total ?? 0;
     records.value = (res.data.list || []).map((h) => ({
       ...h,
+      sourceLabel: extractRecordSourceLabel(h) || "—",
       content: formatRecordContent(h),
     }));
   } finally {
@@ -307,12 +312,14 @@ defineExpose({ reload: loadCards });
               <thead>
                 <tr>
                   <th>时间</th>
+                  <th class="col-src">来源（解析）</th>
                   <th>内容</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="(h, i) in records" :key="i">
                   <td class="t">{{ h.creationDateTime }}</td>
+                  <td class="src" :title="h.sourceLabel">{{ h.sourceLabel }}</td>
                   <td>{{ h.content }}</td>
                 </tr>
               </tbody>
@@ -390,7 +397,7 @@ defineExpose({ reload: loadCards });
   padding: 0.1rem 0.35rem;
   border-radius: 4px;
   background: var(--primary);
-  color: #0a1628;
+  color: var(--on-primary);
   vertical-align: middle;
 }
 h2 {
@@ -401,7 +408,7 @@ button.primary {
   border-radius: 8px;
   border: none;
   background: var(--primary);
-  color: #0a1628;
+  color: var(--on-primary);
   font-weight: 600;
   cursor: pointer;
 }
@@ -505,7 +512,7 @@ button.primary {
   max-width: 100%;
 }
 .cover.ph {
-  background: #2a3544;
+  background: color-mix(in srgb, var(--muted) 30%, var(--surface));
   width: 120px;
   min-height: 120px;
 }
@@ -513,17 +520,20 @@ button.primary {
   align-self: stretch;
   box-sizing: border-box;
   padding: 0.5rem 0.65rem;
-  background: rgba(0, 0, 0, 0.55);
+  /* 随主题：浅色用 surface/bg 混合，不再固定黑半透明 */
+  background: color-mix(in srgb, var(--surface) 88%, var(--text) 10%);
+  color: var(--text);
   min-width: 0;
   word-break: break-word;
 }
 .nm {
   font-weight: 700;
   font-size: 0.9rem;
+  color: var(--text);
 }
 .bal {
   font-size: 0.8rem;
-  color: #c8d8f0;
+  color: var(--muted);
 }
 .err {
   color: var(--danger);
@@ -596,6 +606,15 @@ button.primary {
 .rec .t {
   white-space: nowrap;
   color: var(--muted);
+}
+.rec th.col-src,
+.rec td.src {
+  max-width: 10rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--accent);
+  font-weight: 600;
 }
 .pager {
   margin-top: 0.75rem;

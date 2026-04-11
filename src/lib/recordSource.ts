@@ -294,6 +294,35 @@ function extractOperatorNameFromPlainRecord(record: MoneyRecord): string | undef
   return undefined;
 }
 
+/**
+ * 从金库流水解析「对方 / 操作者」昵称（用于流水表「来源」列）。
+ * 与飞入动画里的操作者解析思路一致，但不依赖队长列表。
+ */
+export function extractRecordSourceLabel(
+  record: MoneyRecord | null | undefined,
+): string {
+  if (!record) return "";
+  const raw = record as Record<string, unknown>;
+  const flat = pickNameFromFlatRecord(raw);
+  if (flat) return flat;
+  const nested = tryParseContentObject(raw.content);
+  if (nested) {
+    const n = pickNameFromNestedObject(nested);
+    if (n) return n;
+  }
+  const plain = extractOperatorNameFromPlainRecord(record);
+  if (plain) return plain;
+  const fmt = formatRecordContent(record).trim();
+  if (fmt) {
+    const g = extractNameFromGenericContent(fmt);
+    if (g) return g;
+    const stripped = fmt.replace(/伐木积分\s*$/u, "").trim();
+    const g2 = extractNameFromGenericContent(stripped);
+    if (g2) return g2;
+  }
+  return "";
+}
+
 /** 从流水里尽量解析「来源」队长；解析不到则返回 undefined（HUD 会用顶部居中飞入代替） */
 export function inferSourceCaptain(
   record: MoneyRecord | null | undefined,

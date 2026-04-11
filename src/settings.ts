@@ -1,4 +1,5 @@
 import { type ClientConfig } from "./lib/api";
+import type { ThemePresetId } from "./lib/themePresets";
 
 const KEY = "fmz_dashboard_settings_v1";
 
@@ -8,8 +9,12 @@ export type StoredSettings = {
   xProject: string;
   currencyProportion: number;
   bearerToken: string;
-  /** 页面主背景色（十六进制，如 #0f1419） */
+  /** 配色方案：预设或自定义 */
+  themePreset: ThemePresetId;
+  /** 页面主背景色（自定义或同步自选预设） */
   backgroundColor: string;
+  /** 主正文 / 标题用字色（自定义时生效；预设会覆盖到界面变量） */
+  textColor: string;
 };
 
 export const defaultSettings = (): StoredSettings => ({
@@ -20,14 +25,27 @@ export const defaultSettings = (): StoredSettings => ({
   xProject: "888",
   currencyProportion: 100,
   bearerToken: "",
+  themePreset: "dark-default",
   backgroundColor: "#0f1419",
+  textColor: "#e8eef7",
 });
 
 export function loadSettings(): StoredSettings {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return defaultSettings();
-    return { ...defaultSettings(), ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw) as Partial<StoredSettings>;
+    const base = defaultSettings();
+    const merged = { ...base, ...parsed };
+    if (!parsed.themePreset) {
+      const bg = String(parsed.backgroundColor || "").toLowerCase();
+      merged.themePreset =
+        bg && bg !== "#0f1419" ? "custom" : "dark-default";
+    }
+    if (parsed.textColor == null || parsed.textColor === "") {
+      merged.textColor = base.textColor;
+    }
+    return merged;
   } catch {
     return defaultSettings();
   }

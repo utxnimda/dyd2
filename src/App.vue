@@ -6,13 +6,35 @@ import PreliminaryPanel from "./components/PreliminaryPanel.vue";
 import UsersPanel from "./components/UsersPanel.vue";
 import TreasuryPanel from "./components/TreasuryPanel.vue";
 import { loadSettings, toClientConfig, type StoredSettings } from "./settings";
+import {
+  applyThemeVarsToDocument,
+  deriveCustomTheme,
+  presetVars,
+  type ThemePresetId,
+} from "./lib/themePresets";
 
 const settings = ref<StoredSettings>(loadSettings());
 
-function applyPageBackground() {
-  const raw = (settings.value.backgroundColor || "#0f1419").trim();
-  const ok = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(raw);
-  document.documentElement.style.setProperty("--bg", ok ? raw : "#0f1419");
+function applyTheme() {
+  const s = settings.value;
+  if (s.themePreset === "custom") {
+    let rawBg = (s.backgroundColor || "#0f1419").trim();
+    let rawTx = (s.textColor || "#e8eef7").trim();
+    if (!rawBg.startsWith("#")) rawBg = "#" + rawBg;
+    if (!rawTx.startsWith("#")) rawTx = "#" + rawTx;
+    const okBg = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(rawBg);
+    const okTx = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(rawTx);
+    applyThemeVarsToDocument(
+      deriveCustomTheme(
+        okBg ? rawBg : "#0f1419",
+        okTx ? rawTx : "#e8eef7",
+      ),
+    );
+  } else {
+    applyThemeVarsToDocument(
+      presetVars(s.themePreset as Exclude<ThemePresetId, "custom">),
+    );
+  }
 }
 const tab = ref<"pre" | "users" | "treasury">("pre");
 
@@ -46,7 +68,7 @@ function onApply() {
 onMounted(() => {
   syncCaptainHudHash();
   window.addEventListener("hashchange", syncCaptainHudHash);
-  applyPageBackground();
+  applyTheme();
   if (!captainHudOnly.value) preRef.value?.load();
 });
 
@@ -55,8 +77,13 @@ onUnmounted(() => {
 });
 
 watch(
-  () => settings.value.backgroundColor,
-  () => applyPageBackground(),
+  () => ({
+    p: settings.value.themePreset,
+    bg: settings.value.backgroundColor,
+    tx: settings.value.textColor,
+  }),
+  () => applyTheme(),
+  { deep: true },
 );
 
 watch(tab, (t) => {

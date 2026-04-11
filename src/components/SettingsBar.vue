@@ -2,6 +2,7 @@
 import { reactive, watch } from "vue";
 import type { StoredSettings } from "../settings";
 import { defaultSettings, saveSettings } from "../settings";
+import { THEME_PRESETS, type ThemePresetId } from "../lib/themePresets";
 
 const props = defineProps<{ modelValue: StoredSettings }>();
 const emit = defineEmits<{
@@ -13,6 +14,15 @@ const form = reactive<StoredSettings>({ ...props.modelValue });
 
 const releaseLabel = import.meta.env.VITE_APP_RELEASE_LABEL as string | undefined;
 
+const themeOptions: Array<{ value: ThemePresetId; label: string; hint?: string }> = [
+  ...THEME_PRESETS.map((p) => ({
+    value: p.id as ThemePresetId,
+    label: p.label,
+    hint: p.hint,
+  })),
+  { value: "custom", label: "自定义（背景 + 字色）" },
+];
+
 watch(
   () => props.modelValue,
   (v) => Object.assign(form, v),
@@ -23,13 +33,24 @@ function reset() {
   Object.assign(form, defaultSettings());
 }
 
-function syncBgToParent() {
+function syncToParent() {
   emit("update:modelValue", { ...form });
 }
 
-/** 将 #rgb 规范为 #rrggbb，便于 color input 识别 */
-function normalizeHex() {
-  let h = String(form.backgroundColor || "").trim();
+function onThemePresetChange() {
+  if (form.themePreset !== "custom") {
+    const p = THEME_PRESETS.find((x) => x.id === form.themePreset);
+    if (p) {
+      form.backgroundColor = p.vars.bg;
+      form.textColor = p.vars.text;
+    }
+  }
+  syncToParent();
+}
+
+/** 将 #rgb 规范为 #rrggbb */
+function normalizeHexKey(key: "backgroundColor" | "textColor") {
+  let h = String(form[key] || "").trim();
   if (!h.startsWith("#")) h = "#" + h;
   if (/^#[0-9A-Fa-f]{3}$/i.test(h)) {
     const r = h[1],
@@ -38,13 +59,22 @@ function normalizeHex() {
     h = ("#" + r + r + g + g + b + b).toLowerCase();
   }
   if (/^#[0-9A-Fa-f]{6}$/i.test(h)) {
-    form.backgroundColor = h.toLowerCase();
-    syncBgToParent();
+    form[key] = h.toLowerCase();
+    syncToParent();
   }
 }
 
+function normalizeBackground() {
+  normalizeHexKey("backgroundColor");
+}
+
+function normalizeTextColor() {
+  normalizeHexKey("textColor");
+}
+
 function save() {
-  normalizeHex();
+  normalizeBackground();
+  normalizeTextColor();
   saveSettings({ ...form });
   emit("update:modelValue", { ...form });
   emit("apply");
@@ -78,6 +108,23 @@ function save() {
         Bearer Token
         <input v-model="form.bearerToken" type="password" autocomplete="off" placeholder="从已登录站点复制" />
       </label>
+      <label class="wide theme-label">
+        配色方案
+        <select
+          v-model="form.themePreset"
+          class="theme-select"
+          @change="onThemePresetChange"
+        >
+          <option
+            v-for="opt in themeOptions"
+            :key="opt.value"
+            :value="opt.value"
+            :title="opt.hint || opt.label"
+          >
+            {{ opt.label }}
+          </option>
+        </select>
+      </label>
       <label>
         页面背景色
         <span class="color-row">
@@ -86,7 +133,8 @@ function save() {
             type="color"
             class="color-swatch"
             title="选取颜色"
-            @input="syncBgToParent"
+            :disabled="form.themePreset !== 'custom'"
+            @input="syncToParent"
           />
           <input
             v-model="form.backgroundColor"
@@ -95,9 +143,35 @@ function save() {
             placeholder="#0f1419"
             pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$"
             maxlength="9"
-            @input="syncBgToParent"
-            @change="normalizeHex"
-            @blur="normalizeHex"
+            :disabled="form.themePreset !== 'custom'"
+            @input="syncToParent"
+            @change="normalizeBackground"
+            @blur="normalizeBackground"
+          />
+        </span>
+      </label>
+      <label>
+        主文字颜色
+        <span class="color-row">
+          <input
+            v-model="form.textColor"
+            type="color"
+            class="color-swatch"
+            title="正文与标题主色"
+            :disabled="form.themePreset !== 'custom'"
+            @input="syncToParent"
+          />
+          <input
+            v-model="form.textColor"
+            type="text"
+            class="color-hex"
+            placeholder="#e8eef7"
+            pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$"
+            maxlength="9"
+            :disabled="form.themePreset !== 'custom'"
+            @input="syncToParent"
+            @change="normalizeTextColor"
+            @blur="normalizeTextColor"
           />
         </span>
       </label>
@@ -108,7 +182,7 @@ function save() {
     </div>
     <p class="hint">
       开发模式请保持 API 为 <code>/__fmz_api</code> 以走 Vite 代理；生产环境需自行解决跨域或同域反代。
-      背景色在选取后会立即生效；与其他设置一起点「保存并应用」可写入本地，下次打开仍保留。
+      切换配色会立即应用到全站 CSS 变量；点「保存并应用」写入本地，下次打开仍保留。预设已含背景、字色、边框与主按钮配色；选「自定义」可单独调背景与主文字色（次要色自动推导）。
     </p>
   </header>
 </template>
@@ -152,12 +226,27 @@ label {
 label.wide {
   grid-column: 1 / -1;
 }
+.theme-label {
+  min-width: min(100%, 420px);
+}
+.theme-select {
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.85rem;
+}
 input {
   padding: 0.45rem 0.6rem;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
+}
+input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 .actions {
   margin-top: 0.75rem;
@@ -173,7 +262,7 @@ button {
 button.primary {
   background: var(--primary);
   border-color: var(--primary);
-  color: #0a1628;
+  color: var(--on-primary);
   font-weight: 600;
 }
 button.ghost {

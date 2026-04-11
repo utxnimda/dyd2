@@ -3,6 +3,7 @@ import { onMounted, ref, watch } from "vue";
 import { createApi, douyuAvatarUrl } from "../lib/api";
 import type { ClientConfig } from "../lib/api";
 import type { ApiListResponse, LiveUser } from "../types";
+import MemberLikeButton from "./MemberLikeButton.vue";
 
 const props = defineProps<{ config: ClientConfig }>();
 
@@ -76,6 +77,14 @@ watch(
 
 onMounted(() => fetchList());
 
+/** 与 IndexedDB 中计数用的成员主键一致（优先 id，否则 uid） */
+function memberReactionKey(u: LiveUser): string | number | null {
+  if (u.id != null && String(u.id).trim() !== "") return u.id;
+  const uid = u.uid != null ? String(u.uid).trim() : "";
+  if (uid) return uid;
+  return null;
+}
+
 defineExpose({ reload: fetchList });
 </script>
 
@@ -96,12 +105,15 @@ defineExpose({ reload: fetchList });
     <p v-if="err" class="err">{{ err }}</p>
     <p v-if="loading" class="muted">加载中…</p>
     <div v-else class="cards">
-      <article v-for="u in list" :key="String(u.id)" class="card">
+      <article v-for="u in list" :key="String(u.id ?? u.uid)" class="card">
         <img class="av" :src="u.avatar || undefined" alt="" referrerpolicy="no-referrer" />
         <div class="meta">
           <div class="name">{{ u.name }}</div>
           <div class="uid">UID {{ u.uid ?? u.id }}</div>
           <div class="pts">{{ (u.pointsNum2 ?? 0).toLocaleString() }} 伐木积分</div>
+          <div v-if="memberReactionKey(u) != null" class="react">
+            <MemberLikeButton :member-id="memberReactionKey(u)!" variant="inline" />
+          </div>
         </div>
       </article>
     </div>
@@ -152,7 +164,7 @@ button.primary {
   border-radius: 8px;
   border: none;
   background: var(--primary);
-  color: #0a1628;
+  color: var(--on-primary);
   font-weight: 600;
   cursor: pointer;
 }
@@ -176,17 +188,22 @@ button.ghost {
   padding: 1rem;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: linear-gradient(145deg, #1e3a5f 0%, var(--surface) 100%);
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--primary) 22%, var(--surface)) 0%,
+    var(--surface) 100%
+  );
 }
 .av {
   width: 56px;
   height: 56px;
   border-radius: 50%;
   object-fit: cover;
-  border: 2px solid rgba(255, 255, 255, 0.2);
+  border: 2px solid color-mix(in srgb, var(--text) 16%, var(--border));
 }
 .name {
   font-weight: 700;
+  color: var(--text);
 }
 .uid {
   font-size: 0.75rem;
@@ -198,6 +215,9 @@ button.ghost {
   font-weight: 700;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
+}
+.react {
+  margin-top: 0.5rem;
 }
 .err {
   color: var(--danger);

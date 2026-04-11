@@ -626,7 +626,12 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
 .hud {
   border-radius: 14px;
   border: 1px solid var(--border, #2d3a4d);
-  background: linear-gradient(160deg, rgba(26, 35, 50, 0.95), rgba(15, 20, 25, 0.98));
+  /* 随全局配色变化（原先用写死的 rgba，浅色主题不会变） */
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--surface) 94%, var(--text) 3%),
+    color-mix(in srgb, var(--bg) 92%, var(--surface) 8%)
+  );
   padding: 0.65rem 0.75rem 0.85rem;
   margin-bottom: 1rem;
 }
@@ -744,12 +749,12 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
   height: 36px;
   border-radius: 50%;
   object-fit: cover;
-  border: 2px solid color-mix(in srgb, var(--accent) 50%, #444);
+  border: 2px solid color-mix(in srgb, var(--accent) 50%, var(--border));
   flex-shrink: 0;
   display: block;
 }
 .av.ph {
-  background: #2a3544;
+  background: color-mix(in srgb, var(--muted) 32%, var(--surface));
 }
 .meta {
   min-width: 0;
@@ -776,7 +781,7 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
 }
 .slot.ishit .av,
 .slot.ishit .av.ph {
-  border-color: #ff6b6b;
+  border-color: var(--danger);
 }
 .slot.isheal .av {
   animation: pulseheal 0.65s ease;
@@ -784,7 +789,7 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
 }
 .slot.isheal .av,
 .slot.isheal .av.ph {
-  border-color: #3dd68c;
+  border-color: var(--accent);
 }
 
 @keyframes shake {
@@ -874,10 +879,10 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
   animation: damageFromBelow 1.15s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 .floater.hit {
-  color: #ff6b6b;
+  color: var(--danger);
 }
 .floater.heal {
-  color: #7dffb3;
+  color: color-mix(in srgb, var(--accent) 82%, #fff 18%);
 }
 @keyframes damageFromBelow {
   0% {
@@ -934,7 +939,7 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
   font-size: 11px;
   font-weight: 800;
   line-height: 1.25;
-  color: #f8fafc;
+  color: var(--text);
   text-align: center;
   max-width: 96px;
   min-width: 0;
