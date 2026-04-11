@@ -1,0 +1,25 @@
+{
+  "name": "fmz-dashboard",
+  "private": true,
+  "version": "0.2.0",
+  "fmzReleaseLabel": "v0.2",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "pack": "vite build && node scripts/pack-release.mjs",
+    "preview": "vite preview",
+    "preview:public": "vite preview --host 0.0.0.0 --port 4173",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.51.0",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.3"
+  }
+}
