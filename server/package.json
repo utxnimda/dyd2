@@ -1,0 +1,11 @@
+{
+  "name": "fmz-reactions-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node reactions-server.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0"
+  }
+}

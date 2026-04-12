@@ -9,6 +9,13 @@ export type StoredSettings = {
   xProject: string;
   currencyProportion: number;
   bearerToken: string;
+  /**
+   * 赞踩服务根路径（同源反代），默认 /__fmz_reactions
+   * 开发时 Vite 会转发到本机 reactions-server
+   */
+  reactionsApiBase: string;
+  /** 与服务器环境变量 FMZ_REACTIONS_SECRET 一致时可填，防止他人刷赞踩 */
+  reactionsSecret: string;
   /** 配色方案：预设或自定义 */
   themePreset: ThemePresetId;
   /** 页面主背景色（自定义或同步自选预设） */
@@ -25,6 +32,8 @@ export const defaultSettings = (): StoredSettings => ({
   xProject: "888",
   currencyProportion: 100,
   bearerToken: "",
+  reactionsApiBase: "/__fmz_reactions",
+  reactionsSecret: "",
   themePreset: "dark-default",
   backgroundColor: "#0f1419",
   textColor: "#e8eef7",
@@ -44,6 +53,12 @@ export function loadSettings(): StoredSettings {
     }
     if (parsed.textColor == null || parsed.textColor === "") {
       merged.textColor = base.textColor;
+    }
+    if (parsed.reactionsApiBase == null || String(parsed.reactionsApiBase).trim() === "") {
+      merged.reactionsApiBase = base.reactionsApiBase;
+    }
+    if (parsed.reactionsSecret == null) {
+      merged.reactionsSecret = base.reactionsSecret;
     }
     return merged;
   } catch {

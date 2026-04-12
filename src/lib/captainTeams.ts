@@ -40,6 +40,11 @@ export function resolveMoneyCardAvatar(card: MoneyCard): string {
   return "";
 }
 
+function isPreliminaryMoneyCard(card: MoneyCard): boolean {
+  const attr = tryParseMoneyAttribute(card);
+  return attr != null && Number(attr.preliminary) === 1;
+}
+
 function resolveMoneyCardNameFallback(card: MoneyCard): string {
   const top = card.name;
   if (top != null && String(top).trim() !== "") return String(top).trim();
@@ -56,6 +61,8 @@ function resolveMoneyCardNameFallback(card: MoneyCard): string {
 
 /** 与金库页约定一致：接口按 id 升序返回时，前 16 人为队长 */
 export const CAPTAIN_COUNT = 16;
+/** 预赛成员名单人数上限（attribute preliminary=1 中取前 N，与预赛数据一致） */
+export const PRELIMINARY_ROSTER_CAP = 48;
 export const TEAM_SIZE = 4;
 export const TEAM_COUNT = CAPTAIN_COUNT / TEAM_SIZE;
 
@@ -98,4 +105,45 @@ export function captainTeamsFromCards(cards: CaptainMoneyCard[]) {
     const start = teamIdx * TEAM_SIZE;
     return { ...def, members: caps.slice(start, start + TEAM_SIZE) };
   });
+}
+
+/** 预赛 48 人：preliminary=1 按金库顺序取前 48 */
+export function preliminaryRoster48(cards: CaptainMoneyCard[]): CaptainMoneyCard[] {
+  return cards
+    .filter(isPreliminaryMoneyCard)
+    .sort((a, b) => a._orderIndex - b._orderIndex)
+    .slice(0, PRELIMINARY_ROSTER_CAP);
+}
+
+/** 队长：金库列表前 CAPTAIN_COUNT 条的 id（与 captainTeamsFromCards 一致） */
+function captainIdSet(cards: CaptainMoneyCard[]): Set<string> {
+  return new Set(
+    cards.filter((c) => c._orderIndex < CAPTAIN_COUNT).map((c) => String(c.id)),
+  );
+}
+
+/**
+ * 团员分三类之「其他」：非队长，且不在预赛 48 人名单（id集合）内。
+ * 含「有预赛标但未进前 48」等非名单成员。
+ */
+export function hudOtherMembers(cards: CaptainMoneyCard[]): CaptainMoneyCard[] {
+  const capIds = captainIdSet(cards);
+  const p48Ids = new Set(preliminaryRoster48(cards).map((c) => String(c.id)));
+  return cards
+    .filter(
+      (c) =>
+        c._orderIndex >= CAPTAIN_COUNT &&
+        !p48Ids.has(String(c.id)) &&
+        !capIds.has(String(c.id)),
+    )
+    .sort((a, b) => a._orderIndex - b._orderIndex);
+}
+
+/**
+ * 团员分三类之「预赛队员」：预赛 48 人名单内成员，去掉已在四角展示的队长（按 id）。
+ * 顺序与 preliminaryRoster48 一致。
+ */
+export function hudBottomTeam(cards: CaptainMoneyCard[]): CaptainMoneyCard[] {
+  const capIds = captainIdSet(cards);
+  return preliminaryRoster48(cards).filter((c) => !capIds.has(String(c.id)));
 }

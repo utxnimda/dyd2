@@ -1,6 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
-import { addMemberLike, loadMemberVotes, memberLikesState } from "../lib/memberLikes";
+import { computed, inject, ref } from "vue";
+import {
+  addMemberLike,
+  FMZ_REACTIONS_CLIENT_KEY,
+  memberLikesState,
+  reactionsClientFromSettings,
+  type ReactionsClient,
+} from "../lib/memberLikes";
+import { loadSettings } from "../settings";
 
 const props = withDefaults(
   defineProps<{
@@ -11,15 +18,33 @@ const props = withDefaults(
   { variant: "tile" },
 );
 
+const reactionsRef = inject(FMZ_REACTIONS_CLIENT_KEY, null);
+const ctx = computed(
+  () => reactionsRef?.value ?? reactionsClientFromSettings(loadSettings()),
+);
+
 const idKey = computed(() => String(props.memberId));
 const displayCount = computed(() => memberLikesState.counts[idKey.value] ?? 0);
+const pending = ref(false);
+const clickErr = ref("");
 
-onMounted(() => void loadMemberVotes());
-
-function onClick(e: MouseEvent) {
+async function onClick(e: MouseEvent) {
   e.stopPropagation();
   e.preventDefault();
-  void addMemberLike(props.memberId);
+  const c = ctx.value;
+  if (!c.baseUrl || !c.projectKey) {
+    clickErr.value = "赞踩配置缺失";
+    return;
+  }
+  pending.value = true;
+  clickErr.value = "";
+  try {
+    await addMemberLike(props.memberId, c);
+  } catch (err) {
+    clickErr.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    pending.value = false;
+  }
 }
 </script>
 
@@ -28,8 +53,9 @@ function onClick(e: MouseEvent) {
     type="button"
     class="like-btn"
     :class="'like-' + variant"
+    :disabled="pending"
     :aria-label="'为成员点赞，当前 ' + displayCount"
-    :title="'点赞 +' + displayCount"
+    :title="clickErr || '点赞 +' + displayCount"
     @click="onClick"
   >
     <svg class="heart" viewBox="0 0 24 24" aria-hidden="true">
@@ -38,6 +64,7 @@ function onClick(e: MouseEvent) {
       />
     </svg>
     <span class="num">{{ displayCount }}</span>
+    <span v-if="clickErr" class="react-err" :title="clickErr">!</span>
   </button>
 </template>
 
@@ -107,5 +134,11 @@ function onClick(e: MouseEvent) {
 .like-inline .heart {
   width: 13px;
   height: 13px;
+}
+.react-err {
+  font-size: 0.65em;
+  font-weight: 900;
+  color: var(--danger, #ff6b6b);
+  margin-left: 0.1rem;
 }
 </style>

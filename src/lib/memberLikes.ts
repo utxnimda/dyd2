@@ -1,137 +1,327 @@
 /**
- * 浏览器本地「数据库」：IndexedDB `fmz-dashboard`，按金库/直播用户等成员 id 存点赞、点踩次数。
- * 每次点击按钮 +1，多标签页可共享同一库（同源）。
+ * 赞 / 踩：经同源「赞踩服务」写入服务器 SQLite，不再使用浏览器 IndexedDB。
+ * 配置由 App.vue provide（X-Project + 房间号 区分命名空间）。
  */
-import { reactive } from "vue";
+import { reactive, type ComputedRef, type InjectionKey } from "vue";
 
-const DB_NAME = "fmz-dashboard";
-const STORE_LIKES = "member_likes";
-const STORE_DISLIKES = "member_dislikes";
-const DB_VERSION = 2;
+export type ReactionsClient = {
+  /** 如 /__fmz_reactions 或完整 URL */
+  baseUrl: string;
+  /** 与金库配置一致，如 `${xProject}_${liveRoom}` */
+  projectKey: string;
+  /** 可选，与服务器 FMZ_REACTIONS_SECRET 一致 */
+  secret: string;
+};
 
-export type MemberCountRow = { id: string; count: number };
+export const FMZ_REACTIONS_CLIENT_KEY: InjectionKey<ComputedRef<ReactionsClient>> =
+  Symbol("fmzReactionsClient");
 
-function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onerror = () => reject(req.error ?? new Error("indexedDB open failed"));
-    req.onsuccess = () => resolve(req.result);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE_LIKES)) {
-        db.createObjectStore(STORE_LIKES, { keyPath: "id" });
-      }
-      if (!db.objectStoreNames.contains(STORE_DISLIKES)) {
-        db.createObjectStore(STORE_DISLIKES, { keyPath: "id" });
-      }
-    };
-  });
+/** 由 settings 构造（供 App watch 与文档） */
+export function reactionsClientFromSettings(s: {
+  reactionsApiBase: string;
+  xProject: string;
+  liveRoom: string;
+  reactionsSecret: string;
+}): ReactionsClient {
+  let base = (s.reactionsApiBase || "/__fmz_reactions").trim();
+  if (base && !base.startsWith("http") && !base.startsWith("/")) {
+    base = `/${base}`;
+  }
+  return {
+    baseUrl: base.replace(/\/$/, "") || "/__fmz_reactions",
+    projectKey: `${s.xProject}_${s.liveRoom}`,
+    secret: (s.reactionsSecret || "").trim(),
+  };
 }
 
-async function readStore(storeName: string): Promise<Record<string, number>> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, "readonly");
-    const store = tx.objectStore(storeName);
-    const r = store.getAll();
-    r.onerror = () => reject(r.error);
-    r.onsuccess = () => {
-      const rows = r.result as MemberCountRow[];
-      const m: Record<string, number> = {};
-      for (const row of rows) m[row.id] = row.count;
-      resolve(m);
-    };
-  });
-}
-
-async function incrementStore(storeName: string, id: string): Promise<number> {
-  const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, "readwrite");
-    const store = tx.objectStore(storeName);
-    const g = store.get(id);
-    g.onerror = () => reject(g.error);
-    g.onsuccess = () => {
-      const prev = (g.result as MemberCountRow | undefined)?.count ?? 0;
-      const next = prev + 1;
-      const p = store.put({ id, count: next });
-      p.onerror = () => reject(p.error);
-      p.onsuccess = () => resolve(next);
-    };
-  });
-}
-
-/** 点赞计数（IndexedDB，与金库 / 预赛成员 id 一致） */
 export const memberLikesState = reactive({
   counts: {} as Record<string, number>,
   ready: false,
+  lastError: "" as string,
 });
 
-/** 点踩计数 */
 export const memberDislikesState = reactive({
   counts: {} as Record<string, number>,
   ready: false,
+  lastError: "" as string,
 });
 
-let loadPromise: Promise<void> | null = null;
+let loadSeq = 0;
 
-/** 加载赞、踩（只请求一次 IndexedDB） */
-export function loadMemberVotes(): Promise<void> {
-  if (memberLikesState.ready && memberDislikesState.ready) return Promise.resolve();
-  if (loadPromise) return loadPromise;
-  loadPromise = (async () => {
+/** 客户端：两次操作之间的基础间隔（毫秒） */
+export const CLIENT_REACTION_BASE_COOLDOWN_MS = 500;
+
+/** 连续成功点赞间隔小于此值（毫秒）视为同一段「连点」，累加 streak */
+const RAPID_LIKE_STREAK_WINDOW_MS = 4000;
+
+/**
+ * 连续成功点赞达到该次数后，下一次起在基础间隔上额外加长冷却（仅点赞累计，点踩会清零）。
+ */
+const LIKE_STREAK_THRESHOLD = 5;
+
+/** 每多1 次 streak，在基础间隔上多加的毫秒数（封顶见下） */
+const COOLDOWN_EXTRA_PER_STREAK_MS = 550;
+
+/** 有效冷却上限（含基础间隔） */
+const CLIENT_REACTION_COOLDOWN_MAX_MS = 4000;
+
+type ClientReactionSlot = {
+  lastReactionAt: number;
+  /** 当前连续「快点赞」成功次数（在窗口内累加） */
+  likeStreak: number;
+  lastLikeSuccessAt: number;
+};
+
+const clientSlots = new Map<string, ClientReactionSlot>();
+
+function clientReactionKey(ctx: ReactionsClient, memberId: string | number): string {
+  return `${ctx.projectKey}\t${String(memberId)}`;
+}
+
+function getSlot(k: string): ClientReactionSlot {
+  return (
+    clientSlots.get(k) ?? {
+      lastReactionAt: 0,
+      likeStreak: 0,
+      lastLikeSuccessAt: 0,
+    }
+  );
+}
+
+function effectiveCooldownMs(likeStreak: number): number {
+  if (likeStreak < LIKE_STREAK_THRESHOLD) {
+    return CLIENT_REACTION_BASE_COOLDOWN_MS;
+  }
+  const over = likeStreak - LIKE_STREAK_THRESHOLD + 1;
+  const extra = over * COOLDOWN_EXTRA_PER_STREAK_MS;
+  return Math.min(CLIENT_REACTION_COOLDOWN_MAX_MS, CLIENT_REACTION_BASE_COOLDOWN_MS + extra);
+}
+
+/** @deprecated 请用 CLIENT_REACTION_BASE_COOLDOWN_MS；实际间隔随连赞 streak 变长 */
+export const CLIENT_REACTION_COOLDOWN_MS = CLIENT_REACTION_BASE_COOLDOWN_MS;
+
+function recordLikeSuccess(ctx: ReactionsClient, memberId: string | number): void {
+  const k = clientReactionKey(ctx, memberId);
+  const now = Date.now();
+  const slot = getSlot(k);
+  if (
+    slot.lastLikeSuccessAt > 0 &&
+    now - slot.lastLikeSuccessAt <= RAPID_LIKE_STREAK_WINDOW_MS
+  ) {
+    slot.likeStreak += 1;
+  } else {
+    slot.likeStreak = 1;
+  }
+  slot.lastLikeSuccessAt = now;
+  clientSlots.set(k, slot);
+}
+
+function resetLikeStreak(ctx: ReactionsClient, memberId: string | number): void {
+  const k = clientReactionKey(ctx, memberId);
+  const slot = getSlot(k);
+  slot.likeStreak = 0;
+  slot.lastLikeSuccessAt = 0;
+  clientSlots.set(k, slot);
+}
+
+/** 过短间隔内再次点击返回 false（静默忽略，不请求服务器） */
+export function assertClientReactionAllowed(
+  ctx: ReactionsClient,
+  memberId: string | number,
+): boolean {
+  const k = clientReactionKey(ctx, memberId);
+  const now = Date.now();
+  const slot = getSlot(k);
+  const needMs = effectiveCooldownMs(slot.likeStreak);
+  const elapsed = now - slot.lastReactionAt;
+  if (elapsed < needMs) {
+    return false;
+  }
+  slot.lastReactionAt = now;
+  clientSlots.set(k, slot);
+  return true;
+}
+
+function headersFor(ctx: ReactionsClient, jsonBody?: boolean): Record<string, string> {
+  const h: Record<string, string> = {};
+  if (jsonBody) h["Content-Type"] = "application/json";
+  if (ctx.secret) h["X-FMZ-Reactions-Secret"] = ctx.secret;
+  return h;
+}
+
+const REACTIONS_FETCH_MS = 20_000;
+
+function fetchReactions(input: string, init?: RequestInit): Promise<Response> {
+  const ctrl = new AbortController();
+  const t = window.setTimeout(() => ctrl.abort(), REACTIONS_FETCH_MS);
+  return fetch(input, { ...init, signal: ctrl.signal }).finally(() =>
+    window.clearTimeout(t),
+  );
+}
+
+function formatReactionsHttpError(
+  status: number,
+  raw: { code?: number; data?: { message?: string; retryAfterMs?: number } },
+): string {
+  const msg = raw.data?.message;
+  if (status === 403 || raw.code === 403) {
+    return (
+      msg ||
+      "403：赞踩密钥与服务器不一致，请清空或对齐「赞踩 API 密钥」与 FMZ_REACTIONS_SECRET"
+    );
+  }
+  if (status === 429 || raw.code === 429) {
+    const ra = raw.data?.retryAfterMs;
+    const base = msg || "操作太频繁，请稍后再试";
+    return typeof ra === "number" && ra > 0
+      ? `${base}（约 ${Math.ceil(ra / 1000)} 秒后可再试）`
+      : base;
+  }
+  if (msg) return msg;
+  return `HTTP ${status} ${JSON.stringify(raw)}`;
+}
+
+/** 从服务器拉取当前 project 下全部计数 */
+export async function loadMemberVotesFromServer(ctx: ReactionsClient): Promise<void> {
+  const seq = ++loadSeq;
+  memberLikesState.lastError = "";
+  memberDislikesState.lastError = "";
+  try {
+    const q = `project=${encodeURIComponent(ctx.projectKey)}`;
+    let res: Response;
     try {
-      if (typeof indexedDB !== "undefined") {
-        const [likes, dislikes] = await Promise.all([
-          readStore(STORE_LIKES),
-          readStore(STORE_DISLIKES),
-        ]);
-        Object.assign(memberLikesState.counts, likes);
-        Object.assign(memberDislikesState.counts, dislikes);
+      res = await fetchReactions(`${ctx.baseUrl}/api/votes?${q}`, {
+        headers: headersFor(ctx),
+      });
+    } catch (e) {
+      if (e instanceof Error && e.name === "AbortError") {
+        throw new Error(
+          `赞踩请求超时（${REACTIONS_FETCH_MS / 1000}s）：请确认 reactions-server 已启动（端口 8787）且反代 /__fmz_reactions 可用`,
+        );
       }
+      throw e;
+    }
+    const text = await res.text();
+    let raw: { code?: number; data?: { likes?: Record<string, number>; dislikes?: Record<string, number> } };
+    try {
+      raw = JSON.parse(text) as {
+        code?: number;
+        data?: { likes?: Record<string, number>; dislikes?: Record<string, number> };
+      };
     } catch {
-      /* 私密模式等 */
-    } finally {
+      const hint =
+        text.trim().startsWith("<") || text.includes("<!DOCTYPE")
+          ? "请确认已启动 reactions-server（npm run reactions-server）且 Vite/Nginx 已反代 /__fmz_reactions"
+          : "";
+      throw new Error(`赞踩列表非 JSON ${hint} HTTP ${res.status}`);
+    }
+    if (seq !== loadSeq) return;
+    if (!res.ok || raw.code !== 0 || !raw.data) {
+      throw new Error(formatReactionsHttpError(res.status, raw));
+    }
+    memberLikesState.counts = { ...(raw.data.likes ?? {}) };
+    memberDislikesState.counts = { ...(raw.data.dislikes ?? {}) };
+  } catch (e) {
+    if (seq !== loadSeq) return;
+    const msg = e instanceof Error ? e.message : String(e);
+    memberLikesState.lastError = msg;
+    memberDislikesState.lastError = msg;
+  } finally {
+    if (seq === loadSeq) {
       memberLikesState.ready = true;
       memberDislikesState.ready = true;
     }
-  })();
-  return loadPromise;
-}
-
-export function loadMemberLikes(): Promise<void> {
-  return loadMemberVotes();
-}
-
-async function bump(
-  state: typeof memberLikesState,
-  storeName: string,
-  id: string | number,
-): Promise<number> {
-  await loadMemberVotes();
-  const key = String(id);
-  let next: number;
-  try {
-    if (typeof indexedDB === "undefined") {
-      next = (state.counts[key] ?? 0) + 1;
-    } else {
-      next = await incrementStore(storeName, key);
-    }
-  } catch {
-    next = (state.counts[key] ?? 0) + 1;
   }
-  state.counts[key] = next;
-  return next;
 }
 
-/** 每次点击点赞 +1 */
-export async function addMemberLike(id: string | number): Promise<number> {
-  return bump(memberLikesState, STORE_LIKES, id);
+/** 兼容旧名 */
+export function loadMemberVotes(ctx: ReactionsClient): Promise<void> {
+  return loadMemberVotesFromServer(ctx);
 }
 
-/** 每次点击点踩 +1 */
-export async function addMemberDislike(id: string | number): Promise<number> {
-  return bump(memberDislikesState, STORE_DISLIKES, id);
+async function postInc(
+  ctx: ReactionsClient,
+  id: string | number,
+  kind: "like" | "dislike",
+): Promise<{ likes: number; dislikes: number }> {
+  let res: Response;
+  try {
+    res = await fetchReactions(`${ctx.baseUrl}/api/votes/inc`, {
+      method: "POST",
+      headers: headersFor(ctx, true),
+      body: JSON.stringify({
+        project: ctx.projectKey,
+        memberId: String(id),
+        kind,
+      }),
+    });
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new Error(
+        `赞踩请求超时（${REACTIONS_FETCH_MS / 1000}s）：请确认 reactions-server 已启动且 Nginx 反代 /__fmz_reactions 末尾带 /`,
+      );
+    }
+    throw e;
+  }
+  const text = await res.text();
+  let raw: {
+    code?: number;
+    data?: { likes?: number; dislikes?: number; message?: string };
+  };
+  try {
+    raw = JSON.parse(text) as {
+      code?: number;
+      data?: { likes?: number; dislikes?: number; message?: string };
+    };
+  } catch {
+    const hint =
+      text.trim().startsWith("<") || text.includes("<!DOCTYPE")
+        ? "（返回了 HTML：常见原因①未启动 reactions-server ② Nginx proxy_pass 未加尾斜杠 ③ 路径未反代）"
+        : "";
+    throw new Error(
+      `赞踩服务返回非 JSON ${hint} HTTP ${res.status}：${text.slice(0, 160)}`,
+    );
+  }
+  const data = raw.data;
+  const success =
+    res.ok &&
+    raw.code === 0 &&
+    data != null &&
+    typeof (data as { likes?: unknown }).likes === "number";
+
+  if (!success) {
+    throw new Error(
+      `赞踩同步失败 ${formatReactionsHttpError(res.status, raw)}`,
+    );
+  }
+  return {
+    likes: Number((data as { likes: number }).likes ?? 0),
+    dislikes: Number((data as { dislikes: number }).dislikes ?? 0),
+  };
+}
+
+export async function addMemberLike(id: string | number, ctx: ReactionsClient): Promise<number> {
+  if (!assertClientReactionAllowed(ctx, id)) {
+    return memberLikeCount(id);
+  }
+  const next = await postInc(ctx, id, "like");
+  recordLikeSuccess(ctx, id);
+  const k = String(id);
+  memberLikesState.counts[k] = next.likes;
+  memberDislikesState.counts[k] = next.dislikes;
+  return next.likes;
+}
+
+export async function addMemberDislike(id: string | number, ctx: ReactionsClient): Promise<number> {
+  if (!assertClientReactionAllowed(ctx, id)) {
+    return memberDislikeCount(id);
+  }
+  const next = await postInc(ctx, id, "dislike");
+  resetLikeStreak(ctx, id);
+  const k = String(id);
+  memberLikesState.counts[k] = next.likes;
+  memberDislikesState.counts[k] = next.dislikes;
+  return next.dislikes;
 }
 
 export function memberLikeCount(id: string | number): number {
@@ -140,4 +330,9 @@ export function memberLikeCount(id: string | number): number {
 
 export function memberDislikeCount(id: string | number): number {
   return memberDislikesState.counts[String(id)] ?? 0;
+}
+
+/** @deprecated 无本地库，仅保留接口避免误用 */
+export function loadMemberLikes(ctx: ReactionsClient): Promise<void> {
+  return loadMemberVotesFromServer(ctx);
 }

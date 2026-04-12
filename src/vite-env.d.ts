@@ -1,5 +1,8 @@
 /// <reference types="vite/client" />
 
+declare const __FMZ_RELEASE_LABEL__: string;
+declare const __FMZ_APP_VERSION__: string;
+
 declare module "*.vue" {
   import type { DefineComponent } from "vue";
   const component: DefineComponent<object, object, unknown>;
@@ -8,10 +11,6 @@ declare module "*.vue" {
 
 interface ImportMetaEnv {
   readonly VITE_API_BASE?: string;
-  /** package.json version，如 0.3.0 */
-  readonly VITE_APP_VERSION?: string;
-  /** 发布标签，如 v0.3（见 package.json 的 fmzReleaseLabel） */
-  readonly VITE_APP_RELEASE_LABEL?: string;
 }
 
 interface ImportMeta {

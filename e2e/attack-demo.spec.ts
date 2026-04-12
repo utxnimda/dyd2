@@ -15,6 +15,29 @@ const mockMoneyList = {
 };
 
 test("演示进攻效果：出现 hit 飘字与红闪类名", async ({ page }) => {
+  await page.route("**/__fmz_reactions/**", async (route) => {
+    const url = route.request().url();
+    if (url.includes("/api/votes?")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ code: 0, data: { likes: {}, dislikes: {} } }),
+      });
+      return;
+    }
+    if (url.includes("/api/votes/inc")) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: 0,
+          data: { memberId: "1", likes: 1, dislikes: 0 },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, body: "not found" });
+  });
   await page.route("**/dy888/money/list", async (route) => {
     await route.fulfill({
       status: 200,

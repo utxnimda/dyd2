@@ -2,6 +2,7 @@
 import { reactive, watch } from "vue";
 import type { StoredSettings } from "../settings";
 import { defaultSettings, saveSettings } from "../settings";
+import { FMZ_RELEASE_LABEL } from "../buildInfo";
 import { THEME_PRESETS, type ThemePresetId } from "../lib/themePresets";
 
 const props = defineProps<{ modelValue: StoredSettings }>();
@@ -11,8 +12,6 @@ const emit = defineEmits<{
 }>();
 
 const form = reactive<StoredSettings>({ ...props.modelValue });
-
-const releaseLabel = import.meta.env.VITE_APP_RELEASE_LABEL as string | undefined;
 
 const themeOptions: Array<{ value: ThemePresetId; label: string; hint?: string }> = [
   ...THEME_PRESETS.map((p) => ({
@@ -85,29 +84,11 @@ function save() {
   <header class="bar">
     <div class="brand">
       伐木训练营 · 数据面板
-      <span v-if="releaseLabel" class="release" :title="`构建 ${releaseLabel}`">{{ releaseLabel }}</span>
+      <span v-if="FMZ_RELEASE_LABEL" class="release" :title="`构建 ${FMZ_RELEASE_LABEL}`">{{
+        FMZ_RELEASE_LABEL
+      }}</span>
     </div>
     <div class="grid">
-      <label>
-        API 根路径
-        <input v-model="form.apiBase" placeholder="/__fmz_api 或 https://..." />
-      </label>
-      <label>
-        房间号 LIVE_ROOM
-        <input v-model="form.liveRoom" />
-      </label>
-      <label>
-        X-Project
-        <input v-model="form.xProject" />
-      </label>
-      <label>
-        积分比例 CURRENCY_PROPORTION
-        <input v-model.number="form.currencyProportion" type="number" min="1" />
-      </label>
-      <label class="wide">
-        Bearer Token
-        <input v-model="form.bearerToken" type="password" autocomplete="off" placeholder="从已登录站点复制" />
-      </label>
       <label class="wide theme-label">
         配色方案
         <select
@@ -181,8 +162,7 @@ function save() {
       <button type="button" class="primary" @click="save">保存并应用</button>
     </div>
     <p class="hint">
-      开发模式请保持 API 为 <code>/__fmz_api</code> 以走 Vite 代理；生产环境需自行解决跨域或同域反代。
-      切换配色会立即应用到全站 CSS 变量；点「保存并应用」写入本地，下次打开仍保留。预设已含背景、字色、边框与主按钮配色；选「自定义」可单独调背景与主文字色（次要色自动推导）。
+      切换配色会立即生效；点「保存并应用」写入本地。选「自定义」可单独调背景与主文字色（次要色自动推导）。
     </p>
   </header>
 </template>

@@ -1,10 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import SettingsBar from "./components/SettingsBar.vue";
 import CaptainCornersHud from "./components/CaptainCornersHud.vue";
 import PreliminaryPanel from "./components/PreliminaryPanel.vue";
 import UsersPanel from "./components/UsersPanel.vue";
 import TreasuryPanel from "./components/TreasuryPanel.vue";
+import { FMZ_RELEASE_LABEL } from "./buildInfo";
+import {
+  FMZ_REACTIONS_CLIENT_KEY,
+  loadMemberVotesFromServer,
+  reactionsClientFromSettings,
+} from "./lib/memberLikes";
 import { loadSettings, toClientConfig, type StoredSettings } from "./settings";
 import {
   applyThemeVarsToDocument,
@@ -39,10 +45,8 @@ function applyTheme() {
 const tab = ref<"pre" | "users" | "treasury">("pre");
 
 const captainHudOnly = ref(false);
-const releaseLabel = import.meta.env.VITE_APP_RELEASE_LABEL as string | undefined;
-
 function refreshDocTitle() {
-  const suffix = releaseLabel ? ` ${releaseLabel}` : "";
+  const suffix = FMZ_RELEASE_LABEL ? ` ${FMZ_RELEASE_LABEL}` : "";
   if (captainHudOnly.value) document.title = `金库看板${suffix}`;
   else document.title = `伐木训练营数据面板${suffix}`;
 }
@@ -54,6 +58,17 @@ function syncCaptainHudHash() {
 }
 
 const clientConfig = computed(() => toClientConfig(settings.value));
+
+const reactionsClient = computed(() => reactionsClientFromSettings(settings.value));
+provide(FMZ_REACTIONS_CLIENT_KEY, reactionsClient);
+
+watch(
+  reactionsClient,
+  (ctx) => {
+    void loadMemberVotesFromServer(ctx);
+  },
+  { deep: true, immediate: true },
+);
 
 const preRef = ref<InstanceType<typeof PreliminaryPanel> | null>(null);
 const usrRef = ref<InstanceType<typeof UsersPanel> | null>(null);

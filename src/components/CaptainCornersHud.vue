@@ -7,12 +7,18 @@ import {
   enrichMissingAvatarsFromDoseeing,
   resolveAvatarForNicknameDisplay,
 } from "../lib/doseeingAvatar";
+import { normalizeMoneyList, type CaptainMoneyCard } from "../lib/captainTeams";
 import {
-  CAPTAIN_COUNT,
-  captainTeamsFromCards,
-  normalizeMoneyList,
-  type CaptainMoneyCard,
-} from "../lib/captainTeams";
+  captainTeamsFromRoster,
+  hudBottomTeamFromRoster,
+  hudOtherMembersFromRoster,
+} from "../lib/rosterClassify";
+import {
+  clearRosterStore,
+  initRosterFromFetchedCards,
+  loadRosterMap,
+  type RosterEntry,
+} from "../lib/rosterDb";
 import type { FlyActorHint } from "../lib/recordSource";
 import { inferFlyActorFromRecord } from "../lib/recordSource";
 import type { ApiListResponse, MoneyCard, MoneyRecord } from "../types";
@@ -41,17 +47,44 @@ const err = ref("");
 const paused = ref(false);
 
 const cards = shallowRef<CaptainMoneyCard[]>([]);
+/** IndexedDB 团员档案（队长槽位、预赛名次）；分类以库为准，不按列表第 16 位之后推断 */
+const rosterMap = shallowRef(new Map<string, RosterEntry>());
 /** 界面展示的队长余额（动画结束后才追上服务器） */
 const displayBalance = ref<Record<string, number>>({});
 /** 最近一次拉取到的余额 */
 const serverBalance = ref<Record<string, number>>({});
 
-const teams = computed(() => captainTeamsFromCards(cards.value));
+const teams = computed(() =>
+  rosterMap.value.size
+    ? captainTeamsFromRoster(cards.value, rosterMap.value)
+    : [],
+);
 
 const allCaptains = computed(() => {
   const out: CaptainMoneyCard[] = [];
   for (const t of teams.value) out.push(...t.members);
   return out;
+});
+
+/** 非预赛 48 名单、非队长 — 看板上方中间 */
+const otherMembers = computed(() =>
+  rosterMap.value.size
+    ? hudOtherMembersFromRoster(cards.value, rosterMap.value)
+    : [],
+);
+/** 预赛 48 名单内、非队长 — 看板下方中间 */
+const bottomTeam = computed(() =>
+  rosterMap.value.size
+    ? hudBottomTeamFromRoster(cards.value, rosterMap.value)
+    : [],
+);
+/** 所有参与加减分动画与轮询的成员（去重） */
+const allBoardTargets = computed(() => {
+  const m = new Map<string, CaptainMoneyCard>();
+  for (const c of allCaptains.value) m.set(balKey(c.id), c);
+  for (const c of otherMembers.value) m.set(balKey(c.id), c);
+  for (const c of bottomTeam.value) m.set(balKey(c.id), c);
+  return [...m.values()];
 });
 
 type QueueItem = {
@@ -207,7 +240,7 @@ function mergeQueueFromServer() {
   const srv = serverBalance.value;
   const disp = displayBalance.value;
   const q = queue.value;
-  for (const c of allCaptains.value) {
+  for (const c of allBoardTargets.value) {
     const id = c.id;
     const k = balKey(id);
     const want = srv[k];
@@ -366,7 +399,9 @@ async function processQueueLoop() {
   if (!item) return;
   processing = true;
   try {
-    const target = allCaptains.value.find((c) => balKey(c.id) === balKey(item.targetId));
+    const target = allBoardTargets.value.find(
+      (c) => balKey(c.id) === balKey(item.targetId),
+    );
     if (!target?.card) {
       queue.value = queue.value.slice(1);
       mergeQueueFromServer();
@@ -384,7 +419,7 @@ async function processQueueLoop() {
     const record = await fetchLatestRecord(String(target.card));
     let actor = inferFlyActorFromRecord(
       record,
-      allCaptains.value,
+      allBoardTargets.value,
       k,
       String(target.name ?? "").trim(),
     );
@@ -405,14 +440,58 @@ async function processQueueLoop() {
   }
 }
 
-async function tick() {
-  if (paused.value) return;
+function boardBalanceIdSet(
+  list: CaptainMoneyCard[],
+  roster: Map<string, RosterEntry>,
+): Set<string> {
+  const keys = new Set<string>();
+  for (const e of roster.values()) {
+    if (e.captainSlot != null) keys.add(e.id);
+  }
+  for (const c of hudBottomTeamFromRoster(list, roster)) keys.add(balKey(c.id));
+  for (const c of hudOtherMembersFromRoster(list, roster)) keys.add(balKey(c.id));
+  return keys;
+}
+
+async function resetLocalRoster() {
+  if (
+    !window.confirm(
+      "确定清空本地团员档案（IndexedDB）？下次刷新会按当前金库列表重新写入队长槽位与预赛 48 名次。",
+    )
+  ) {
+    return;
+  }
+  err.value = "";
+  try {
+    await clearRosterStore();
+    rosterMap.value = new Map();
+    await tick(true);
+  } catch (e: unknown) {
+    err.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+async function tick(force = false) {
+  if (!force && paused.value) return;
   try {
     const list = await fetchCards();
+    try {
+      await initRosterFromFetchedCards(list);
+      rosterMap.value = await loadRosterMap();
+    } catch (e: unknown) {
+      err.value =
+        e instanceof Error
+          ? `本地团员库失败：${e.message}`
+          : "本地团员库失败（请检查浏览器是否允许 IndexedDB）";
+      rosterMap.value = new Map();
+      cards.value = list;
+      return;
+    }
     cards.value = list;
     const nextSrv: Record<string, number> = {};
+    const keys = boardBalanceIdSet(list, rosterMap.value);
     for (const c of list) {
-      if (c._orderIndex < CAPTAIN_COUNT) {
+      if (keys.has(balKey(c.id))) {
         nextSrv[balKey(c.id)] = Number(c.balance ?? 0);
       }
     }
@@ -438,7 +517,7 @@ async function manualLoad() {
   loading.value = true;
   err.value = "";
   try {
-    await tick();
+    await tick(true);
   } finally {
     loading.value = false;
   }
@@ -478,7 +557,7 @@ async function demoAttackHit() {
 function startPoll() {
   stopPoll();
   pollTimer = setInterval(() => {
-    void tick();
+    void tick(false);
   }, pollInterval.value);
 }
 
@@ -514,6 +593,15 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
       </button>
       <button
         type="button"
+        class="btn"
+        :disabled="loading"
+        title="清空 IndexedDB 团员档案后，下次拉取按当前列表重新生成"
+        @click="resetLocalRoster"
+      >
+        重置本地团员
+      </button>
+      <button
+        type="button"
         class="btn btn-demo"
         :disabled="loading || allCaptains.length < 2 || processing"
         title="先暂停轮询可避免下次刷新把演示余额同步回去"
@@ -524,19 +612,153 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
     </div>
     <p v-if="err" class="err">{{ err }}</p>
 
-    <div ref="boardFlyHubRef" class="corners">
-      <div
-        v-for="team in teams"
-        :key="team.label"
-        class="corner"
-        :class="'corner-' + team.corner"
-        :style="{ '--accent': team.accent }"
-      >
-        <div class="team-tag">{{ team.label }}队</div>
-        <div class="members">
+    <div ref="boardFlyHubRef" class="board">
+      <div v-if="otherMembers.length" class="strip strip--other">
+        <div class="strip-inner">
           <div
-            v-for="c in team.members"
-            :key="String(c.id)"
+            v-for="c in otherMembers"
+            :key="'o-' + String(c.id)"
+            class="slot"
+            :class="{
+              ishit: hitIds.has(balKey(c.id)),
+              isheal: healIds.has(balKey(c.id)),
+            }"
+          >
+            <div class="slot-inner">
+              <div class="av-wrap">
+                <img
+                  v-if="c.avatar"
+                  class="av"
+                  :data-captain-anchor="balKey(c.id)"
+                  :src="c.avatar"
+                  alt=""
+                  referrerpolicy="no-referrer"
+                />
+                <div
+                  v-else
+                  class="av ph"
+                  :data-captain-anchor="balKey(c.id)"
+                />
+                <div class="parked-stack" aria-hidden="true">
+                  <div
+                    v-for="p in parkedNear.filter((x) => x.targetKey === balKey(c.id))"
+                    :key="p.key"
+                    class="parked-item"
+                  >
+                    <img
+                      class="parked-mini"
+                      :src="p.src"
+                      alt=""
+                      referrerpolicy="no-referrer"
+                    />
+                    <span class="parked-name">{{ p.name }}</span>
+                  </div>
+                </div>
+                <div
+                  v-for="f in floaters.filter((x) => x.id === balKey(c.id))"
+                  :key="f.key"
+                  class="floater"
+                  :class="f.kind"
+                  :style="{ '--f-stack': f.stackIndex }"
+                >
+                  {{ f.text }}
+                </div>
+              </div>
+              <div class="hud-reactions">
+                <MemberLikeButton :member-id="c.id" variant="hud" />
+                <MemberDislikeButton :member-id="c.id" variant="hud" />
+              </div>
+              <div class="meta">
+                <div class="nm">{{ c.name }}</div>
+                <div class="pts">
+                  {{ (displayBalance[balKey(c.id)] ?? 0).toLocaleString() }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="corners">
+        <div
+          v-for="team in teams"
+          :key="team.label"
+          class="corner"
+          :class="'corner-' + team.corner"
+          :style="{ '--accent': team.accent }"
+        >
+          <div class="team-tag">{{ team.label }}队</div>
+          <div class="members">
+            <div
+              v-for="c in team.members"
+              :key="String(c.id)"
+              class="slot"
+              :class="{
+                ishit: hitIds.has(balKey(c.id)),
+                isheal: healIds.has(balKey(c.id)),
+              }"
+            >
+              <div class="slot-inner">
+                <div class="av-wrap">
+                  <img
+                    v-if="c.avatar"
+                    class="av"
+                    :data-captain-anchor="balKey(c.id)"
+                    :src="c.avatar"
+                    alt=""
+                    referrerpolicy="no-referrer"
+                  />
+                  <div
+                    v-else
+                    class="av ph"
+                    :data-captain-anchor="balKey(c.id)"
+                  />
+                  <div class="parked-stack" aria-hidden="true">
+                    <div
+                      v-for="p in parkedNear.filter((x) => x.targetKey === balKey(c.id))"
+                      :key="p.key"
+                      class="parked-item"
+                    >
+                      <img
+                        class="parked-mini"
+                        :src="p.src"
+                        alt=""
+                        referrerpolicy="no-referrer"
+                      />
+                      <span class="parked-name">{{ p.name }}</span>
+                    </div>
+                  </div>
+                  <div
+                    v-for="f in floaters.filter((x) => x.id === balKey(c.id))"
+                    :key="f.key"
+                    class="floater"
+                    :class="f.kind"
+                    :style="{ '--f-stack': f.stackIndex }"
+                  >
+                    {{ f.text }}
+                  </div>
+                </div>
+                <div class="hud-reactions">
+                  <MemberLikeButton :member-id="c.id" variant="hud" />
+                  <MemberDislikeButton :member-id="c.id" variant="hud" />
+                </div>
+                <div class="meta">
+                  <div class="nm">{{ c.name }}</div>
+                  <div class="pts">
+                    {{ (displayBalance[balKey(c.id)] ?? 0).toLocaleString() }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="bottomTeam.length" class="strip strip--bottom">
+        <div class="strip-inner">
+          <div
+            v-for="c in bottomTeam"
+            :key="'b-' + String(c.id)"
             class="slot"
             :class="{
               ishit: hitIds.has(balKey(c.id)),
@@ -670,6 +892,34 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
   color: var(--danger, #ff6b6b);
   font-size: 0.8rem;
   margin: 0 0 0.35rem;
+}
+
+.board {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.strip {
+  border-radius: 12px;
+  padding: 0.4rem 0.45rem 0.5rem;
+  border: 2px solid color-mix(in srgb, var(--accent) 42%, var(--border, #2d3a4d));
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface, #1a2332));
+  overflow: visible;
+}
+.strip--other {
+  --accent: #e9b949;
+}
+.strip--bottom {
+  --accent: #5eb0e8;
+}
+.strip-inner {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 0.35rem 0.5rem;
+  overflow: visible;
 }
 
 .corners {

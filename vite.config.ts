@@ -29,13 +29,32 @@ const apiProxy = {
     secure: true,
     rewrite: (p: string) => p.replace(/^\/doseeing/, ""),
   },
+  /** 赞踩 SQLite服务：本地先 `cd server && npm i && npm start` */
+  "/__fmz_reactions": {
+    target: "http://127.0.0.1:8787",
+    changeOrigin: true,
+    rewrite: (p) => p.replace(/^\/__fmz_reactions/, ""),
+  },
 } as const;
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    {
+      name: "fmz-index-version",
+      transformIndexHtml(html) {
+        const esc = (s: string) =>
+          s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+        return html.replace(
+          "<html lang=\"zh-CN\">",
+          `<html lang="zh-CN" data-fmz-version="${esc(pkg.version)}" data-fmz-label="${esc(releaseLabel)}">`,
+        );
+      },
+    },
+  ],
   define: {
-    "import.meta.env.VITE_APP_RELEASE_LABEL": JSON.stringify(releaseLabel),
-    "import.meta.env.VITE_APP_VERSION": JSON.stringify(pkg.version),
+    __FMZ_RELEASE_LABEL__: JSON.stringify(releaseLabel),
+    __FMZ_APP_VERSION__: JSON.stringify(pkg.version),
   },
   server: {
     /** 显式0.0.0.0：本机局域网请用 http://内网IP:5173，不要用公网 IP（多数路由器不支持回环） */
