@@ -51,13 +51,14 @@ let loadSeq = 0;
 /** 客户端：两次操作之间的基础间隔（毫秒） */
 export const CLIENT_REACTION_BASE_COOLDOWN_MS = 500;
 
-/** 连续成功点赞间隔小于此值（毫秒）视为同一段「连点」，累加 streak */
-const RAPID_LIKE_STREAK_WINDOW_MS = 4000;
+/** 连续成功赞或踩的间隔小于此值（毫秒）视为同一段「连点」，分别累加各自 streak */
+const RAPID_REACTION_STREAK_WINDOW_MS = 4000;
 
 /**
- * 连续成功点赞达到该次数后，下一次起在基础间隔上额外加长冷却（仅点赞累计，点踩会清零）。
+ * 连续成功「赞」或「踩」各自计数；达到该次数后，该操作类型在基础间隔上额外加长冷却。
+ * 赞/踩互不干扰；不同成员互不干扰（键含 projectKey + memberId）。
  */
-const LIKE_STREAK_THRESHOLD = 5;
+const REACTION_STREAK_THRESHOLD = 5;
 
 /** 每多1 次 streak，在基础间隔上多加的毫秒数（封顶见下） */
 const COOLDOWN_EXTRA_PER_STREAK_MS = 550;
@@ -66,10 +67,12 @@ const COOLDOWN_EXTRA_PER_STREAK_MS = 550;
 const CLIENT_REACTION_COOLDOWN_MAX_MS = 4000;
 
 type ClientReactionSlot = {
-  lastReactionAt: number;
-  /** 当前连续「快点赞」成功次数（在窗口内累加） */
+  lastLikeAt: number;
   likeStreak: number;
   lastLikeSuccessAt: number;
+  lastDislikeAt: number;
+  dislikeStreak: number;
+  lastDislikeSuccessAt: number;
 };
 
 const clientSlots = new Map<string, ClientReactionSlot>();
@@ -81,18 +84,21 @@ function clientReactionKey(ctx: ReactionsClient, memberId: string | number): str
 function getSlot(k: string): ClientReactionSlot {
   return (
     clientSlots.get(k) ?? {
-      lastReactionAt: 0,
+      lastLikeAt: 0,
       likeStreak: 0,
       lastLikeSuccessAt: 0,
+      lastDislikeAt: 0,
+      dislikeStreak: 0,
+      lastDislikeSuccessAt: 0,
     }
   );
 }
 
-function effectiveCooldownMs(likeStreak: number): number {
-  if (likeStreak < LIKE_STREAK_THRESHOLD) {
+function effectiveCooldownMs(streak: number): number {
+  if (streak < REACTION_STREAK_THRESHOLD) {
     return CLIENT_REACTION_BASE_COOLDOWN_MS;
   }
-  const over = likeStreak - LIKE_STREAK_THRESHOLD + 1;
+  const over = streak - REACTION_STREAK_THRESHOLD + 1;
   const extra = over * COOLDOWN_EXTRA_PER_STREAK_MS;
   return Math.min(CLIENT_REACTION_COOLDOWN_MAX_MS, CLIENT_REACTION_BASE_COOLDOWN_MS + extra);
 }
@@ -106,7 +112,7 @@ function recordLikeSuccess(ctx: ReactionsClient, memberId: string | number): voi
   const slot = getSlot(k);
   if (
     slot.lastLikeSuccessAt > 0 &&
-    now - slot.lastLikeSuccessAt <= RAPID_LIKE_STREAK_WINDOW_MS
+    now - slot.lastLikeSuccessAt <= RAPID_REACTION_STREAK_WINDOW_MS
   ) {
     slot.likeStreak += 1;
   } else {
@@ -116,28 +122,44 @@ function recordLikeSuccess(ctx: ReactionsClient, memberId: string | number): voi
   clientSlots.set(k, slot);
 }
 
-function resetLikeStreak(ctx: ReactionsClient, memberId: string | number): void {
+function recordDislikeSuccess(ctx: ReactionsClient, memberId: string | number): void {
   const k = clientReactionKey(ctx, memberId);
+  const now = Date.now();
   const slot = getSlot(k);
-  slot.likeStreak = 0;
-  slot.lastLikeSuccessAt = 0;
+  if (
+    slot.lastDislikeSuccessAt > 0 &&
+    now - slot.lastDislikeSuccessAt <= RAPID_REACTION_STREAK_WINDOW_MS
+  ) {
+    slot.dislikeStreak += 1;
+  } else {
+    slot.dislikeStreak = 1;
+  }
+  slot.lastDislikeSuccessAt = now;
   clientSlots.set(k, slot);
 }
 
-/** 过短间隔内再次点击返回 false（静默忽略，不请求服务器） */
+/** 过短间隔内再次点击返回 false（静默忽略，不请求服务器）。赞/踩、不同成员各自独立计时。 */
 export function assertClientReactionAllowed(
   ctx: ReactionsClient,
   memberId: string | number,
+  kind: "like" | "dislike",
 ): boolean {
   const k = clientReactionKey(ctx, memberId);
   const now = Date.now();
   const slot = getSlot(k);
-  const needMs = effectiveCooldownMs(slot.likeStreak);
-  const elapsed = now - slot.lastReactionAt;
-  if (elapsed < needMs) {
-    return false;
+  if (kind === "like") {
+    const needMs = effectiveCooldownMs(slot.likeStreak);
+    if (now - slot.lastLikeAt < needMs) {
+      return false;
+    }
+    slot.lastLikeAt = now;
+  } else {
+    const needMs = effectiveCooldownMs(slot.dislikeStreak);
+    if (now - slot.lastDislikeAt < needMs) {
+      return false;
+    }
+    slot.lastDislikeAt = now;
   }
-  slot.lastReactionAt = now;
   clientSlots.set(k, slot);
   return true;
 }
@@ -301,7 +323,7 @@ async function postInc(
 }
 
 export async function addMemberLike(id: string | number, ctx: ReactionsClient): Promise<number> {
-  if (!assertClientReactionAllowed(ctx, id)) {
+  if (!assertClientReactionAllowed(ctx, id, "like")) {
     return memberLikeCount(id);
   }
   const next = await postInc(ctx, id, "like");
@@ -313,11 +335,11 @@ export async function addMemberLike(id: string | number, ctx: ReactionsClient): 
 }
 
 export async function addMemberDislike(id: string | number, ctx: ReactionsClient): Promise<number> {
-  if (!assertClientReactionAllowed(ctx, id)) {
+  if (!assertClientReactionAllowed(ctx, id, "dislike")) {
     return memberDislikeCount(id);
   }
   const next = await postInc(ctx, id, "dislike");
-  resetLikeStreak(ctx, id);
+  recordDislikeSuccess(ctx, id);
   const k = String(id);
   memberLikesState.counts[k] = next.likes;
   memberDislikesState.counts[k] = next.dislikes;
