@@ -1904,7 +1904,8 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
   left: 50%;
   top: 50%;
   z-index: 2;
-  translate: -50% -50%;
+  /* 勿用独立属性 translate：部分手机 WebKit 支持不完整，会忽略导致太极左上角顶在圆心、整体偏位 */
+  transform: translate(-50%, -50%);
   pointer-events: none;
 }
 .orbit-slot {
