@@ -76,12 +76,12 @@ async function onClick(e: MouseEvent) {
   padding: 0.2rem 0.35rem;
   border: 1px solid color-mix(in srgb, var(--muted, #8b9cb3) 55%, var(--border, #2d3a4d));
   border-radius: 999px;
-  background: color-mix(in srgb, var(--surface, #1a2332) 88%, rgba(0, 0, 0, 0.35));
+  background: color-mix(in srgb, var(--surface, #1a2332) 88%, var(--bg, #0f1419) 12%);
   color: var(--muted, #a8b8cc);
   cursor: pointer;
   line-height: 1;
   font: inherit;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--bg, #0f1419) 48%, transparent);
 }
 .dis-btn:hover {
   filter: brightness(1.12);
@@ -120,8 +120,10 @@ async function onClick(e: MouseEvent) {
 .dis-tile {
   padding: 0.22rem 0.4rem;
   font-size: 0.75rem;
-  background: rgba(15, 20, 28, 0.82);
-  backdrop-filter: blur(4px);
+  background: color-mix(in srgb, var(--surface, #1a2332) 86%, var(--bg, #0f1419) 14%);
+  border-color: color-mix(in srgb, var(--border, #2d3a4d) 72%, var(--muted, #8b9cb3) 18%);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--bg, #0f1419) 40%, transparent);
 }
 .dis-tile .thumb {
   width: 14px;

@@ -6,10 +6,10 @@ import { enrichMissingAvatarsFromDoseeing } from "../lib/doseeingAvatar";
 import {
   CAPTAIN_COUNT,
   captainTeamsFromCards,
+  hudBottomTeam,
+  hudOtherMembers,
   normalizeMoneyList,
-  TEAM_COUNT,
   TEAM_DEFS,
-  TEAM_SIZE,
   type CaptainMoneyCard,
 } from "../lib/captainTeams";
 import { extractRecordSourceLabel } from "../lib/recordSource";
@@ -28,10 +28,25 @@ const cards = ref<TreasuryCard[]>([]);
 
 /** 排序：原列表顺序 | 积分高→低 | 积分低→高 */
 const sortMode = ref<"original" | "balance_desc" | "balance_asc">("original");
-/** 显示范围 */
-const roleFilter = ref<"all" | "captain" | "member">("all");
+/** 筛选：多选并集；仅勾选「队长」且未勾选其余两项时走四阵营分行布局 */
+const filterCaptain = ref(true);
+const filterPreliminary = ref(true);
+const filterOther = ref(true);
 
-/** 仅队长模式：每行一队（紫/绿/蓝/粉），队内顺序可随积分排序变化 */
+const hasAnyFilter = computed(
+  () => filterCaptain.value || filterPreliminary.value || filterOther.value,
+);
+
+const showCaptainTeamRows = computed(
+  () =>
+    filterCaptain.value && !filterPreliminary.value && !filterOther.value,
+);
+
+const preliminaryMemberIds = computed(() =>
+  new Set(hudBottomTeam(cards.value).map((c) => String(c.id))),
+);
+
+/** 仅队长模式：每行一阵营（A/B/C/D），阵营内顺序可随积分排序变化 */
 const captainTeamRows = computed(() => {
   const rows = captainTeamsFromCards(cards.value);
   if (sortMode.value === "original") return rows;
@@ -51,11 +66,22 @@ const captainShownCount = computed(() =>
 );
 
 const displayCards = computed(() => {
-  if (roleFilter.value === "captain") return [];
-  let list = [...cards.value];
-  if (roleFilter.value === "member") {
-    list = list.filter((c) => c._orderIndex >= CAPTAIN_COUNT);
+  if (showCaptainTeamRows.value) return [];
+  if (!hasAnyFilter.value) return [];
+
+  const src = cards.value;
+  const parts: TreasuryCard[] = [];
+  if (filterCaptain.value) {
+    parts.push(...src.filter((c) => c._orderIndex < CAPTAIN_COUNT));
   }
+  if (filterPreliminary.value) {
+    parts.push(...hudBottomTeam(src));
+  }
+  if (filterOther.value) {
+    parts.push(...hudOtherMembers(src));
+  }
+
+  const list = [...parts];
   if (sortMode.value === "balance_desc") {
     list.sort((a, b) => Number(b.balance ?? 0) - Number(a.balance ?? 0));
   } else if (sortMode.value === "balance_asc") {
@@ -190,38 +216,41 @@ defineExpose({ reload: loadCards });
       </button>
     </div>
     <div class="toolbar">
-      <label class="field">
-        <span class="lbl">按积分排序</span>
-        <select v-model="sortMode" class="sel">
-          <option value="original">原列表顺序（与接口一致）</option>
+      <div class="field">
+        <select v-model="sortMode" class="sel" aria-label="排序">
+          <option value="original">默认排序</option>
           <option value="balance_desc">积分从高到低</option>
           <option value="balance_asc">积分从低到高</option>
         </select>
-      </label>
-      <label class="field">
-        <span class="lbl">显示范围</span>
-        <select v-model="roleFilter" class="sel">
-          <option value="all">全部</option>
-          <option value="captain">仅队长（4 队：紫/绿/蓝/粉，每行一队）</option>
-          <option value="member">仅非队长（第 {{ CAPTAIN_COUNT + 1 }} 人及之后）</option>
-        </select>
-      </label>
-      <span v-if="roleFilter === 'captain'" class="count muted">
-        队长共 {{ captainShownCount }} 人 · 分 {{ TEAM_COUNT }} 队（每队最多 {{ TEAM_SIZE }} 人）
-      </span>
-      <span v-else class="count muted">当前展示 {{ displayCards.length }} 人</span>
+      </div>
+      <div class="field filter-field">
+        <div class="filter-checks" role="group" aria-label="成员筛选">
+          <label class="chk">
+            <input v-model="filterCaptain" type="checkbox" />
+            队长
+          </label>
+          <label class="chk">
+            <input v-model="filterPreliminary" type="checkbox" />
+            预赛人员
+          </label>
+          <label class="chk">
+            <input v-model="filterOther" type="checkbox" />
+            其他
+          </label>
+        </div>
+      </div>
     </div>
     <p v-if="err" class="err">{{ err }}</p>
 
-    <!-- 仅队长：每行一队，紫 / 绿 / 蓝 / 粉 -->
-    <div v-if="roleFilter === 'captain'" class="team-rows">
+    <!-- 仅队长：每行一阵营 A–D -->
+    <div v-if="showCaptainTeamRows" class="team-rows">
       <div
         v-for="team in captainTeamRows"
         :key="team.label"
         class="team-row"
         :style="{ '--team-accent': team.accent }"
       >
-        <div class="team-head">{{ team.label }}队</div>
+        <div class="team-head">{{ team.label }} 阵营</div>
         <div class="team-grid">
           <button
             v-for="c in team.members"
@@ -247,8 +276,8 @@ defineExpose({ reload: loadCards });
       </div>
     </div>
 
-    <div v-else class="grid-wrap">
-      <div class="grid">
+    <div v-else class="grid-wrap grid-wrap--mixed">
+      <div class="grid-mixed">
         <button
           v-for="c in displayCards"
           :key="String(c.id)"
@@ -268,6 +297,8 @@ defineExpose({ reload: loadCards });
             <div class="nm">
               {{ c.name }}
               <span v-if="c._orderIndex < CAPTAIN_COUNT" class="badge">队长</span>
+              <span v-else-if="preliminaryMemberIds.has(String(c.id))" class="badge badge-pre">预赛</span>
+              <span v-else class="badge badge-oth">其他</span>
             </div>
             <div class="bal">余额 {{ (c.balance ?? 0).toLocaleString() }}</div>
           </div>
@@ -276,13 +307,16 @@ defineExpose({ reload: loadCards });
     </div>
     <p v-if="!loading && !cards.length" class="muted">暂无卡片</p>
     <p
-      v-else-if="!loading && cards.length && roleFilter === 'captain' && captainShownCount === 0"
+      v-else-if="!loading && cards.length && showCaptainTeamRows && captainShownCount === 0"
       class="muted"
     >
       暂无队长数据
     </p>
+    <p v-else-if="!loading && cards.length && !hasAnyFilter" class="muted">
+      请至少勾选一项筛选
+    </p>
     <p
-      v-else-if="!loading && cards.length && roleFilter !== 'captain' && !displayCards.length"
+      v-else-if="!loading && cards.length && hasAnyFilter && !showCaptainTeamRows && !displayCards.length"
       class="muted"
     >
       当前筛选下没有成员
@@ -363,7 +397,7 @@ defineExpose({ reload: loadCards });
 .toolbar {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: center;
   gap: 1rem 1.5rem;
   margin-top: 0.75rem;
   padding: 0.75rem 0;
@@ -379,16 +413,41 @@ defineExpose({ reload: loadCards });
   color: var(--muted);
 }
 .sel {
+  box-sizing: border-box;
   min-width: 220px;
-  padding: 0.4rem 0.6rem;
+  min-height: 1.75rem;
+  padding: 0 0.65rem;
+  font-size: 0.9rem;
+  line-height: 1.75rem;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
 }
-.count {
-  font-size: 0.85rem;
-  align-self: center;
+.filter-field {
+  min-width: 0;
+}
+.filter-checks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem 1rem;
+}
+.chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 1.75rem;
+  font-size: 0.9rem;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.chk input {
+  accent-color: var(--primary);
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
 }
 .badge {
   margin-left: 0.35rem;
@@ -399,6 +458,16 @@ defineExpose({ reload: loadCards });
   background: var(--primary);
   color: var(--on-primary);
   vertical-align: middle;
+}
+.badge-pre {
+  background: color-mix(in srgb, var(--accent) 35%, var(--surface));
+  color: color-mix(in srgb, var(--accent) 88%, var(--text));
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.badge-oth {
+  background: color-mix(in srgb, var(--muted) 28%, var(--surface));
+  color: var(--muted);
+  border: 1px solid var(--border);
 }
 h2 {
   margin: 0;
@@ -423,7 +492,7 @@ button.primary {
   padding: 0.75rem 1rem 1rem;
   border: 2px solid var(--team-accent, var(--border));
   background: color-mix(in srgb, var(--team-accent) 12%, var(--surface));
-  /* 每行固定 4 列且单列不小于 160px（与 .grid-wrap/.grid 一致），窄屏横向滚动而非改行数 */
+  /* 每行固定 4 列且单列不小于 160px；仅队长模式专用，窄屏横向滚动 */
   overflow-x: auto;
 }
 .team-head {
@@ -433,6 +502,7 @@ button.primary {
   color: var(--team-accent);
   letter-spacing: 0.08em;
 }
+/* 仅「只选队长」：每阵营独占一行，行内固定 4 列，不同阵营不会出现在同一行 */
 .team-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(160px, 1fr));
@@ -444,11 +514,14 @@ button.primary {
   overflow-x: auto;
   margin-top: 1rem;
 }
-.grid {
+/* 混合筛选：不按阵营分行，用自适应列宽与统一间距即可 */
+.grid-wrap--mixed {
+  overflow-x: visible;
+}
+.grid-mixed {
   display: grid;
-  grid-template-columns: repeat(4, minmax(160px, 1fr));
-  gap: 1rem;
-  min-width: calc(4 * 160px + 3 * 1rem);
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 1.15rem;
 }
 .tile {
   position: relative;

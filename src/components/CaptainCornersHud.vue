@@ -583,7 +583,7 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
 <template>
   <section class="hud" :class="{ 'no-controls': !showToolbar }">
     <div v-if="showToolbar" class="bar">
-      <span class="title">队长四角看板</span>
+      <span class="title">战斗爽</span>
       <label class="pause">
         <input v-model="paused" type="checkbox" />
         暂停轮询
@@ -687,7 +687,7 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
           :class="'corner-' + team.corner"
           :style="{ '--accent': team.accent }"
         >
-          <div class="team-tag">{{ team.label }}队</div>
+          <div class="team-tag">{{ team.label }} 阵营</div>
           <div class="members">
             <div
               v-for="c in team.members"
@@ -1097,15 +1097,20 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
   height: 20px;
   border-radius: 50%;
   object-fit: cover;
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  border: 1px solid color-mix(in srgb, var(--border, #2d3a4d) 85%, var(--text, #e8eef7) 15%);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--bg, #0f1419) 55%, transparent);
   flex-shrink: 0;
 }
 .parked-name {
   font-size: 0.58rem;
   font-weight: 800;
   color: var(--text, #e8eef7);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+  background: color-mix(in srgb, var(--surface, #1a2332) 92%, var(--bg, #0f1419) 8%);
+  border: 1px solid color-mix(in srgb, var(--border, #2d3a4d) 75%, transparent);
+  border-radius: 5px;
+  padding: 1px 4px;
+  box-shadow: 0 1px 6px color-mix(in srgb, var(--bg, #0f1419) 45%, transparent);
+  text-shadow: 0 1px 2px color-mix(in srgb, var(--bg, #0f1419) 70%, transparent);
   max-width: 4.2rem;
   text-align: right;
   line-height: 1.05;
@@ -1181,21 +1186,26 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
 .fly-avatar-layer .fly-mover-pin {
   border-radius: 50%;
   overflow: hidden;
-  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.5);
-  border: 1.5px solid rgba(255, 255, 255, 0.38);
+  box-shadow: 0 3px 14px color-mix(in srgb, var(--bg, #0f1419) 60%, transparent);
+  border: 1.5px solid color-mix(in srgb, var(--border, #2d3a4d) 80%, var(--text, #e8eef7) 20%);
   flex-shrink: 0;
 }
 .fly-avatar-layer .fly-mover-name {
   font-size: 11px;
   font-weight: 800;
   line-height: 1.25;
-  color: var(--text);
+  color: var(--text, #e8eef7);
+  background: color-mix(in srgb, var(--surface, #1a2332) 93%, var(--bg, #0f1419) 7%);
+  border: 1px solid color-mix(in srgb, var(--border, #2d3a4d) 78%, transparent);
+  border-radius: 8px;
+  padding: 3px 8px;
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--bg, #0f1419) 50%, transparent);
   text-align: center;
   max-width: 96px;
   min-width: 0;
   width: max-content;
   max-height: 2.6em;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.95), 0 0 8px rgba(0, 0, 0, 0.6);
+  text-shadow: 0 1px 2px color-mix(in srgb, var(--bg, #0f1419) 72%, transparent);
   overflow: hidden;
   word-break: break-all;
   display: block;

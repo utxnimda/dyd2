@@ -8,7 +8,7 @@
 
 - 编辑仓库根目录 **`package.json`**：
   - **`version`**：语义化版本，如 `0.4.0`。
-  - **`fmzReleaseLabel`**：界面与归档目录名，如 `v0.4`（建议与主版本一致）。
+  - **`fmzReleaseLabel`**：界面与归档目录名，如 `v0.71`（可与 `version` 的展示约定一致，见下文示例）。
 - 同步根目录 **`package-lock.json`** 顶层 `"version"` 及 `packages[""].version`（与 `package.json` 的 `version` 一致）。
 - 构建时 **`vite.config.ts`** 会把 `version` / `fmzReleaseLabel` 注入为全局常量，并写入 **`index.html`** 的 `data-fmz-version`、`data-fmz-label`。
 
@@ -18,7 +18,7 @@
 dist/index.html 或 release/<fmzReleaseLabel>/index.html
 ```
 
-应含例如：`data-fmz-version="0.4.0"`、`data-fmz-label="v0.4"`。
+应含例如：`data-fmz-version="0.7.1"`、`data-fmz-label="v0.71"`。
 
 ---
 
@@ -42,15 +42,25 @@ npm run build
 
 ---
 
-## 3. 推代码（可选）
+## 3. 发布流程（推荐顺序：先入库，再推送）
 
-静态站点**不会**因 `git push` 自动更新。推送仅用于备份与协作：
+静态站点**不会**在 `git push` 后自动更新；**源码与文档**仍需先进入版本库并推送到远端，便于备份与协作。建议按下面顺序操作（与 §4的服务器同步相互独立）：
+
+1. **改版本号**：完成 §1（`package.json`、`package-lock.json` 顶层版本与 `fmzReleaseLabel`）。
+2. **本地打包自检**：执行 §2 的 `npm run pack`，打开 `release/<fmzReleaseLabel>/index.html` 或检查其中 `data-fmz-version` / `data-fmz-label` 是否为预期。
+3. **入库（Git 提交）**：提交本次发布相关的**源码与文档**（含 `package.json` / `package-lock.json`、`deploy/RELEASE_AND_DEPLOY.md` 等）。**不要**提交 `dist/`、`release/`（已在 `.gitignore`）。
+4. **推送到远端**：`git push` 到约定分支（如 `main`）。
+
+示例（分支名按仓库实际为准）：
 
 ```bash
 git add -A
-git commit -m "release: fmz-dashboard v0.4.0"
+git status
+git commit -m "release: fmz-dashboard v0.7.1 (v0.71)"
 git push origin main
 ```
+
+完成后再按 §4 将本机 **`release/<fmzReleaseLabel>/`** 同步到 Web 服务器。
 
 ---
 
@@ -67,9 +77,9 @@ git push origin main
 Set-Location "D:\path\to\fmz-dashboard"
 npm run pack
 scp -i "C:\path\to\YOUR_KEY.pem" -o StrictHostKeyChecking=accept-new `
-  -r .\release\v0.4\assets `
-  .\release\v0.4\index.html `
-  .\release\v0.4\BUILD_INFO.txt `
+  -r .\release\v0.71\assets `
+  .\release\v0.71\index.html `
+  .\release\v0.71\BUILD_INFO.txt `
   root@YOUR_SERVER_IP:/var/www/fmz-dashboard/
 ```
 
@@ -140,6 +150,8 @@ node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
 |------|------------|
 | 改版本 | 编辑 `package.json` + `package-lock.json` 顶层版本 |
 | 打包 | `npm run pack` → `release/<fmzReleaseLabel>/` |
+| 入库 | `git add` / `git commit`（勿提交 `release/`、`dist/`） |
+| 推送 | `git push origin main`（分支按实际） |
 | 上传静态 | `scp` 到 `/var/www/fmz-dashboard/` |
 | 验前端 | `curl -sk https://.../` 看 `data-fmz-version` |
 | 验赞踩 | `node scripts/check-reactions.mjs https://.../__fmz_reactions` |
@@ -160,8 +172,8 @@ node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
 | `.../#/pre/perround` | 预赛 · 每轮游戏排名 |
 | `.../#/pre/logging` | 预赛 · 按日预赛伐木值 |
 | `.../#/users` | 用户积分 |
-| `.../#/treasury` | 团员金库（含四角看板） |
-| `.../#captain-hud` 或 `.../#/captain-hud` | 仅四角看板全屏 |
+| `.../#/treasury` | 团员金库（含战斗爽） |
+| `.../#captain-hud` 或 `.../#/captain-hud` | 仅战斗爽全屏 |
 
 切换标签或预赛子页时，地址栏会 **`replaceState`** 同步（不刷屏历史条目）。
 

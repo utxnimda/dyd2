@@ -67,10 +67,10 @@ export const TEAM_SIZE = 4;
 export const TEAM_COUNT = CAPTAIN_COUNT / TEAM_SIZE;
 
 export const TEAM_DEFS = [
-  { label: "紫", accent: "#a855f7", corner: "tl" as const },
-  { label: "绿", accent: "#22c55e", corner: "tr" as const },
-  { label: "蓝", accent: "#3b82f6", corner: "bl" as const },
-  { label: "粉", accent: "#ec4899", corner: "br" as const },
+  { label: "A", accent: "#a855f7", corner: "tl" as const },
+  { label: "B", accent: "#22c55e", corner: "tr" as const },
+  { label: "C", accent: "#3b82f6", corner: "bl" as const },
+  { label: "D", accent: "#ec4899", corner: "br" as const },
 ] as const;
 
 export type CaptainMoneyCard = MoneyCard & {
@@ -96,7 +96,7 @@ export function normalizeMoneyList(
   });
 }
 
-/** 左上紫、右上绿、左下蓝、右下粉，每队最多 4 人 */
+/** 左上 A、右上 B、左下 C、右下 D 四阵营，每阵营最多 4 人 */
 export function captainTeamsFromCards(cards: CaptainMoneyCard[]) {
   const caps = cards
     .filter((c) => c._orderIndex < CAPTAIN_COUNT)

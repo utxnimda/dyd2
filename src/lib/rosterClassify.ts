@@ -1,7 +1,7 @@
 import { CAPTAIN_COUNT, TEAM_DEFS, TEAM_SIZE, type CaptainMoneyCard } from "./captainTeams";
 import type { RosterEntry } from "./rosterDb";
 
-/** 四角队长分区：按本地档案 captainSlot 0..15，再按紫/绿/蓝/粉切成四队 */
+/** 四角队长分区：按本地档案 captainSlot 0..15，再按 A/B/C/D 四阵营切分 */
 export function captainTeamsFromRoster(
   cards: CaptainMoneyCard[],
   roster: Map<string, RosterEntry>,

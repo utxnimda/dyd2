@@ -126,7 +126,7 @@ export async function mergeNewCardsIntoRoster(cards: CaptainMoneyCard[]): Promis
 
 /**
  * 与当前金库列表同步本地档案：首次写入；之后仅合并新 id。
- * 若本地队长槽位里过半数 id 已不在本次列表中，则整表重算（解决换届/换房间后四角看板空白）。
+ * 若本地队长槽位里过半数 id 已不在本次列表中，则整表重算（解决换届/换房间后战斗爽空白）。
  */
 export async function initRosterFromFetchedCards(
   cards: CaptainMoneyCard[],

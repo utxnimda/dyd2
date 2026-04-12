@@ -55,7 +55,7 @@ const prePanelTab = ref<PrePanelTab>("total");
 const captainHudOnly = ref(false);
 function refreshDocTitle() {
   const suffix = FMZ_RELEASE_LABEL ? ` ${FMZ_RELEASE_LABEL}` : "";
-  if (captainHudOnly.value) document.title = `金库看板${suffix}`;
+  if (captainHudOnly.value) document.title = `战斗爽${suffix}`;
   else document.title = `伐木训练营数据面板${suffix}`;
 }
 
