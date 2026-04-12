@@ -10,6 +10,7 @@ import {
 } from "../lib/preliminary";
 import type { PreliminaryAbilityRow, PreliminaryDateRank } from "../types";
 import MemberReactionsInline from "./MemberReactionsInline.vue";
+import type { PrePanelTab } from "../lib/appRoute";
 
 /** 表头用：游戏 1–9 */
 const GAME_INDEXES = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
@@ -31,11 +32,13 @@ function cardAvatarUrl(avatar: unknown): string {
 
 const props = defineProps<{ config: ClientConfig }>();
 
+/** 与地址栏 #/pre/xxx 同步（由 App 绑定） */
+const panelTab = defineModel<PrePanelTab>("panelTab", { default: "total" });
+
 const loading = ref(false);
 const err = ref("");
 const dateRanks = ref<PreliminaryDateRank[]>([]);
 const abilityRows = ref<PreliminaryAbilityRow[]>([]);
-const sub = ref<"total" | "nogf" | "perround" | "gf" | "logging">("total");
 const round = ref(1);
 
 async function load() {
@@ -149,25 +152,25 @@ defineExpose({ load });
     </p>
 
     <div class="tabs">
-      <button :class="{ on: sub === 'total' }" type="button" @click="sub = 'total'">总分排名</button>
-      <button :class="{ on: sub === 'nogf' }" type="button" @click="sub = 'nogf'">
+      <button :class="{ on: panelTab === 'total' }" type="button" @click="panelTab = 'total'">总分排名</button>
+      <button :class="{ on: panelTab === 'nogf' }" type="button" @click="panelTab = 'nogf'">
         除掉伐木值积分（仅九轮之和）
       </button>
-      <button :class="{ on: sub === 'perround' }" type="button" @click="sub = 'perround'">每轮游戏排名</button>
-      <button :class="{ on: sub === 'gf' }" type="button" @click="sub = 'gf'">
+      <button :class="{ on: panelTab === 'perround' }" type="button" @click="panelTab = 'perround'">每轮游戏排名</button>
+      <button :class="{ on: panelTab === 'gf' }" type="button" @click="panelTab = 'gf'">
         伐木值积分
       </button>
-      <button :class="{ on: sub === 'logging' }" type="button" @click="sub = 'logging'">按日预赛伐木值</button>
+      <button :class="{ on: panelTab === 'logging' }" type="button" @click="panelTab = 'logging'">按日预赛伐木值</button>
     </div>
 
-    <div v-if="sub === 'perround'" class="round-pick">
+    <div v-if="panelTab === 'perround'" class="round-pick">
       <label>选择轮次</label>
       <select v-model.number="round">
         <option v-for="n in 9" :key="n" :value="n">游戏 {{ n }}</option>
       </select>
     </div>
 
-    <div v-if="sub === 'logging'" class="dates">
+    <div v-if="panelTab === 'logging'" class="dates">
       <div v-for="block in dateRanks" :key="block.date" class="block">
         <h3>{{ block.date }}</h3>
         <table class="wide-table">
@@ -204,7 +207,7 @@ defineExpose({ load });
     </div>
 
     <div v-else class="table-wrap">
-      <table v-if="sub === 'total'" class="wide-table">
+      <table v-if="panelTab === 'total'" class="wide-table">
         <thead>
           <tr>
             <th class="col-avatar">头像</th>
@@ -242,7 +245,7 @@ defineExpose({ load });
         </tbody>
       </table>
 
-      <table v-else-if="sub === 'nogf'" class="wide-table">
+      <table v-else-if="panelTab === 'nogf'" class="wide-table">
         <thead>
           <tr>
             <th class="col-avatar">头像</th>
@@ -274,7 +277,7 @@ defineExpose({ load });
         </tbody>
       </table>
 
-      <table v-else-if="sub === 'gf'" class="wide-table gf-daily-table">
+      <table v-else-if="panelTab === 'gf'" class="wide-table gf-daily-table">
         <thead>
           <tr>
             <th class="col-avatar">头像</th>
@@ -321,7 +324,7 @@ defineExpose({ load });
         </tbody>
       </table>
 
-      <table v-else-if="sub === 'perround'" class="wide-table">
+      <table v-else-if="panelTab === 'perround'" class="wide-table">
         <thead>
           <tr>
             <th class="col-avatar">头像</th>

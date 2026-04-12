@@ -147,6 +147,26 @@ node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
 
 ---
 
+## 8b. 深链（Hash）直达某页
+
+主界面通过 **`#/路径`** 打开对应标签，便于收藏与 OBS 单链：
+
+| 链接示例 | 说明 |
+|----------|------|
+| `.../index.html#/pre` | 预赛数据 · 总分排名 |
+| `.../#/pre/gf` | 预赛数据 · **伐木值积分** |
+| `.../#/pre/total` | 预赛 · 总分排名（显式） |
+| `.../#/pre/nogf` | 预赛 · 除掉伐木值积分 |
+| `.../#/pre/perround` | 预赛 · 每轮游戏排名 |
+| `.../#/pre/logging` | 预赛 · 按日预赛伐木值 |
+| `.../#/users` | 用户积分 |
+| `.../#/treasury` | 团员金库（含四角看板） |
+| `.../#captain-hud` 或 `.../#/captain-hud` | 仅四角看板全屏 |
+
+切换标签或预赛子页时，地址栏会 **`replaceState`** 同步（不刷屏历史条目）。
+
+---
+
 ## 9. 与本仓库其它文档的关系
 
 - **`连接服务器与部署步骤.txt`**：SSH、密钥权限、**`tencent-cloud-setup.sh`** 用法。

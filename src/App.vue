@@ -18,6 +18,13 @@ import {
   presetVars,
   type ThemePresetId,
 } from "./lib/themePresets";
+import {
+  formatAppHash,
+  parseAppHash,
+  replaceAppHash,
+  type MainTab,
+  type PrePanelTab,
+} from "./lib/appRoute";
 
 const settings = ref<StoredSettings>(loadSettings());
 
@@ -42,7 +49,8 @@ function applyTheme() {
     );
   }
 }
-const tab = ref<"pre" | "users" | "treasury">("pre");
+const tab = ref<MainTab>("pre");
+const prePanelTab = ref<PrePanelTab>("total");
 
 const captainHudOnly = ref(false);
 function refreshDocTitle() {
@@ -51,10 +59,28 @@ function refreshDocTitle() {
   else document.title = `伐木训练营数据面板${suffix}`;
 }
 
-function syncCaptainHudHash() {
-  captainHudOnly.value =
-    typeof window !== "undefined" && window.location.hash === "#captain-hud";
+function applyHashToState() {
+  if (typeof window === "undefined") return;
+  const parsed = parseAppHash(window.location.hash);
+  if (parsed.kind === "captain-hud") {
+    captainHudOnly.value = true;
+  } else {
+    captainHudOnly.value = false;
+    tab.value = parsed.tab;
+    prePanelTab.value = parsed.prePanel;
+  }
   refreshDocTitle();
+}
+
+function syncHashFromState() {
+  if (typeof window === "undefined") return;
+  replaceAppHash(formatAppHash(captainHudOnly.value, tab.value, prePanelTab.value));
+}
+
+function selectTab(next: MainTab) {
+  captainHudOnly.value = false;
+  tab.value = next;
+  syncHashFromState();
 }
 
 const clientConfig = computed(() => toClientConfig(settings.value));
@@ -80,15 +106,34 @@ function onApply() {
   if (tab.value === "treasury") treRef.value?.reload();
 }
 
+function loadActivePanel() {
+  if (captainHudOnly.value) return;
+  if (tab.value === "pre") preRef.value?.load();
+  if (tab.value === "users") usrRef.value?.reload();
+  if (tab.value === "treasury") treRef.value?.reload();
+}
+
+function onWindowHashChange() {
+  applyHashToState();
+  loadActivePanel();
+}
+
 onMounted(() => {
-  syncCaptainHudHash();
-  window.addEventListener("hashchange", syncCaptainHudHash);
+  applyHashToState();
+  if (
+    typeof window !== "undefined" &&
+    !captainHudOnly.value &&
+    (!window.location.hash || window.location.hash === "#")
+  ) {
+    replaceAppHash(formatAppHash(false, tab.value, prePanelTab.value));
+  }
+  window.addEventListener("hashchange", onWindowHashChange);
   applyTheme();
-  if (!captainHudOnly.value) preRef.value?.load();
+  loadActivePanel();
 });
 
 onUnmounted(() => {
-  window.removeEventListener("hashchange", syncCaptainHudHash);
+  window.removeEventListener("hashchange", onWindowHashChange);
 });
 
 watch(
@@ -101,9 +146,17 @@ watch(
   { deep: true },
 );
 
-watch(tab, (t) => {
+watch(tab, (t, prev) => {
+  if (captainHudOnly.value) return;
   if (t === "users") usrRef.value?.reload();
   if (t === "treasury") treRef.value?.reload();
+  if (t === "pre" && prev !== "pre") preRef.value?.load();
+  syncHashFromState();
+});
+
+watch(prePanelTab, () => {
+  if (captainHudOnly.value || tab.value !== "pre") return;
+  syncHashFromState();
 });
 </script>
 
@@ -117,9 +170,9 @@ watch(tab, (t) => {
   <template v-else>
   <SettingsBar v-model="settings" @apply="onApply" />
   <nav class="nav">
-    <button :class="{ on: tab === 'pre' }" type="button" @click="tab = 'pre'">预赛数据</button>
-    <button :class="{ on: tab === 'users' }" type="button" @click="tab = 'users'">用户积分</button>
-    <button :class="{ on: tab === 'treasury' }" type="button" @click="tab = 'treasury'">团员金库</button>
+    <button :class="{ on: tab === 'pre' }" type="button" @click="selectTab('pre')">预赛数据</button>
+    <button :class="{ on: tab === 'users' }" type="button" @click="selectTab('users')">用户积分</button>
+    <button :class="{ on: tab === 'treasury' }" type="button" @click="selectTab('treasury')">团员金库</button>
   </nav>
   <main>
     <CaptainCornersHud
@@ -131,6 +184,7 @@ watch(tab, (t) => {
     <PreliminaryPanel
       v-show="tab === 'pre'"
       ref="preRef"
+      v-model:panel-tab="prePanelTab"
       :config="clientConfig"
     />
     <UsersPanel

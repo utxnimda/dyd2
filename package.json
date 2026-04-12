@@ -1,8 +1,8 @@
 {
   "name": "fmz-dashboard",
   "private": true,
-  "version": "0.6.0",
-  "fmzReleaseLabel": "v0.6",
+  "version": "0.7.0",
+  "fmzReleaseLabel": "v0.7",
   "type": "module",
   "scripts": {
     "dev": "vite",
