@@ -2,6 +2,7 @@
 import axios from "axios";
 import {
   computed,
+  inject,
   nextTick,
   onMounted,
   onUnmounted,
@@ -33,6 +34,7 @@ import {
 } from "../lib/rosterDb";
 import type { FlyActorHint } from "../lib/recordSource";
 import { inferFlyActorFromRecord } from "../lib/recordSource";
+import { FMZ_TREASURY_AVATAR_KEY } from "../lib/treasuryAvatarOpen";
 import type { ApiListResponse, MoneyCard, MoneyRecord } from "../types";
 import {
   formatBattleShowPath,
@@ -726,6 +728,8 @@ type QueueItem = {
 const queue = ref<QueueItem[]>([]);
 let processing = false;
 
+const treasuryAvatar = inject(FMZ_TREASURY_AVATAR_KEY);
+
 /**
  * 飞入中实例（可多路并发）。
  * 调速仅按「同一被攻击人」统计：同时飞向该目标超过 20 路后，每多 10 路全体飞向该目标的速度 +50%（不影响其他目标）。
@@ -736,6 +740,8 @@ type FlyInst = {
   label: string;
   targetId: string | number;
   size: number;
+  /** 操作者为金库队长时，飞头像可点开其金库详情 */
+  actorTreasuryId?: string | number;
 };
 const flyInstances = ref<FlyInst[]>([]);
 let flySeq = 0;
@@ -808,6 +814,11 @@ function recalculateFlySpeeds() {
     const n = countByTarget.get(balKey(f.targetId)) ?? 1;
     row.speedMul = speedMulForSameTargetConcurrent(n);
   }
+}
+
+function onFlyTreasuryClick(f: FlyInst) {
+  if (f.actorTreasuryId == null || String(f.actorTreasuryId).trim() === "") return;
+  treasuryAvatar?.openIfMember(f.actorTreasuryId);
 }
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -991,11 +1002,12 @@ async function runFlyAnimation(
     (actor?.avatar && String(actor.avatar).trim()) || placeholderSvg;
 
   const actorLabel = actor?.name?.trim() || "未知来源";
+  const actorTreasuryId = actor?.captainId;
 
   const id = ++flySeq;
   flyInstances.value = [
     ...flyInstances.value,
-    { id, src: srcUrl, label: actorLabel, targetId, size },
+    { id, src: srcUrl, label: actorLabel, targetId, size, actorTreasuryId },
   ];
   flySpeedById.set(id, { speedMul: 1 });
   recalculateFlySpeeds();
@@ -1633,10 +1645,13 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
           <div class="fly-mover-body">
             <div
               class="fly-mover-pin"
+              :class="{ 'fly-mover-pin--hit': f.actorTreasuryId != null }"
               :style="{
                 width: f.size + 'px',
                 height: f.size + 'px',
               }"
+              :title="f.actorTreasuryId != null ? '金库成员：点击查看余额与流水' : undefined"
+              @click.stop="onFlyTreasuryClick(f)"
             >
               <img class="fly-img" :src="f.src" alt="" referrerpolicy="no-referrer" />
             </div>
@@ -2123,6 +2138,9 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
   flex-direction: column;
   align-items: flex-start;
   gap: 3px;
+}
+.fly-avatar-layer .fly-mover-pin--hit {
+  cursor: pointer;
 }
 .fly-avatar-layer .fly-mover-pin {
   border-radius: 50%;

@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  provide,
+  ref,
+  watch,
+} from "vue";
 import SettingsBar from "./components/SettingsBar.vue";
 import CaptainCornersHud from "./components/CaptainCornersHud.vue";
 import PreliminaryPanel from "./components/PreliminaryPanel.vue";
@@ -29,6 +37,10 @@ import {
   formatBattleShowPath,
   loadBattleShowFromStorage,
 } from "./lib/battleShowRoute";
+import {
+  FMZ_TREASURY_AVATAR_KEY,
+  type TreasuryAvatarBridge,
+} from "./lib/treasuryAvatarOpen";
 
 const settings = ref<StoredSettings>(loadSettings());
 
@@ -127,6 +139,26 @@ const preRef = ref<InstanceType<typeof PreliminaryPanel> | null>(null);
 const usrRef = ref<InstanceType<typeof UsersPanel> | null>(null);
 const battleRef = ref<InstanceType<typeof CaptainCornersHud> | null>(null);
 const treRef = ref<InstanceType<typeof TreasuryPanel> | null>(null);
+
+async function openTreasuryDetailFromAvatar(memberId: string | number | null | undefined) {
+  if (memberId == null || String(memberId).trim() === "") return;
+  let tre = treRef.value;
+  if (!tre) return;
+  if (!tre.isTreasuryMember(memberId)) {
+    await tre.reload();
+    await nextTick();
+    tre = treRef.value;
+  }
+  if (!tre?.isTreasuryMember?.(memberId)) return;
+  await tre.openCard(memberId);
+}
+
+const treasuryAvatarBridge: TreasuryAvatarBridge = {
+  openIfMember(memberId) {
+    void openTreasuryDetailFromAvatar(memberId);
+  },
+};
+provide(FMZ_TREASURY_AVATAR_KEY, treasuryAvatarBridge);
 
 function onApply() {
   if (tab.value === "pre") preRef.value?.load();

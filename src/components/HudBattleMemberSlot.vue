@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, inject } from "vue";
 import type { CaptainMoneyCard } from "../lib/captainTeams";
 import { ORBIT_SECTOR_PANEL } from "../lib/orbitSectorPanel";
 import MemberDislikeButton from "./MemberDislikeButton.vue";
 import MemberLikeButton from "./MemberLikeButton.vue";
+import { FMZ_TREASURY_AVATAR_KEY } from "../lib/treasuryAvatarOpen";
 
 const MAX_ORBIT_NAME_ARC_GRAPHEMES = 14;
 const MAX_ORBIT_SCORE_ARC_CHARS = 16;
@@ -111,6 +112,12 @@ const props = withDefaults(
     orbitSectorArc: undefined,
   },
 );
+
+const treasuryAvatar = inject(FMZ_TREASURY_AVATAR_KEY);
+
+function onHudAvatarClick() {
+  treasuryAvatar?.openIfMember(props.member.id);
+}
 
 function balKey(id: string | number) {
   return String(id);
@@ -401,13 +408,25 @@ const wrapStyle = computed((): Record<string, string> | undefined => {
           <div class="av-wrap">
             <img
               v-if="member.avatar"
-              class="av"
+              class="av av--treasury-hit"
               :data-captain-anchor="k"
               :src="member.avatar"
               alt=""
               referrerpolicy="no-referrer"
+              title="点击查看金库余额与流水"
+              @click.stop="onHudAvatarClick"
             />
-            <div v-else class="av ph" :data-captain-anchor="k" />
+            <div
+              v-else
+              class="av ph av--treasury-hit"
+              :data-captain-anchor="k"
+              title="点击查看金库余额与流水"
+              role="button"
+              tabindex="0"
+              @click.stop="onHudAvatarClick"
+              @keydown.enter.prevent="onHudAvatarClick"
+              @keydown.space.prevent="onHudAvatarClick"
+            />
             <div v-if="!avatarOnly && !orbitStack" class="parked-stack" aria-hidden="true">
               <div v-for="p in parkedForTarget" :key="p.key" class="parked-item">
                 <img class="parked-mini" :src="p.src" alt="" referrerpolicy="no-referrer" />
@@ -753,6 +772,9 @@ const wrapStyle = computed((): Record<string, string> | undefined => {
     color-mix(in srgb, var(--accent) 50%, var(--border));
   flex-shrink: 0;
   display: block;
+}
+.av--treasury-hit {
+  cursor: pointer;
 }
 .av.ph {
   background: color-mix(in srgb, var(--muted) 32%, var(--surface));

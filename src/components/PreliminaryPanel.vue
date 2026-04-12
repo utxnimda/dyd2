@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import axios from "axios";
-import { computed, ref } from "vue";
+import { computed, inject, ref } from "vue";
 import { createApi, douyuAvatarUrl } from "../lib/api";
 import type { ClientConfig } from "../lib/api";
 import {
@@ -15,6 +15,7 @@ import type {
 } from "../types";
 import MemberReactionsInline from "./MemberReactionsInline.vue";
 import type { PrePanelTab } from "../lib/appRoute";
+import { FMZ_TREASURY_AVATAR_KEY } from "../lib/treasuryAvatarOpen";
 
 /** 表头用：游戏 1–9 */
 const GAME_INDEXES = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
@@ -35,6 +36,12 @@ function cardAvatarUrl(avatar: unknown): string {
 }
 
 const props = defineProps<{ config: ClientConfig }>();
+
+const treasuryAvatar = inject(FMZ_TREASURY_AVATAR_KEY);
+
+function onTreasuryAvatarClick(id: string | number) {
+  treasuryAvatar?.openIfMember(id);
+}
 
 /** 与地址栏 #/pre/xxx 同步（由 App 绑定） */
 const panelTab = defineModel<PrePanelTab>("panelTab", { default: "total" });
@@ -215,9 +222,12 @@ defineExpose({ load });
               <td class="avatar-cell">
                 <img
                   v-if="cardAvatarUrl(it.avatar)"
+                  class="av-treasury-hit"
                   :src="cardAvatarUrl(it.avatar)"
                   alt=""
                   referrerpolicy="no-referrer"
+                  title="金库成员：点击查看余额与流水"
+                  @click.stop="onTreasuryAvatarClick(it.id)"
                 />
               </td>
               <td>{{ idx + 1 }}</td>
@@ -252,9 +262,12 @@ defineExpose({ load });
             <td class="avatar-cell">
               <img
                 v-if="rowAvatarUrl(r)"
+                class="av-treasury-hit"
                 :src="rowAvatarUrl(r)"
                 alt=""
                 referrerpolicy="no-referrer"
+                title="金库成员：点击查看余额与流水"
+                @click.stop="onTreasuryAvatarClick(r.id)"
               />
             </td>
             <td>{{ r.rank }}</td>
@@ -287,9 +300,12 @@ defineExpose({ load });
             <td class="avatar-cell">
               <img
                 v-if="rowAvatarUrl(r)"
+                class="av-treasury-hit"
                 :src="rowAvatarUrl(r)"
                 alt=""
                 referrerpolicy="no-referrer"
+                title="金库成员：点击查看余额与流水"
+                @click.stop="onTreasuryAvatarClick(r.id)"
               />
             </td>
             <td>{{ r.rank }}</td>
@@ -327,9 +343,12 @@ defineExpose({ load });
             <td class="avatar-cell">
               <img
                 v-if="rowAvatarUrl(r)"
+                class="av-treasury-hit"
                 :src="rowAvatarUrl(r)"
                 alt=""
                 referrerpolicy="no-referrer"
+                title="金库成员：点击查看余额与流水"
+                @click.stop="onTreasuryAvatarClick(r.id)"
               />
             </td>
             <td>{{ r.rank }}</td>
@@ -365,9 +384,12 @@ defineExpose({ load });
             <td class="avatar-cell">
               <img
                 v-if="rowAvatarUrl(r)"
+                class="av-treasury-hit"
                 :src="rowAvatarUrl(r)"
                 alt=""
                 referrerpolicy="no-referrer"
+                title="金库成员：点击查看余额与流水"
+                @click.stop="onTreasuryAvatarClick(r.id)"
               />
             </td>
             <td>{{ r.rank }}</td>
@@ -501,6 +523,9 @@ td.avatar-cell {
   display: inline-block;
   vertical-align: middle;
   border: 1px solid var(--border);
+}
+.avatar-cell img.av-treasury-hit {
+  cursor: pointer;
 }
 th.game-col,
 td.game-col {

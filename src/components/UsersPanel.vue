@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { inject, onMounted, ref, watch } from "vue";
 import { createApi, douyuAvatarUrl } from "../lib/api";
 import type { ClientConfig } from "../lib/api";
 import type { ApiListResponse, LiveUser } from "../types";
 import MemberLikeButton from "./MemberLikeButton.vue";
+import { FMZ_TREASURY_AVATAR_KEY } from "../lib/treasuryAvatarOpen";
 
 const props = defineProps<{ config: ClientConfig }>();
+
+const treasuryAvatar = inject(FMZ_TREASURY_AVATAR_KEY);
 
 const q = ref("");
 const page = ref(1);
@@ -91,6 +94,10 @@ function cardWatermarkStyle(avatar: string | undefined): Record<string, string> 
   return { backgroundImage: `url(${JSON.stringify(a)})` };
 }
 
+function onUserAvatarClick(u: LiveUser) {
+  treasuryAvatar?.openIfMember(u.id ?? u.uid);
+}
+
 defineExpose({ reload: fetchList });
 </script>
 
@@ -118,7 +125,14 @@ defineExpose({ reload: fetchList });
           aria-hidden="true"
           :style="cardWatermarkStyle(u.avatar)"
         />
-        <img class="av" :src="u.avatar || undefined" alt="" referrerpolicy="no-referrer" />
+        <img
+          class="av av--treasury-hit"
+          :src="u.avatar || undefined"
+          alt=""
+          referrerpolicy="no-referrer"
+          title="金库成员：点击查看余额与流水"
+          @click.stop="onUserAvatarClick(u)"
+        />
         <div class="meta">
           <div class="name">{{ u.name }}</div>
           <div class="uid">UID {{ u.uid ?? u.id }}</div>
@@ -246,6 +260,9 @@ button.ghost {
   border-radius: 50%;
   object-fit: cover;
   border: 2px solid color-mix(in srgb, var(--text) 16%, var(--border));
+}
+.av--treasury-hit {
+  cursor: pointer;
 }
 .meta {
   position: relative;

@@ -206,6 +206,12 @@ function closeDlg() {
   dlg.value = false;
 }
 
+function isTreasuryMember(id: string | number | null | undefined): boolean {
+  if (id == null || String(id).trim() === "") return false;
+  const s = String(id);
+  return cards.value.some((c) => String(c.id) === s);
+}
+
 function onRecSortChange() {
   recPage.value = 1;
   void loadRecords();
@@ -219,7 +225,7 @@ watch(
 
 onMounted(() => loadCards());
 
-defineExpose({ reload: loadCards });
+defineExpose({ reload: loadCards, openCard, isTreasuryMember });
 </script>
 
 <template>
