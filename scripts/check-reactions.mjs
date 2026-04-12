@@ -8,16 +8,32 @@
  */
 const base = (process.argv[2] || "http://127.0.0.1:8787").replace(/\/$/, "");
 
+function looksLikeHtml(text) {
+  const s = text.trimStart().toLowerCase();
+  return s.startsWith("<!") || /^<html[\s>]/.test(s);
+}
+
+function failHtmlResponse(step, url) {
+  console.error(
+    `\n失败（${step}）：响应为 HTML 而非 JSON，说明「赞踩」请求未到达 reactions-server（8787）。\n` +
+      `常见原因：Nginx 未配置或未 reload location /__fmz_reactions/，或 proxy_pass 未以 http://127.0.0.1:8787/ 结尾。\n` +
+      `请求 URL：${url}\n`,
+  );
+  process.exit(1);
+}
+
 async function main() {
   const healthUrl = `${base}/health`;
   const h = await fetch(healthUrl);
   const ht = await h.text();
   console.log("[1] GET", healthUrl, "->", h.status, ht.slice(0, 200));
+  if (looksLikeHtml(ht)) failHtmlResponse("GET /health", healthUrl);
 
   const votesUrl = `${base}/api/votes?project=888_888`;
   const v = await fetch(votesUrl);
   const vt = await v.text();
   console.log("[2] GET", votesUrl, "->", v.status, vt.slice(0, 200));
+  if (looksLikeHtml(vt)) failHtmlResponse("GET /api/votes", votesUrl);
 
   const incUrl = `${base}/api/votes/inc`;
   const p = await fetch(incUrl, {

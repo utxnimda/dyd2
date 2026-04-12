@@ -8,7 +8,7 @@
  *   BIND=127.0.0.1（默认；需外网直连可设 0.0.0.0，建议仍走 Nginx）
  *   FMZ_REACTIONS_SECRET=可选，与前端设置里「赞踩 API 密钥」一致
  *   FMZ_DATA_DIR=数据目录（默认 ./data）
- *   FMZ_REACTION_COOLDOWN_MS=同一 IP对同一成员连续点赞/踩最短间隔（默认 2500）
+ *   FMZ_REACTION_COOLDOWN_MS=同一 IP 对同一成员、同一操作类型（赞/踩分开）最短间隔（默认 500，与前端基础 CD 对齐）
  *   FMZ_REACTION_IP_WINDOW_MS=全局限流统计窗口（默认 60000）
  *   FMZ_REACTION_IP_MAX=每 IP 每窗口内最多多少次 inc（默认 48）
  */
@@ -24,13 +24,13 @@ const BIND = process.env.BIND || "127.0.0.1";
 const SECRET = process.env.FMZ_REACTIONS_SECRET || "";
 const DATA_DIR = process.env.FMZ_DATA_DIR || join(__dirname, "data");
 const DB_PATH = process.env.FMZ_DB_PATH || join(DATA_DIR, "reactions.db");
-const MEMBER_COOLDOWN_MS = Number(process.env.FMZ_REACTION_COOLDOWN_MS || 2500);
+const MEMBER_COOLDOWN_MS = Number(process.env.FMZ_REACTION_COOLDOWN_MS || 500);
 const IP_WINDOW_MS = Number(process.env.FMZ_REACTION_IP_WINDOW_MS || 60_000);
 const IP_MAX_INC = Number(process.env.FMZ_REACTION_IP_MAX || 48);
 
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 
-/** 同一 IP + 项目 + 成员：最短间隔（防连点、多标签略快于客户端时仍挡住） */
+/** 同一 IP + 项目 + 成员 + 操作类型（like/dislike 各自计时，与前端一致） */
 const lastMemberInc = new Map();
 /** 每 IP 滑动窗口内 inc 次数 */
 const ipIncTimestamps = new Map();
@@ -214,7 +214,7 @@ const server = http.createServer((req, res) => {
           return;
         }
 
-        const rk = `${ip}|${project}|${memberId}`;
+        const rk = `${ip}|${project}|${memberId}|${kind}`;
         const now = Date.now();
         const prevTs = lastMemberInc.get(rk);
         if (prevTs != null && now - prevTs < MEMBER_COOLDOWN_MS) {

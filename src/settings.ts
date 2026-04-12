@@ -25,9 +25,8 @@ export type StoredSettings = {
 };
 
 export const defaultSettings = (): StoredSettings => ({
-  apiBase:
-    import.meta.env.VITE_API_BASE ||
-    (import.meta.env.DEV ? "/__fmz_api" : "https://api2.dongdongne.com"),
+  /** 与 Nginx / Vite 反代一致；未注入 VITE_API_BASE 时走同源 /__fmz_api，避免生产环境误直连跨域 */
+  apiBase: import.meta.env.VITE_API_BASE || "/__fmz_api",
   liveRoom: "888",
   xProject: "888",
   currencyProportion: 100,
