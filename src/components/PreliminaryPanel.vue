@@ -8,7 +8,11 @@ import {
   gameSum,
   withRank,
 } from "../lib/preliminary";
-import type { PreliminaryAbilityRow, PreliminaryDateRank } from "../types";
+import type {
+  PreliminaryAbilityRow,
+  PreliminaryDateRank,
+  PreliminaryFetchWarning,
+} from "../types";
 import MemberReactionsInline from "./MemberReactionsInline.vue";
 import type { PrePanelTab } from "../lib/appRoute";
 
@@ -39,18 +43,29 @@ const loading = ref(false);
 const err = ref("");
 const dateRanks = ref<PreliminaryDateRank[]>([]);
 const abilityRows = ref<PreliminaryAbilityRow[]>([]);
+const fetchWarnings = ref<PreliminaryFetchWarning[]>([]);
+const kvPreliminaryParseFailed = ref(false);
 const round = ref(1);
+
+/** 与官网 PreliminaryData 一致：money.list 默认 size=100（见 .env VITE_PRELIMINARY_MONEY_PAGE_SIZE） */
+const preliminaryMoneyPageSize = Number(
+  import.meta.env.VITE_PRELIMINARY_MONEY_PAGE_SIZE ?? 100,
+);
 
 async function load() {
   loading.value = true;
   err.value = "";
   dateRanks.value = [];
   abilityRows.value = [];
+  fetchWarnings.value = [];
+  kvPreliminaryParseFailed.value = false;
   try {
     const api = createApi(props.config);
     const moneyListBody = {
       page: 1,
-      size: 100,
+      size: Number.isFinite(preliminaryMoneyPageSize) && preliminaryMoneyPageSize > 0
+        ? preliminaryMoneyPageSize
+        : 100,
       search: [
         {
           key: "enable",
@@ -78,6 +93,8 @@ async function load() {
     if (res.error) err.value = res.error;
     dateRanks.value = res.dateRanks;
     abilityRows.value = res.abilityRows;
+    fetchWarnings.value = res.fetchWarnings;
+    kvPreliminaryParseFailed.value = res.kvPreliminaryParseFailed;
   } catch (e: unknown) {
     if (axios.isAxiosError(e)) {
       const st = e.response?.status;
@@ -146,10 +163,20 @@ defineExpose({ load });
       </button>
     </div>
     <p v-if="err" class="err">{{ err }}</p>
-    <p class="note">
-      聚合逻辑与官方页面一致：总分 = 游戏1–9 积分之和 + 伐木值积分（gf）；伐木值积分由「累计伐木值」排名位置固定为
-      48、47…（与房间人数有关）。「按日预赛伐木值」等榜单接口只汇总每人当日分值，通常不包含「是哪位用户转赠/操作」的明细；要查具体来源请到「团员金库」点开对应成员，查看积分流水（流水表里「来源（解析）」列会尽量从接口字段与文案中解析操作者昵称）。
-    </p>
+    <div v-if="kvPreliminaryParseFailed" class="err">
+      keyvalue 的 <code>system.preliminary.data</code> 不是合法 JSON，无法解析预赛日期列表。
+    </div>
+    <div v-if="fetchWarnings.length" class="warn-box">
+      <p class="warn-title">未纳入的日期</p>
+      <ul class="warn-list">
+        <li v-for="w in fetchWarnings" :key="(w.url || '') + w.date + w.reason">
+          <strong>{{ w.date }}</strong> — {{ w.reason }}
+          <div v-if="w.url" class="warn-url">
+            <code>{{ w.url }}</code>
+          </div>
+        </li>
+      </ul>
+    </div>
 
     <div class="tabs">
       <button :class="{ on: panelTab === 'total' }" type="button" @click="panelTab = 'total'">总分排名</button>
@@ -203,7 +230,6 @@ defineExpose({ load });
           </tbody>
         </table>
       </div>
-      <p v-if="!dateRanks.length && !loading" class="muted">暂无按日数据（或 KV/代理失败）</p>
     </div>
 
     <div v-else class="table-wrap">
@@ -387,10 +413,31 @@ button.primary:disabled {
 .err {
   color: var(--danger);
 }
-.note {
-  font-size: 0.8rem;
-  color: var(--muted);
+.warn-box {
+  margin: 0.5rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent));
+  font-size: 0.82rem;
   max-width: 900px;
+}
+.warn-title {
+  margin: 0 0 0.35rem;
+  color: var(--text);
+}
+.warn-list {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+.warn-url {
+  margin: 0.25rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  word-break: break-all;
+}
+.warn-url code {
+  color: var(--muted);
 }
 .tabs {
   display: flex;

@@ -157,6 +157,7 @@ function save() {
         </span>
       </label>
     </div>
+
     <div class="actions">
       <button type="button" class="ghost" @click="reset">恢复默认</button>
       <button type="button" class="primary" @click="save">保存并应用</button>

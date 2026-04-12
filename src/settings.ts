@@ -24,12 +24,21 @@ export type StoredSettings = {
   textColor: string;
 };
 
+function envNum(raw: string | undefined, fallback: number): number {
+  if (raw == null || String(raw).trim() === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/** 与仓库根 fmz_config.js（LIVE_ROOM / CURRENCY_PROPORTION）及官网 SPA 默认一致，可用 .env 覆盖 */
 export const defaultSettings = (): StoredSettings => ({
   /** 与 Nginx / Vite 反代一致；未注入 VITE_API_BASE 时走同源 /__fmz_api，避免生产环境误直连跨域 */
   apiBase: import.meta.env.VITE_API_BASE || "/__fmz_api",
-  liveRoom: "888",
-  xProject: "888",
-  currencyProportion: 100,
+  liveRoom: String(import.meta.env.VITE_LIVE_ROOM ?? "888").trim() || "888",
+  xProject:
+    String(import.meta.env.VITE_X_PROJECT ?? import.meta.env.VITE_LIVE_ROOM ?? "888").trim() ||
+    "888",
+  currencyProportion: envNum(import.meta.env.VITE_CURRENCY_PROPORTION, 100),
   bearerToken: "",
   reactionsApiBase: "/__fmz_reactions",
   reactionsSecret: "",

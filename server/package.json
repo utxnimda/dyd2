@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node reactions-server.mjs"
+    "start": "node reactions-server.mjs",
+    "bulk-votes": "node bulk-reactions-votes.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0"

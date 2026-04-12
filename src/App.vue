@@ -211,19 +211,10 @@ watch(prePanelTab, () => {
   <nav class="nav">
     <button :class="{ on: tab === 'pre' }" type="button" @click="selectTab('pre')">预赛数据</button>
     <button :class="{ on: tab === 'users' }" type="button" @click="selectTab('users')">用户积分</button>
-    <button :class="{ on: tab === 'battle' }" type="button" @click="selectTab('battle')">战斗爽</button>
     <button :class="{ on: tab === 'treasury' }" type="button" @click="selectTab('treasury')">团员金库</button>
+    <button :class="{ on: tab === 'battle' }" type="button" @click="selectTab('battle')">战斗爽</button>
   </nav>
   <main>
-    <CaptainCornersHud
-      v-if="tab === 'battle'"
-      ref="battleRef"
-      class="panel-hud"
-      :config="clientConfig"
-      :poll-ms="4000"
-      :battle-show-path="battleShowPath"
-      @update:battle-show-path="onBattleShowPath"
-    />
     <PreliminaryPanel
       v-show="tab === 'pre'"
       ref="preRef"
@@ -239,6 +230,15 @@ watch(prePanelTab, () => {
       v-show="tab === 'treasury'"
       ref="treRef"
       :config="clientConfig"
+    />
+    <CaptainCornersHud
+      v-if="tab === 'battle'"
+      ref="battleRef"
+      class="panel-hud"
+      :config="clientConfig"
+      :poll-ms="4000"
+      :battle-show-path="battleShowPath"
+      @update:battle-show-path="onBattleShowPath"
     />
   </main>
   </template>

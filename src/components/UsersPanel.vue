@@ -85,6 +85,12 @@ function memberReactionKey(u: LiveUser): string | number | null {
   return null;
 }
 
+function cardWatermarkStyle(avatar: string | undefined): Record<string, string> {
+  const a = avatar?.trim();
+  if (!a) return {};
+  return { backgroundImage: `url(${JSON.stringify(a)})` };
+}
+
 defineExpose({ reload: fetchList });
 </script>
 
@@ -106,6 +112,12 @@ defineExpose({ reload: fetchList });
     <p v-if="loading" class="muted">加载中…</p>
     <div v-else class="cards">
       <article v-for="u in list" :key="String(u.id ?? u.uid)" class="card">
+        <div
+          v-if="u.avatar"
+          class="card-watermark"
+          aria-hidden="true"
+          :style="cardWatermarkStyle(u.avatar)"
+        />
         <img class="av" :src="u.avatar || undefined" alt="" referrerpolicy="no-referrer" />
         <div class="meta">
           <div class="name">{{ u.name }}</div>
@@ -183,23 +195,62 @@ button.ghost {
   margin-top: 1rem;
 }
 .card {
+  position: relative;
   display: flex;
   gap: 0.75rem;
   padding: 1rem;
   border-radius: 12px;
   border: 1px solid var(--border);
+  overflow: hidden;
   background: linear-gradient(
     145deg,
     color-mix(in srgb, var(--primary) 22%, var(--surface)) 0%,
     var(--surface) 100%
   );
 }
+.card-watermark {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-repeat: no-repeat;
+  background-position: calc(100% + 8px) 50%;
+  background-size: clamp(96px, 42%, 168px);
+  opacity: 0.2;
+  filter: saturate(0.85);
+  -webkit-mask-image: linear-gradient(
+    to right,
+    rgb(0 0 0 / 0) 0%,
+    rgb(0 0 0 / 0) 18%,
+    rgb(0 0 0 / 0.12) 40%,
+    rgb(0 0 0 / 0.38) 62%,
+    rgb(0 0 0 / 0.62) 82%,
+    rgb(0 0 0 / 0.78) 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    rgb(0 0 0 / 0) 0%,
+    rgb(0 0 0 / 0) 18%,
+    rgb(0 0 0 / 0.12) 40%,
+    rgb(0 0 0 / 0.38) 62%,
+    rgb(0 0 0 / 0.62) 82%,
+    rgb(0 0 0 / 0.78) 100%
+  );
+  mask-mode: alpha;
+}
 .av {
+  position: relative;
+  z-index: 1;
   width: 56px;
   height: 56px;
   border-radius: 50%;
   object-fit: cover;
   border: 2px solid color-mix(in srgb, var(--text) 16%, var(--border));
+}
+.meta {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
 }
 .name {
   font-weight: 700;

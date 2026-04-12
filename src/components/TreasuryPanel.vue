@@ -98,9 +98,12 @@ const dlg = ref(false);
 const detail = ref<MoneyCard | null>(null);
 const records = ref<TreasuryRecordRow[]>([]);
 const recPage = ref(1);
-const recSize = ref(32);
+/** 单页条数略大，减少「前几日流水被挤到后面几页」时的翻页次数 */
+const recSize = ref(64);
 const recTotal = ref(0);
 const recLoading = ref(false);
+/** 与 CaptainCornersHud.fetchLatestRecord 一致：id 降序 = 新记录在前；升序便于从第 1 页找早期日期 */
+const recSortOrder = ref<"desc" | "asc">("desc");
 
 async function loadCards() {
   loading.value = true;
@@ -144,6 +147,7 @@ async function openCard(id: string | number) {
   detail.value = null;
   records.value = [];
   recPage.value = 1;
+  recSortOrder.value = "desc";
   try {
     const api = createApi(props.config);
     const res = (await api.moneyGet(id)) as { code: number; data?: MoneyCard };
@@ -177,6 +181,12 @@ async function loadRecords() {
           type: "CONDITION",
         },
       ],
+      sort: [
+        {
+          content: "id",
+          condition: recSortOrder.value === "desc" ? "DESC" : "ASC",
+        },
+      ],
     };
     const res = (await api.moneyRecordList(body)) as ApiListResponse<MoneyRecord>;
     if (res.code !== 0 || !res.data) return;
@@ -194,6 +204,11 @@ async function loadRecords() {
 
 function closeDlg() {
   dlg.value = false;
+}
+
+function onRecSortChange() {
+  recPage.value = 1;
+  void loadRecords();
 }
 
 watch(
@@ -341,6 +356,19 @@ defineExpose({ reload: loadCards });
               </div>
             </div>
             <h4>积分来源 / 流水</h4>
+            <p class="rec-meta muted">
+              与接口约定一致按记录 <code>id</code> 排序：默认<strong>最新在前</strong>时，今天（如 4.12）的新流水会出现在第 1 页；前几日记录在同一排序下会排在后面，请用翻页查看，或改为「最旧在前」从第 1 页起浏览早期日期。共
+              {{ recTotal }} 条，每页 {{ recSize }} 条。
+            </p>
+            <div class="rec-tools">
+              <label class="rec-sort">
+                排序
+                <select v-model="recSortOrder" class="sel" @change="onRecSortChange">
+                  <option value="desc">最新在前（id 降序）</option>
+                  <option value="asc">最旧在前（id 升序）</option>
+                </select>
+              </label>
+            </div>
             <p v-if="recLoading" class="muted">加载流水…</p>
             <table v-else class="rec">
               <thead>
@@ -386,6 +414,25 @@ defineExpose({ reload: loadCards });
 <style scoped>
 .panel {
   padding: 1rem 1.25rem 2rem;
+}
+.rec-meta {
+  font-size: 0.78rem;
+  line-height: 1.45;
+  margin: 0 0 0.5rem;
+  max-width: 52rem;
+}
+.rec-meta code {
+  font-size: 0.85em;
+}
+.rec-tools {
+  margin-bottom: 0.5rem;
+}
+.rec-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 .head {
   display: flex;

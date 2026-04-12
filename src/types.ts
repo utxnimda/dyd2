@@ -77,3 +77,19 @@ export type PreliminaryDateRank = {
   date: string;
   list: Array<MoneyCard & { value: number }>;
 };
+
+/** 某日预赛数据未纳入聚合时的原因（便于与官方页对比排查） */
+export type PreliminaryFetchWarning = {
+  date: string;
+  reason: string;
+  /** KV 里该日对应的榜单 URL（与 Network 里 proxy 请求体中的 url 一致） */
+  url?: string;
+};
+
+/** keyvalue system.preliminary.data 解析出的单日配置（与后台 JSON 一致） */
+export type KvPreliminaryDayEntry = {
+  date: string;
+  url: string;
+  /** 无 url 时运营可把榜单 JSON 整段嵌在此（与 proxy 返回 data 同格式） */
+  content?: string;
+};
