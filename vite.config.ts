@@ -11,6 +11,11 @@ const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8")) a
 };
 const releaseLabel = String(pkg.fmzReleaseLabel ?? `v${pkg.version}`).trim();
 
+/** 与官网 SPA Origin 一致（官方为 https://fmz.dongdongne.com ，勿用 api2）；可设 FMZ_UPSTREAM_BROWSER_ORIGIN 覆盖 */
+const FMZ_UPSTREAM_BROWSER_ORIGIN = (
+  process.env.FMZ_UPSTREAM_BROWSER_ORIGIN || "https://fmz.dongdongne.com"
+).replace(/\/$/, "");
+
 /**
  * 开发时通过同源代理转发，避免浏览器 CORS。
  * 生产环境需自行配置反向代理或将 API 与前端同域部署。
@@ -21,6 +26,29 @@ const apiProxy = {
     changeOrigin: true,
     secure: true,
     rewrite: (p: string) => p.replace(/^\/__fmz_api/, ""),
+    /**
+     * 上游校验 Origin；仪表盘域名会被拒。伪造为 fmz 官网 Origin，并去掉/重写 Sec-Fetch-*，
+     * 否则浏览器仍带 same-origin 等，与伪造 Origin 不一致易 403。
+     */
+    configure: (proxy) => {
+      proxy.on("proxyReq", (proxyReq) => {
+        const strip = [
+          "sec-fetch-site",
+          "sec-fetch-mode",
+          "sec-fetch-dest",
+          "sec-fetch-user",
+          "sec-ch-ua",
+          "sec-ch-ua-mobile",
+          "sec-ch-ua-platform",
+        ];
+        for (const h of strip) proxyReq.removeHeader(h);
+        proxyReq.setHeader("origin", FMZ_UPSTREAM_BROWSER_ORIGIN);
+        proxyReq.setHeader("referer", `${FMZ_UPSTREAM_BROWSER_ORIGIN}/`);
+        proxyReq.setHeader("sec-fetch-site", "same-site");
+        proxyReq.setHeader("sec-fetch-mode", "cors");
+        proxyReq.setHeader("sec-fetch-dest", "empty");
+      });
+    },
   },
   /** [在看直播](https://www.doseeing.com/) 搜索与房间页，供头像补全（避免浏览器 CORS） */
   "/doseeing": {
@@ -35,7 +63,7 @@ const apiProxy = {
     changeOrigin: true,
     rewrite: (p) => p.replace(/^\/__fmz_reactions/, ""),
   },
-} as const;
+} as const satisfies Record<string, import("vite").ProxyOptions>;
 
 export default defineConfig({
   plugins: [

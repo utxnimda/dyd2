@@ -1,6 +1,14 @@
 <script setup lang="ts">
 import axios from "axios";
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef } from "vue";
+import {
+  computed,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import { createApi } from "../lib/api";
 import type { ClientConfig } from "../lib/api";
 import {
@@ -22,8 +30,161 @@ import {
 import type { FlyActorHint } from "../lib/recordSource";
 import { inferFlyActorFromRecord } from "../lib/recordSource";
 import type { ApiListResponse, MoneyCard, MoneyRecord } from "../types";
-import MemberDislikeButton from "./MemberDislikeButton.vue";
-import MemberLikeButton from "./MemberLikeButton.vue";
+import {
+  formatBattleShowPath,
+  loadBattleShowFromStorage,
+  parseBattleShowPath,
+  saveBattleShowToStorage,
+  type BattleShowState,
+} from "../lib/battleShowRoute";
+import HudBattleMemberSlot from "./HudBattleMemberSlot.vue";
+
+/** 轨道半径：与 .attack-hub-bh 尺寸衔接；队员/其他按环向外扩展 */
+const ORBIT_BASE_REM = 5.5;
+const ORBIT_STEP_REM = 3.65;
+/** 队员/其他环：卡片占位弦长（px，rem 换算按 16px = 1rem） */
+const ORBIT_SLOT_CHORD_PX = 118;
+/**
+ * 队长最内环：n 人均分整圈，相邻两点弦长 chord = 2r·sin(π/n)，故 r = chord / (2·sin(π/n))。
+ */
+const ORBIT_CAPTAIN_CHORD_PX = 80;
+/** 扇形环带：相对轨道半径的内缩 / 外延（rem），与 orbitRadiusRem 中心线配合 */
+const ORBIT_SECTOR_BAND_IN_REM = 2.35;
+const ORBIT_SECTOR_BAND_OUT_REM = 3.25;
+/** 扇形内弧不小于传送门边缘（rem，相对板中心） */
+const HUB_SECTOR_INNER_REM = 2.95;
+
+type OrbitPlaced = {
+  card: CaptainMoneyCard;
+  kind: "captain" | "member" | "other";
+  accent?: string;
+  angleDeg: number;
+  ringIndex: number;
+  /** 若设置则覆盖 ORBIT_BASE_REM + ringIndex*STEP（队长环动态半径、外环衔接） */
+  orbitRadiusRem?: number;
+  /** 同圈总人数与序号，用于无缝拼接扇形 */
+  ringSlotCount: number;
+  ringSlotIndex: number;
+  /** 扇形边界（度）：0°=正上，顺时针；与 clip / 头像角一致 */
+  sectorArcDeg: { a0: number; a1: number };
+};
+
+/** 队长内环半径（rem）：保证 n 人整圈时相邻弦长不小于 ORBIT_CAPTAIN_CHORD_PX（px） */
+function captainRingRem(n: number): number {
+  if (n <= 0) return ORBIT_BASE_REM;
+  const floor = ORBIT_BASE_REM + 1.85;
+  if (n === 1) return floor;
+  const rPx =
+    ORBIT_CAPTAIN_CHORD_PX / (2 * Math.sin(Math.PI / n));
+  return Math.max(floor, rPx / 16);
+}
+
+function orbitMaxSlotsForRadiusRem(rRem: number): number {
+  const rPx = rRem * 16;
+  const k = Math.floor((2 * Math.PI * rPx) / ORBIT_SLOT_CHORD_PX);
+  return Math.max(5, Math.min(26, k));
+}
+
+/** 队员/其他：第 ringIdx 圈（队长占0，首圈队员为 1）的半径 rem */
+function memberRingRem(
+  ringIdx: number,
+  hasCaptains: boolean,
+  captainRadiusRem: number,
+): number {
+  const first = hasCaptains ? captainRadiusRem + ORBIT_STEP_REM : ORBIT_BASE_REM;
+  const depth = hasCaptains ? ringIdx - 1 : ringIdx;
+  return first + Math.max(0, depth) * ORBIT_STEP_REM;
+}
+
+/** 扇形环带内外弧的半径中点（赤道），与 sectorRadiiPct 几何一致 */
+function orbitEquatorRadiusRem(p: OrbitPlaced): number {
+  const r =
+    p.orbitRadiusRem ?? ORBIT_BASE_REM + p.ringIndex * ORBIT_STEP_REM;
+  const innerRem = Math.max(HUB_SECTOR_INNER_REM, r - ORBIT_SECTOR_BAND_IN_REM);
+  const outerRem = r + ORBIT_SECTOR_BAND_OUT_REM;
+  return (innerRem + outerRem) / 2;
+}
+
+function orbitSlotStyle(p: OrbitPlaced): Record<string, string> {
+  return {
+    "--orbit-a": `${p.angleDeg}deg`,
+    "--orbit-r": `${orbitEquatorRadiusRem(p)}rem`,
+  };
+}
+
+/** 0°=正上，顺时针；百分比相对正方形轨道板（50% 为圆心） */
+function sectorArcToXY(deg: number, rPct: number): string {
+  const rad = (deg * Math.PI) / 180;
+  return `${50 + rPct * Math.sin(rad)}% ${50 - rPct * Math.cos(rad)}%`;
+}
+
+/** 环形扇区多边形（外弧 → 内弧），角度与 orbit头像一致 */
+function sectorClipPathForArc(
+  a0: number,
+  a1: number,
+  innerPct: number,
+  outerPct: number,
+): string {
+  if (outerPct <= innerPct) return "none";
+  let span = a1 - a0;
+  if (span <= 0 && a1 >= 360 - 1e-6 && a0 <= 1e-6) span = 360;
+  if (span <= 0) return "none";
+  const segments = Math.max(4, Math.min(36, Math.ceil(span / 5)));
+  const pts: string[] = [sectorArcToXY(a0, outerPct)];
+  for (let s = 1; s <= segments; s++) {
+    const t = a0 + (span * s) / segments;
+    pts.push(sectorArcToXY(t, outerPct));
+  }
+  for (let s = segments; s >= 0; s--) {
+    const t = a0 + (span * s) / segments;
+    pts.push(sectorArcToXY(t, innerPct));
+  }
+  return `polygon(${pts.join(", ")})`;
+}
+
+/** 队长阵营 corner → 象限起始角（0°=上，顺时针）：tl=[270,360), tr=[0,90), br=[90,180), bl=[180,270) */
+const QUAD_BASE_DEG: Record<"tl" | "tr" | "bl" | "br", number> = {
+  tl: 270,
+  tr: 0,
+  bl: 180,
+  br: 90,
+};
+
+function sectorRadiiPct(p: OrbitPlaced, sideRem: number): {
+  innerPct: number;
+  outerPct: number;
+} {
+  const r = p.orbitRadiusRem ?? ORBIT_BASE_REM;
+  const innerRem = Math.max(HUB_SECTOR_INNER_REM, r - ORBIT_SECTOR_BAND_IN_REM);
+  const outerRem = r + ORBIT_SECTOR_BAND_OUT_REM;
+  const half = sideRem / 2;
+  const innerPct = (innerRem / half) * 50;
+  const outerPct = (outerRem / half) * 50;
+  const inP = Math.max(0.5, Math.min(innerPct, 47));
+  const outP = Math.max(inP + 0.85, Math.min(outerPct, 49.85));
+  return { innerPct: inP, outerPct: outP };
+}
+
+function sectorAccentHex(p: OrbitPlaced): string {
+  if (p.kind === "captain" && p.accent) return p.accent;
+  if (p.kind === "member") return "#5eb0e8";
+  return "#e9b949";
+}
+
+function sectorSkinStyle(
+  p: OrbitPlaced,
+  sideRem: number,
+): Record<string, string> {
+  const { innerPct, outerPct } = sectorRadiiPct(p, sideRem);
+  const { a0, a1 } = p.sectorArcDeg;
+  const clip = sectorClipPathForArc(a0, a1, innerPct, outerPct);
+  const a = sectorAccentHex(p);
+  return {
+    clipPath: clip,
+    WebkitClipPath: clip,
+    "--sector-accent": a,
+  };
+}
 
 const props = withDefaults(
   defineProps<{
@@ -32,10 +193,18 @@ const props = withDefaults(
     pollMs?: number;
     /** 是否显示顶部工具条（独立小窗可关） */
     showControls?: boolean;
+    /** 与 #/battle/<path> 同步；嵌入主站时由 App 传入 */
+    battleShowPath?: string | null;
+    /** false：全屏 #/captain-hud 仅写 localStorage，不改地址栏 */
+    syncBattleShowToHash?: boolean;
   }>(),
   /** 布尔 prop 在 Vue 中省略时默认为 false，需显式默认 true */
-  { showControls: true },
+  { showControls: true, battleShowPath: null, syncBattleShowToHash: true },
 );
+
+const emit = defineEmits<{
+  "update:battleShowPath": [path: string];
+}>();
 
 const pollInterval = computed(() =>
   Math.max(1500, Math.min(60000, props.pollMs ?? 4000)),
@@ -78,13 +247,221 @@ const bottomTeam = computed(() =>
     ? hudBottomTeamFromRoster(cards.value, rosterMap.value)
     : [],
 );
-/** 所有参与加减分动画与轮询的成员（去重） */
+
+/** 被攻击人展示：勾选并集；「所有人」为快捷全选 */
+const attackedShowAll = ref(true);
+const attackedCaptain = ref(true);
+const attackedOther = ref(true);
+const attackedMember = ref(true);
+
+let applyingBattleFromUrl = false;
+
+function applyBattleState(s: BattleShowState) {
+  applyingBattleFromUrl = true;
+  attackedShowAll.value = s.attackedShowAll;
+  attackedCaptain.value = s.captain;
+  attackedOther.value = s.other;
+  attackedMember.value = s.member;
+  void nextTick(() => {
+    applyingBattleFromUrl = false;
+  });
+}
+
+function currentBattleState(): BattleShowState {
+  return {
+    attackedShowAll: attackedShowAll.value,
+    captain: attackedCaptain.value,
+    other: attackedOther.value,
+    member: attackedMember.value,
+  };
+}
+
+watch(
+  () => props.battleShowPath,
+  (seg) => {
+    if (!props.syncBattleShowToHash) return;
+    if (seg == null || String(seg).trim() === "") return;
+    const p = parseBattleShowPath(seg);
+    if (!p) return;
+    applyBattleState(p);
+  },
+  { immediate: true },
+);
+
+watch(
+  [attackedShowAll, attackedCaptain, attackedOther, attackedMember],
+  () => {
+    if (applyingBattleFromUrl) return;
+    const s = currentBattleState();
+    saveBattleShowToStorage(s);
+    if (!props.syncBattleShowToHash) return;
+    const path = formatBattleShowPath(s);
+    if (path === props.battleShowPath) return;
+    emit("update:battleShowPath", path);
+  },
+  { flush: "post" },
+);
+
+const effShowCaptain = computed(
+  () => attackedShowAll.value || attackedCaptain.value,
+);
+const effShowOther = computed(
+  () => attackedShowAll.value || attackedOther.value,
+);
+const effShowMember = computed(
+  () => attackedShowAll.value || attackedMember.value,
+);
+
+watch(attackedShowAll, (v) => {
+  if (v) {
+    attackedCaptain.value = true;
+    attackedOther.value = true;
+    attackedMember.value = true;
+  }
+});
+
+watch([attackedCaptain, attackedOther, attackedMember], ([c, o, m]) => {
+  if (!c || !o || !m) attackedShowAll.value = false;
+});
+
+/** 所有参与加减分动画与轮询的成员（去重，受展示筛选约束） */
 const allBoardTargets = computed(() => {
   const m = new Map<string, CaptainMoneyCard>();
-  for (const c of allCaptains.value) m.set(balKey(c.id), c);
-  for (const c of otherMembers.value) m.set(balKey(c.id), c);
-  for (const c of bottomTeam.value) m.set(balKey(c.id), c);
+  if (effShowCaptain.value) {
+    for (const c of allCaptains.value) m.set(balKey(c.id), c);
+  }
+  if (effShowOther.value) {
+    for (const c of otherMembers.value) m.set(balKey(c.id), c);
+  }
+  if (effShowMember.value) {
+    for (const c of bottomTeam.value) m.set(balKey(c.id), c);
+  }
   return [...m.values()];
+});
+
+const visibleCaptains = computed(() =>
+  effShowCaptain.value ? allCaptains.value : [],
+);
+
+/**
+ * 同心环绕传送门：最内环队长按 A/B/C/D 象限各占 90°，分界落在 0°/90°/180°/270°（正上为0° 顺时针），
+ * 象限内等分；外圈队员/其他整圈等弧。头像中心在扇形赤道半径上。
+ */
+const orbitPlacements = computed((): OrbitPlaced[] => {
+  const disp = displayBalance.value;
+  const bal = (c: CaptainMoneyCard) => disp[balKey(c.id)] ?? 0;
+  const rankOf = (c: CaptainMoneyCard) =>
+    rosterMap.value.get(String(c.id))?.preliminaryRank ?? 9999;
+
+  const out: OrbitPlaced[] = [];
+  let nextRing = 0;
+  let captainRadiusRem = 0;
+  let hasCaptains = false;
+
+  if (effShowCaptain.value) {
+    type CapWedge = {
+      card: CaptainMoneyCard;
+      accent: string;
+      a0: number;
+      a1: number;
+      center: number;
+    };
+    const capDrafts: CapWedge[] = [];
+    for (const team of teams.value) {
+      const m = team.members.length;
+      if (m === 0) continue;
+      const base = QUAD_BASE_DEG[team.corner];
+      const step = 90 / m;
+      for (let k = 0; k < m; k++) {
+        const a0 = base + k * step;
+        const a1 = base + (k + 1) * step;
+        capDrafts.push({
+          card: team.members[k]!,
+          accent: team.accent,
+          a0,
+          a1,
+          center: (a0 + a1) / 2,
+        });
+      }
+    }
+    capDrafts.sort((u, v) => u.a0 - v.a0);
+    const nCap = capDrafts.length;
+    if (nCap > 0) {
+      hasCaptains = true;
+      captainRadiusRem = captainRingRem(nCap);
+      for (let i = 0; i < nCap; i++) {
+        const w = capDrafts[i]!;
+        out.push({
+          card: w.card,
+          kind: "captain",
+          accent: w.accent,
+          angleDeg: w.center,
+          ringIndex: 0,
+          orbitRadiusRem: captainRadiusRem,
+          ringSlotCount: nCap,
+          ringSlotIndex: i,
+          sectorArcDeg: { a0: w.a0, a1: w.a1 },
+        });
+      }
+      nextRing = 1;
+    }
+  }
+
+  let memb = effShowMember.value ? [...bottomTeam.value] : [];
+  memb.sort((a, b) => {
+    const db = bal(b) - bal(a);
+    if (db !== 0) return db;
+    return rankOf(a) - rankOf(b);
+  });
+
+  let oth = effShowOther.value ? [...otherMembers.value] : [];
+  oth.sort((a, b) => {
+    const db = bal(b) - bal(a);
+    if (db !== 0) return db;
+    return a._orderIndex - b._orderIndex;
+  });
+
+  const placeInRings = (items: CaptainMoneyCard[], kind: "member" | "other") => {
+    const list = [...items];
+    let ring = nextRing;
+    while (list.length) {
+      const rRem = memberRingRem(ring, hasCaptains, captainRadiusRem);
+      const cap = orbitMaxSlotsForRadiusRem(rRem);
+      const chunk = list.splice(0, cap);
+      const n = chunk.length;
+      for (let i = 0; i < n; i++) {
+        const a0 = (360 * i) / n;
+        const a1 = (360 * (i + 1)) / n;
+        out.push({
+          card: chunk[i]!,
+          kind,
+          angleDeg: (a0 + a1) / 2,
+          ringIndex: ring,
+          orbitRadiusRem: rRem,
+          ringSlotCount: n,
+          ringSlotIndex: i,
+          sectorArcDeg: { a0, a1 },
+        });
+      }
+      ring++;
+    }
+    nextRing = ring;
+  };
+
+  placeInRings(memb, "member");
+  placeInRings(oth, "other");
+
+  return out;
+});
+
+/** 正方形轨道边长（rem），扇形 clip 百分比与圆心一致 */
+const orbitBoardSideRem = computed(() => {
+  let maxR = 0;
+  for (const p of orbitPlacements.value) {
+    maxR = Math.max(maxR, p.orbitRadiusRem ?? ORBIT_BASE_REM);
+  }
+  const maxOuter = maxR + ORBIT_SECTOR_BAND_OUT_REM;
+  return Math.max(2 * maxOuter + 5, 20);
 });
 
 type QueueItem = {
@@ -135,8 +512,8 @@ const floaters = ref<
 >([]);
 let floaterKey = 0;
 const flyMoverRef = ref<HTMLElement | null>(null);
-/** 四角游戏区，飞入头像由此区域几何中心出发 */
-const boardFlyHubRef = ref<HTMLElement | null>(null);
+/** 四角 A/B/C/D 阵营围成的2×2 区域，飞入起点为其对称中心（不含上下 strips） */
+const cornersFlyHubRef = ref<HTMLElement | null>(null);
 
 const FLY_MS_MIN = 2500;
 const FLY_MS_MAX = 5000;
@@ -156,9 +533,9 @@ function anchorEl(id: string | number): HTMLElement | null {
   return document.querySelector(`[data-captain-anchor="${balKey(id)}"]`);
 }
 
-/** 加减分飞头像起点：看板中心（与 FLY_SIZE 对齐为左上角坐标） */
-function boardHubStart(size: number): { x: number; y: number } {
-  const el = boardFlyHubRef.value;
+/** 飞入起点：四阵营区域中心（viewport 坐标，与 FLY_SIZE 对齐为 translate 左上角） */
+function cornersHubStart(size: number): { x: number; y: number } {
+  const el = cornersFlyHubRef.value;
   if (el) {
     const r = el.getBoundingClientRect();
     if (r.width > 0 && r.height > 0) {
@@ -173,6 +550,11 @@ function boardHubStart(size: number): { x: number; y: number } {
     x: window.innerWidth / 2 - s / 2,
     y: window.innerHeight / 2 - s / 2,
   };
+}
+
+/** 接近 material standard cubic-bezier(0.4, 0, 0.2, 1) 的 ease-out */
+function easeFlyProgress(t: number): number {
+  return 1 - (1 - t) ** 3;
 }
 
 function rectOf(el: HTMLElement | null, size: number) {
@@ -300,10 +682,11 @@ async function playFly(
 
   const size = FLY_SIZE;
   const flyMs = randomFlyMs();
+  const targetId = target.id;
   await nextTick();
-  const targetEl = anchorEl(target.id);
-  const end = rectOf(targetEl, size) ?? boardHubStart(size);
-  const start = boardHubStart(size);
+  const hub0 = cornersHubStart(size);
+  const targetEl0 = anchorEl(targetId);
+  const end0 = rectOf(targetEl0, size) ?? hub0;
 
   const placeholderSvg =
     "data:image/svg+xml," +
@@ -321,10 +704,10 @@ async function playFly(
   fly.value = {
     src: srcUrl,
     label: actorLabel,
-    x0: start.x,
-    y0: start.y,
-    x1: end.x,
-    y1: end.y,
+    x0: hub0.x,
+    y0: hub0.y,
+    x1: end0.x,
+    y1: end0.y,
     size,
   };
   await nextTick();
@@ -335,18 +718,34 @@ async function playFly(
     return;
   }
   layer.style.transition = "none";
-  layer.style.transform = `translate(${start.x}px, ${start.y}px)`;
-  void layer.offsetHeight;
-  layer.style.transition = `transform ${flyMs}ms cubic-bezier(0.4, 0, 0.2, 1)`;
-  layer.style.transform = `translate(${end.x}px, ${end.y}px)`;
 
   await new Promise<void>((resolve) => {
-    const done = () => {
-      layer.removeEventListener("transitionend", done);
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
       resolve();
     };
-    layer.addEventListener("transitionend", done);
-    setTimeout(done, Math.ceil(flyMs) + 120);
+    const t0 = performance.now();
+    const step = (now: number) => {
+      if (finished) return;
+      const elapsed = now - t0;
+      const t = Math.min(1, elapsed / flyMs);
+      const u = easeFlyProgress(t);
+      const startNow = cornersHubStart(size);
+      const elNow = anchorEl(targetId);
+      const endNow = rectOf(elNow, size) ?? startNow;
+      const x = startNow.x + (endNow.x - startNow.x) * u;
+      const y = startNow.y + (endNow.y - startNow.y) * u;
+      layer.style.transform = `translate(${x}px, ${y}px)`;
+      if (t < 1) {
+        requestAnimationFrame(step);
+      } else {
+        finish();
+      }
+    };
+    requestAnimationFrame(step);
+    window.setTimeout(finish, Math.ceil(flyMs) + 200);
   });
   const tk = balKey(target.id);
   const tname = String(target.name ?? "").trim();
@@ -443,13 +842,20 @@ async function processQueueLoop() {
 function boardBalanceIdSet(
   list: CaptainMoneyCard[],
   roster: Map<string, RosterEntry>,
+  vis: { captain: boolean; other: boolean; member: boolean },
 ): Set<string> {
   const keys = new Set<string>();
-  for (const e of roster.values()) {
-    if (e.captainSlot != null) keys.add(e.id);
+  if (vis.captain) {
+    for (const e of roster.values()) {
+      if (e.captainSlot != null) keys.add(e.id);
+    }
   }
-  for (const c of hudBottomTeamFromRoster(list, roster)) keys.add(balKey(c.id));
-  for (const c of hudOtherMembersFromRoster(list, roster)) keys.add(balKey(c.id));
+  if (vis.member) {
+    for (const c of hudBottomTeamFromRoster(list, roster)) keys.add(balKey(c.id));
+  }
+  if (vis.other) {
+    for (const c of hudOtherMembersFromRoster(list, roster)) keys.add(balKey(c.id));
+  }
   return keys;
 }
 
@@ -489,7 +895,11 @@ async function tick(force = false) {
     }
     cards.value = list;
     const nextSrv: Record<string, number> = {};
-    const keys = boardBalanceIdSet(list, rosterMap.value);
+    const keys = boardBalanceIdSet(list, rosterMap.value, {
+      captain: effShowCaptain.value,
+      other: effShowOther.value,
+      member: effShowMember.value,
+    });
     for (const c of list) {
       if (keys.has(balKey(c.id))) {
         nextSrv[balKey(c.id)] = Number(c.balance ?? 0);
@@ -525,9 +935,9 @@ async function manualLoad() {
 
 /** 本地演示「进攻」：飞头像 + 扣分飘字 + 头像红闪（不请求后端）。建议先勾选「暂停轮询」。 */
 async function demoAttackHit() {
-  const caps = allCaptains.value;
+  const caps = visibleCaptains.value;
   if (caps.length < 2) {
-    err.value = "至少需要 2 名队长数据才能演示进攻";
+    err.value = "演示需勾选展示「队长」，且至少 2 名队长数据";
     return;
   }
   err.value = "";
@@ -569,6 +979,9 @@ function stopPoll() {
 }
 
 onMounted(async () => {
+  if (!props.syncBattleShowToHash) {
+    applyBattleState(loadBattleShowFromStorage());
+  }
   await manualLoad();
   startPoll();
 });
@@ -583,7 +996,6 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
 <template>
   <section class="hud" :class="{ 'no-controls': !showToolbar }">
     <div v-if="showToolbar" class="bar">
-      <span class="title">战斗爽</span>
       <label class="pause">
         <input v-model="paused" type="checkbox" />
         暂停轮询
@@ -603,219 +1015,71 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
       <button
         type="button"
         class="btn btn-demo"
-        :disabled="loading || allCaptains.length < 2 || processing"
+        :disabled="loading || visibleCaptains.length < 2 || processing"
         title="先暂停轮询可避免下次刷新把演示余额同步回去"
         @click="demoAttackHit"
       >
         演示进攻效果
       </button>
+      <div class="bar-attacked" role="group" aria-label="被攻击人展示范围">
+        <span class="bar-attacked-lbl">展示</span>
+        <label class="bar-chk">
+          <input v-model="attackedShowAll" type="checkbox" />
+          所有人
+        </label>
+        <label class="bar-chk">
+          <input v-model="attackedCaptain" type="checkbox" />
+          队长
+        </label>
+        <label class="bar-chk">
+          <input v-model="attackedOther" type="checkbox" />
+          其他
+        </label>
+        <label class="bar-chk">
+          <input v-model="attackedMember" type="checkbox" />
+          队员
+        </label>
+      </div>
     </div>
     <p v-if="err" class="err">{{ err }}</p>
 
-    <div ref="boardFlyHubRef" class="board">
-      <div v-if="otherMembers.length" class="strip strip--other">
-        <div class="strip-inner">
+    <div class="board">
+      <div
+        v-if="orbitPlacements.length"
+        class="orbit-board"
+        :style="{ '--orbit-side': orbitBoardSideRem + 'rem' }"
+      >
+        <div class="orbit-sectors" aria-hidden="true">
           <div
-            v-for="c in otherMembers"
-            :key="'o-' + String(c.id)"
-            class="slot"
-            :class="{
-              ishit: hitIds.has(balKey(c.id)),
-              isheal: healIds.has(balKey(c.id)),
-            }"
-          >
-            <div class="slot-inner">
-              <div class="av-wrap">
-                <img
-                  v-if="c.avatar"
-                  class="av"
-                  :data-captain-anchor="balKey(c.id)"
-                  :src="c.avatar"
-                  alt=""
-                  referrerpolicy="no-referrer"
-                />
-                <div
-                  v-else
-                  class="av ph"
-                  :data-captain-anchor="balKey(c.id)"
-                />
-                <div class="parked-stack" aria-hidden="true">
-                  <div
-                    v-for="p in parkedNear.filter((x) => x.targetKey === balKey(c.id))"
-                    :key="p.key"
-                    class="parked-item"
-                  >
-                    <img
-                      class="parked-mini"
-                      :src="p.src"
-                      alt=""
-                      referrerpolicy="no-referrer"
-                    />
-                    <span class="parked-name">{{ p.name }}</span>
-                  </div>
-                </div>
-                <div
-                  v-for="f in floaters.filter((x) => x.id === balKey(c.id))"
-                  :key="f.key"
-                  class="floater"
-                  :class="f.kind"
-                  :style="{ '--f-stack': f.stackIndex }"
-                >
-                  {{ f.text }}
-                </div>
-              </div>
-              <div class="hud-reactions">
-                <MemberLikeButton :member-id="c.id" variant="hud" />
-                <MemberDislikeButton :member-id="c.id" variant="hud" />
-              </div>
-              <div class="meta">
-                <div class="nm">{{ c.name }}</div>
-                <div class="pts">
-                  {{ (displayBalance[balKey(c.id)] ?? 0).toLocaleString() }}
-                </div>
-              </div>
-            </div>
-          </div>
+            v-for="p in orbitPlacements"
+            :key="'sec-' + p.kind + '-' + String(p.card.id)"
+            class="orbit-sector"
+            :style="sectorSkinStyle(p, orbitBoardSideRem)"
+          />
         </div>
-      </div>
-
-      <div class="corners">
         <div
-          v-for="team in teams"
-          :key="team.label"
-          class="corner"
-          :class="'corner-' + team.corner"
-          :style="{ '--accent': team.accent }"
+          ref="cornersFlyHubRef"
+          class="orbit-hub attack-hub-bh"
+          aria-hidden="true"
+        />
+        <div
+          v-for="p in orbitPlacements"
+          :key="p.kind + '-' + String(p.card.id)"
+          class="orbit-slot"
+          :style="orbitSlotStyle(p)"
         >
-          <div class="team-tag">{{ team.label }} 阵营</div>
-          <div class="members">
-            <div
-              v-for="c in team.members"
-              :key="String(c.id)"
-              class="slot"
-              :class="{
-                ishit: hitIds.has(balKey(c.id)),
-                isheal: healIds.has(balKey(c.id)),
-              }"
-            >
-              <div class="slot-inner">
-                <div class="av-wrap">
-                  <img
-                    v-if="c.avatar"
-                    class="av"
-                    :data-captain-anchor="balKey(c.id)"
-                    :src="c.avatar"
-                    alt=""
-                    referrerpolicy="no-referrer"
-                  />
-                  <div
-                    v-else
-                    class="av ph"
-                    :data-captain-anchor="balKey(c.id)"
-                  />
-                  <div class="parked-stack" aria-hidden="true">
-                    <div
-                      v-for="p in parkedNear.filter((x) => x.targetKey === balKey(c.id))"
-                      :key="p.key"
-                      class="parked-item"
-                    >
-                      <img
-                        class="parked-mini"
-                        :src="p.src"
-                        alt=""
-                        referrerpolicy="no-referrer"
-                      />
-                      <span class="parked-name">{{ p.name }}</span>
-                    </div>
-                  </div>
-                  <div
-                    v-for="f in floaters.filter((x) => x.id === balKey(c.id))"
-                    :key="f.key"
-                    class="floater"
-                    :class="f.kind"
-                    :style="{ '--f-stack': f.stackIndex }"
-                  >
-                    {{ f.text }}
-                  </div>
-                </div>
-                <div class="hud-reactions">
-                  <MemberLikeButton :member-id="c.id" variant="hud" />
-                  <MemberDislikeButton :member-id="c.id" variant="hud" />
-                </div>
-                <div class="meta">
-                  <div class="nm">{{ c.name }}</div>
-                  <div class="pts">
-                    {{ (displayBalance[balKey(c.id)] ?? 0).toLocaleString() }}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="bottomTeam.length" class="strip strip--bottom">
-        <div class="strip-inner">
-          <div
-            v-for="c in bottomTeam"
-            :key="'b-' + String(c.id)"
-            class="slot"
-            :class="{
-              ishit: hitIds.has(balKey(c.id)),
-              isheal: healIds.has(balKey(c.id)),
-            }"
-          >
-            <div class="slot-inner">
-              <div class="av-wrap">
-                <img
-                  v-if="c.avatar"
-                  class="av"
-                  :data-captain-anchor="balKey(c.id)"
-                  :src="c.avatar"
-                  alt=""
-                  referrerpolicy="no-referrer"
-                />
-                <div
-                  v-else
-                  class="av ph"
-                  :data-captain-anchor="balKey(c.id)"
-                />
-                <div class="parked-stack" aria-hidden="true">
-                  <div
-                    v-for="p in parkedNear.filter((x) => x.targetKey === balKey(c.id))"
-                    :key="p.key"
-                    class="parked-item"
-                  >
-                    <img
-                      class="parked-mini"
-                      :src="p.src"
-                      alt=""
-                      referrerpolicy="no-referrer"
-                    />
-                    <span class="parked-name">{{ p.name }}</span>
-                  </div>
-                </div>
-                <div
-                  v-for="f in floaters.filter((x) => x.id === balKey(c.id))"
-                  :key="f.key"
-                  class="floater"
-                  :class="f.kind"
-                  :style="{ '--f-stack': f.stackIndex }"
-                >
-                  {{ f.text }}
-                </div>
-              </div>
-              <div class="hud-reactions">
-                <MemberLikeButton :member-id="c.id" variant="hud" />
-                <MemberDislikeButton :member-id="c.id" variant="hud" />
-              </div>
-              <div class="meta">
-                <div class="nm">{{ c.name }}</div>
-                <div class="pts">
-                  {{ (displayBalance[balKey(c.id)] ?? 0).toLocaleString() }}
-                </div>
-              </div>
-            </div>
+          <div class="orbit-slot-pin">
+            <HudBattleMemberSlot
+              :member="p.card"
+              :kind="p.kind"
+              :accent="p.accent"
+              orbit-stack
+              :hit-ids="hitIds"
+              :heal-ids="healIds"
+              :parked-near="parkedNear"
+              :floaters="floaters"
+              :display-balance="displayBalance"
+            />
           </div>
         </div>
       </div>
@@ -869,14 +1133,38 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
   font-size: 0.82rem;
   color: var(--muted, #8b9cb3);
 }
-.title {
-  font-weight: 700;
-  color: var(--text, #e8eef7);
-}
 .pause {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+  cursor: pointer;
+}
+.bar-attacked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.75rem;
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--muted, #8b9cb3);
+}
+.bar-attacked-lbl {
+  font-weight: 700;
+  color: var(--text, #e8eef7);
+  margin-right: 0.15rem;
+}
+.bar-chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text, #e8eef7);
+}
+.bar-chk input {
+  width: 0.95rem;
+  height: 0.95rem;
+  accent-color: var(--primary, #5b9cff);
   cursor: pointer;
 }
 .btn {
@@ -896,271 +1184,176 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
 
 .board {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 0.55rem;
+  width: 100%;
 }
-.strip {
-  border-radius: 12px;
-  padding: 0.4rem 0.45rem 0.5rem;
-  border: 2px solid color-mix(in srgb, var(--accent) 42%, var(--border, #2d3a4d));
-  background: color-mix(in srgb, var(--accent) 9%, var(--surface, #1a2332));
-  overflow: visible;
-}
-.strip--other {
-  --accent: #e9b949;
-}
-.strip--bottom {
-  --accent: #5eb0e8;
-}
-.strip-inner {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  align-items: flex-start;
-  gap: 0.35rem 0.5rem;
-  overflow: visible;
-}
-
-.corners {
+.orbit-board {
   position: relative;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: auto auto;
-  gap: 0.5rem 0.75rem;
-  min-height: 200px;
-}
-.corner {
-  border-radius: 12px;
-  padding: 0.45rem 0.5rem 0.55rem;
-  border: 2px solid color-mix(in srgb, var(--accent) 45%, var(--border, #2d3a4d));
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface, #1a2332));
+  width: min(100%, var(--orbit-side, 28rem));
+  aspect-ratio: 1;
+  margin-inline: auto;
   overflow: visible;
 }
-.corner-tl {
-  justify-self: start;
-  align-self: start;
-  max-width: 100%;
-}
-.corner-tr {
-  justify-self: end;
-  align-self: start;
-  max-width: 100%;
-}
-.corner-bl {
-  justify-self: start;
-  align-self: end;
-  max-width: 100%;
-}
-.corner-br {
-  justify-self: end;
-  align-self: end;
-  max-width: 100%;
-}
-.team-tag {
-  font-size: 0.72rem;
-  font-weight: 800;
-  letter-spacing: 0.12em;
-  color: var(--accent);
-  margin-bottom: 0.35rem;
-}
-.members {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  overflow: visible;
-}
-.slot {
-  position: relative;
-  overflow: visible;
-}
-.slot-inner {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  min-width: 0;
-}
-.hud-reactions {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 0.15rem;
-  align-self: center;
-}
-.av-wrap {
-  position: relative;
-  flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-}
-.av {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  object-fit: cover;
-  border: 2px solid color-mix(in srgb, var(--accent) 50%, var(--border));
-  flex-shrink: 0;
-  display: block;
-}
-.av.ph {
-  background: color-mix(in srgb, var(--muted) 32%, var(--surface));
-}
-.meta {
-  min-width: 0;
-}
-.nm {
-  font-size: 0.72rem;
-  font-weight: 700;
-  line-height: 1.15;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 7.5rem;
-}
-.pts {
-  font-size: 0.78rem;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  color: var(--accent, #3dd68c);
-}
-
-.slot.ishit .av {
-  animation: shake 0.5s ease;
-  box-shadow: 0 0 0 0 rgba(255, 80, 80, 0.65);
-}
-.slot.ishit .av,
-.slot.ishit .av.ph {
-  border-color: var(--danger);
-}
-.slot.isheal .av {
-  animation: pulseheal 0.65s ease;
-  box-shadow: 0 0 14px rgba(61, 214, 140, 0.55);
-}
-.slot.isheal .av,
-.slot.isheal .av.ph {
-  border-color: var(--accent);
-}
-
-@keyframes shake {
-  0%,
-  100% {
-    transform: translateX(0);
-  }
-  20% {
-    transform: translateX(-4px) rotate(-4deg);
-  }
-  40% {
-    transform: translateX(4px) rotate(4deg);
-  }
-  60% {
-    transform: translateX(-3px);
-  }
-  80% {
-    transform: translateX(3px);
-  }
-}
-@keyframes pulseheal {
-  0% {
-    transform: scale(1);
-    filter: brightness(1);
-  }
-  40% {
-    transform: scale(1.08);
-    filter: brightness(1.25) drop-shadow(0 0 8px #3dd68c);
-  }
-  100% {
-    transform: scale(1);
-    filter: brightness(1);
-  }
-}
-
-.parked-stack {
+.orbit-sectors {
   position: absolute;
-  right: calc(100% + 4px);
-  top: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 5px;
+  inset: 0;
+  z-index: 0;
   pointer-events: none;
-  z-index: 2;
-}
-.parked-item {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 1px;
-}
-.parked-mini {
-  width: 20px;
-  height: 20px;
   border-radius: 50%;
-  object-fit: cover;
-  border: 1px solid color-mix(in srgb, var(--border, #2d3a4d) 85%, var(--text, #e8eef7) 15%);
-  box-shadow: 0 2px 10px color-mix(in srgb, var(--bg, #0f1419) 55%, transparent);
-  flex-shrink: 0;
 }
-.parked-name {
-  font-size: 0.58rem;
-  font-weight: 800;
-  color: var(--text, #e8eef7);
-  background: color-mix(in srgb, var(--surface, #1a2332) 92%, var(--bg, #0f1419) 8%);
-  border: 1px solid color-mix(in srgb, var(--border, #2d3a4d) 75%, transparent);
-  border-radius: 5px;
-  padding: 1px 4px;
-  box-shadow: 0 1px 6px color-mix(in srgb, var(--bg, #0f1419) 45%, transparent);
-  text-shadow: 0 1px 2px color-mix(in srgb, var(--bg, #0f1419) 70%, transparent);
-  max-width: 4.2rem;
-  text-align: right;
-  line-height: 1.05;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.orbit-sector {
+  position: absolute;
+  inset: 0;
+  opacity: 0.5;
+  background: linear-gradient(
+    168deg,
+    color-mix(in srgb, var(--sector-accent) 40%, var(--surface, #1a2332)),
+    color-mix(in srgb, var(--sector-accent) 14%, var(--surface, #1a2332))
+  );
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sector-accent) 28%, transparent);
 }
-
-.floater {
+.orbit-hub {
   position: absolute;
   left: 50%;
-  top: calc(100% + 4px);
-  z-index: 3;
-  font-size: 0.82rem;
-  font-weight: 900;
-  font-variant-numeric: tabular-nums;
+  top: 50%;
+  z-index: 2;
+  translate: -50% -50%;
   pointer-events: none;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9), 0 0 10px rgba(0, 0, 0, 0.45);
-  white-space: nowrap;
-  transform: translateX(calc(-50% + var(--f-stack, 0) * 10px));
-  animation: damageFromBelow 1.15s cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
-.floater.hit {
-  color: var(--danger);
+.orbit-slot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  z-index: 3;
+  overflow: visible;
+  pointer-events: none;
 }
-.floater.heal {
-  color: color-mix(in srgb, var(--accent) 82%, #fff 18%);
+.orbit-slot-pin {
+  pointer-events: auto;
+  width: fit-content;
+  min-width: 2.25rem;
+  max-width: 4.25rem;
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  /* 头像圆心（36px 高的一半）对准轨道赤道锚点，与仅头像时一致 */
+  transform: translate(-50%, -50%) rotate(var(--orbit-a)) translateY(calc(-1 * var(--orbit-r)))
+    rotate(calc(-1 * var(--orbit-a)));
+  transform-origin: 50% 18px;
 }
-@keyframes damageFromBelow {
-  0% {
-    opacity: 0;
-    transform: translateX(calc(-50% + var(--f-stack, 0) * 10px)) translateY(14px)
-      scale(0.55);
-    filter: blur(0.6px);
+/* 进攻飞入中心：传送门 — 内凹通道 + 外环能量旋涡 + 外发光 */
+.attack-hub-bh {
+  width: min(100%, 5.25rem);
+  min-width: 3.5rem;
+  min-height: 3.5rem;
+  aspect-ratio: 1;
+  max-width: 5.25rem;
+  max-height: 5.25rem;
+  border-radius: 50%;
+  position: relative;
+  border: none;
+  outline: none;
+  background: transparent;
+  box-sizing: border-box;
+  overflow: visible;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--primary, #5b9cff) 32%, transparent))
+    drop-shadow(0 0 20px rgba(140, 100, 255, 0.14));
+}
+/* 旋涡能量外环 */
+.attack-hub-bh::after {
+  content: "";
+  position: absolute;
+  inset: -6%;
+  border-radius: 50%;
+  z-index: 1;
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    color-mix(in srgb, var(--primary, #5b9cff) 52%, transparent),
+    transparent 55deg,
+    rgba(180, 120, 255, 0.38) 110deg,
+    transparent 165deg,
+    rgba(100, 220, 255, 0.32) 220deg,
+    transparent 275deg,
+    color-mix(in srgb, var(--primary, #5b9cff) 48%, transparent) 320deg,
+    transparent
+  );
+  -webkit-mask-image: radial-gradient(
+    circle,
+    transparent 0,
+    transparent 56%,
+    #000 60%,
+    #000 88%,
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    circle,
+    transparent 0,
+    transparent 56%,
+    #000 60%,
+    #000 88%,
+    transparent 100%
+  );
+  animation: attack-hub-portal-swirl 5s linear infinite;
+  will-change: transform;
+}
+/* 门内「通道」：半透明叠层 + 上亮下暗，透出下层旋涡，略呈凹面 */
+.attack-hub-bh::before {
+  content: "";
+  position: absolute;
+  inset: 10%;
+  border-radius: 50%;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0.72;
+  background:
+    radial-gradient(
+      ellipse 115% 90% at 42% 34%,
+      rgba(255, 255, 255, 0.11) 0%,
+      rgba(200, 230, 255, 0.04) 22%,
+      transparent 48%
+    ),
+    radial-gradient(
+      circle at 50% 54%,
+      rgba(0, 4, 14, 0.38) 0%,
+      rgba(6, 12, 32, 0.26) 34%,
+      rgba(20, 45, 95, 0.14) 56%,
+      color-mix(in srgb, var(--primary, #5b9cff) 26%, transparent) 72%,
+      rgba(180, 215, 255, 0.12) 84%,
+      transparent 94%
+    );
+  box-shadow:
+    inset 0 16px 28px rgba(140, 190, 255, 0.09),
+    inset 0 -22px 36px rgba(0, 0, 0, 0.38),
+    inset 0 0 48px rgba(0, 0, 0, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 0 16px color-mix(in srgb, var(--primary, #5b9cff) 20%, transparent);
+  animation: attack-hub-portal-pulse 2.6s ease-in-out infinite;
+}
+@keyframes attack-hub-portal-swirl {
+  to {
+    transform: rotate(360deg);
   }
-  18% {
-    opacity: 1;
-    filter: blur(0);
-    transform: translateX(calc(-50% + var(--f-stack, 0) * 10px)) translateY(0)
-      scale(1.08);
-  }
-  55% {
-    opacity: 1;
-    transform: translateX(calc(-50% + var(--f-stack, 0) * 10px)) translateY(-6px)
-      scale(1);
-  }
+}
+@keyframes attack-hub-portal-pulse {
+  0%,
   100% {
-    opacity: 0;
-    transform: translateX(calc(-50% + var(--f-stack, 0) * 10px)) translateY(-26px)
-      scale(0.92);
+    opacity: 0.62;
+    filter: brightness(1);
+  }
+  50% {
+    opacity: 0.78;
+    filter: brightness(1.08);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .attack-hub-bh::after {
+    animation: none;
+  }
+  .attack-hub-bh::before {
+    animation: none;
   }
 }
 </style>

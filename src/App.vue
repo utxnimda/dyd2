@@ -25,6 +25,10 @@ import {
   type MainTab,
   type PrePanelTab,
 } from "./lib/appRoute";
+import {
+  formatBattleShowPath,
+  loadBattleShowFromStorage,
+} from "./lib/battleShowRoute";
 
 const settings = ref<StoredSettings>(loadSettings());
 
@@ -52,6 +56,9 @@ function applyTheme() {
 const tab = ref<MainTab>("pre");
 const prePanelTab = ref<PrePanelTab>("total");
 
+/** 战斗爽展示筛选路径段（#/battle/<此段>），刷新后由 hash 或 localStorage 恢复 */
+const battleShowPath = ref(formatBattleShowPath(loadBattleShowFromStorage()));
+
 const captainHudOnly = ref(false);
 function refreshDocTitle() {
   const suffix = FMZ_RELEASE_LABEL ? ` ${FMZ_RELEASE_LABEL}` : "";
@@ -68,13 +75,33 @@ function applyHashToState() {
     captainHudOnly.value = false;
     tab.value = parsed.tab;
     prePanelTab.value = parsed.prePanel;
+    if (parsed.tab === "battle") {
+      let seg = parsed.battleShowPath;
+      if (!seg) {
+        seg = formatBattleShowPath(loadBattleShowFromStorage());
+        replaceAppHash(formatAppHash(false, "battle", "total", seg));
+      }
+      battleShowPath.value = seg;
+    }
   }
   refreshDocTitle();
 }
 
 function syncHashFromState() {
   if (typeof window === "undefined") return;
-  replaceAppHash(formatAppHash(captainHudOnly.value, tab.value, prePanelTab.value));
+  replaceAppHash(
+    formatAppHash(
+      captainHudOnly.value,
+      tab.value,
+      prePanelTab.value,
+      tab.value === "battle" ? battleShowPath.value : null,
+    ),
+  );
+}
+
+function onBattleShowPath(next: string) {
+  battleShowPath.value = next;
+  if (tab.value === "battle") syncHashFromState();
 }
 
 function selectTab(next: MainTab) {
@@ -98,11 +125,13 @@ watch(
 
 const preRef = ref<InstanceType<typeof PreliminaryPanel> | null>(null);
 const usrRef = ref<InstanceType<typeof UsersPanel> | null>(null);
+const battleRef = ref<InstanceType<typeof CaptainCornersHud> | null>(null);
 const treRef = ref<InstanceType<typeof TreasuryPanel> | null>(null);
 
 function onApply() {
   if (tab.value === "pre") preRef.value?.load();
   if (tab.value === "users") usrRef.value?.reload();
+  if (tab.value === "battle") battleRef.value?.reload();
   if (tab.value === "treasury") treRef.value?.reload();
 }
 
@@ -110,6 +139,7 @@ function loadActivePanel() {
   if (captainHudOnly.value) return;
   if (tab.value === "pre") preRef.value?.load();
   if (tab.value === "users") usrRef.value?.reload();
+  if (tab.value === "battle") battleRef.value?.reload();
   if (tab.value === "treasury") treRef.value?.reload();
 }
 
@@ -125,7 +155,14 @@ onMounted(() => {
     !captainHudOnly.value &&
     (!window.location.hash || window.location.hash === "#")
   ) {
-    replaceAppHash(formatAppHash(false, tab.value, prePanelTab.value));
+    replaceAppHash(
+      formatAppHash(
+        false,
+        tab.value,
+        prePanelTab.value,
+        tab.value === "battle" ? battleShowPath.value : null,
+      ),
+    );
   }
   window.addEventListener("hashchange", onWindowHashChange);
   applyTheme();
@@ -149,6 +186,7 @@ watch(
 watch(tab, (t, prev) => {
   if (captainHudOnly.value) return;
   if (t === "users") usrRef.value?.reload();
+  if (t === "battle") battleRef.value?.reload();
   if (t === "treasury") treRef.value?.reload();
   if (t === "pre" && prev !== "pre") preRef.value?.load();
   syncHashFromState();
@@ -166,20 +204,25 @@ watch(prePanelTab, () => {
     class="standalone-hud"
     :config="clientConfig"
     :poll-ms="3500"
+    :sync-battle-show-to-hash="false"
   />
   <template v-else>
   <SettingsBar v-model="settings" @apply="onApply" />
   <nav class="nav">
     <button :class="{ on: tab === 'pre' }" type="button" @click="selectTab('pre')">预赛数据</button>
     <button :class="{ on: tab === 'users' }" type="button" @click="selectTab('users')">用户积分</button>
+    <button :class="{ on: tab === 'battle' }" type="button" @click="selectTab('battle')">战斗爽</button>
     <button :class="{ on: tab === 'treasury' }" type="button" @click="selectTab('treasury')">团员金库</button>
   </nav>
   <main>
     <CaptainCornersHud
-      v-if="tab === 'treasury'"
-      class="treasury-hud"
+      v-if="tab === 'battle'"
+      ref="battleRef"
+      class="panel-hud"
       :config="clientConfig"
       :poll-ms="4000"
+      :battle-show-path="battleShowPath"
+      @update:battle-show-path="onBattleShowPath"
     />
     <PreliminaryPanel
       v-show="tab === 'pre'"
@@ -228,7 +271,7 @@ main {
   max-width: 1200px;
   margin: 0 auto;
 }
-.treasury-hud {
+.panel-hud {
   margin: 0.75rem 1.25rem 0;
 }
 .standalone-hud {

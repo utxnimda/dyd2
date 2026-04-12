@@ -172,8 +172,9 @@ node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
 | `.../#/pre/perround` | 预赛 · 每轮游戏排名 |
 | `.../#/pre/logging` | 预赛 · 按日预赛伐木值 |
 | `.../#/users` | 用户积分 |
-| `.../#/treasury` | 团员金库（含战斗爽） |
-| `.../#captain-hud` 或 `.../#/captain-hud` | 仅战斗爽全屏 |
+| `.../#/battle` | 战斗爽（与顶栏同级） |
+| `.../#/treasury` | 团员金库 |
+| `.../#captain-hud` 或 `.../#/captain-hud` | 仅战斗爽全屏（无顶栏，适合 OBS） |
 
 切换标签或预赛子页时，地址栏会 **`replaceState`** 同步（不刷屏历史条目）。
 
