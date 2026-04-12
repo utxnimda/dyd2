@@ -9,6 +9,7 @@ import {
   ref,
   shallowRef,
   watch,
+  watchEffect,
 } from "vue";
 import { createApi } from "../lib/api";
 import type { ClientConfig } from "../lib/api";
@@ -700,6 +701,35 @@ const orbitBoardSideRem = computed(() => {
 const orbitBoardInlineStyle = computed(() => ({
   "--orbit-side": `${orbitBoardSideRem.value}rem`,
   ...orbitSectorPanelCssVars(),
+}));
+
+const orbitBoardEl = ref<HTMLElement | null>(null);
+/** 实际板宽 / 设计边长（px），整块轨道（扇形+槽位+头像+弧排字）同比例缩放 */
+const orbitScale = ref(1);
+
+function updateOrbitScale() {
+  const el = orbitBoardEl.value;
+  if (!el) return;
+  const w = el.getBoundingClientRect().width;
+  const remPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  const designW = orbitBoardSideRem.value * remPx;
+  orbitScale.value = designW > 0 ? Math.min(1, w / designW) : 1;
+}
+
+watchEffect((onCleanup) => {
+  const el = orbitBoardEl.value;
+  if (!el) return;
+  updateOrbitScale();
+  const ro = new ResizeObserver(updateOrbitScale);
+  ro.observe(el);
+  onCleanup(() => ro.disconnect());
+});
+
+watch(orbitBoardSideRem, () => nextTick(updateOrbitScale));
+
+const orbitScalerStyle = computed(() => ({
+  transform: `scale(${orbitScale.value})`,
+  transformOrigin: "center center",
 }));
 
 /**
@@ -1531,9 +1561,11 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
     <div class="board">
       <div
         v-if="orbitPlacements.length"
+        ref="orbitBoardEl"
         class="orbit-board"
         :style="orbitBoardInlineStyle"
       >
+        <div class="orbit-board-scaler" :style="orbitScalerStyle">
         <div class="orbit-sectors" aria-hidden="true">
           <div
             v-for="p in orbitPlacements"
@@ -1630,6 +1662,7 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
               :display-balance="displayBalance"
             />
           </div>
+        </div>
         </div>
       </div>
     </div>
@@ -1829,7 +1862,17 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
   width: min(100%, var(--orbit-side, 28rem));
   aspect-ratio: 1;
   margin-inline: auto;
-  overflow: visible;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/** 设计尺寸为 var(--orbit-side) 的正方形；外层变窄时用 transform 整体缩放，头像/扇形/弧排字同比例 */
+.orbit-board-scaler {
+  position: relative;
+  width: var(--orbit-side, 28rem);
+  aspect-ratio: 1;
+  flex-shrink: 0;
 }
 .orbit-sectors {
   position: absolute;
@@ -1882,7 +1925,7 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
   flex-shrink: 0;
   display: flex;
   justify-content: center;
-  /* 槽几何中心即头像中心（orbit-stack 对称 padding） */
+  /* 槽几何中心即头像中心（orbit-stack 对称 padding）；整体缩放由 .orbit-board-scaler 负责 */
   transform: translate(-50%, -50%) rotate(var(--orbit-a)) translateY(calc(-1 * var(--orbit-r)))
     rotate(calc(-1 * var(--orbit-a)));
   transform-origin: 50% 50%;
