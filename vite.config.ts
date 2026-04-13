@@ -63,6 +63,12 @@ const apiProxy = {
     changeOrigin: true,
     rewrite: (p) => p.replace(/^\/__fmz_reactions/, ""),
   },
+  /** 大话三国攻城快照：本地 `npm run defense-tower-server`（默认 8788） */
+  "/__fmz_defense": {
+    target: "http://127.0.0.1:8788",
+    changeOrigin: true,
+    rewrite: (p) => p.replace(/^\/__fmz_defense/, ""),
+  },
 } as const satisfies Record<string, import("vite").ProxyOptions>;
 
 export default defineConfig({

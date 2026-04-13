@@ -1,6 +1,6 @@
 /** 主站 hash 路由（无 vue-router，便于静态部署与 OBS 单链打开指定页） */
 
-export type MainTab = "pre" | "users" | "battle" | "treasury";
+export type MainTab = "pre" | "users" | "battle" | "treasury" | "siege";
 
 export type PrePanelTab = "total" | "nogf" | "perround" | "gf" | "logging";
 
@@ -41,6 +41,8 @@ export function parseAppHash(hash: string): ParsedAppHash {
   }
   if (head === "treasury")
     return { kind: "main", tab: "treasury", prePanel: "total", battleShowPath: null };
+  if (head === "siege" || head === "defense" || head === "douyuDefenseTower")
+    return { kind: "main", tab: "siege", prePanel: "total", battleShowPath: null };
 
   return { kind: "main", tab: "pre", prePanel: "total", battleShowPath: null };
 }
@@ -60,6 +62,7 @@ export function formatAppHash(
     return `#/battle/${s}`;
   }
   if (tab === "treasury") return "#/treasury";
+  if (tab === "siege") return "#/siege";
   if (prePanel === "total") return "#/pre";
   return `#/pre/${prePanel}`;
 }

@@ -1,14 +1,15 @@
 {
   "name": "fmz-dashboard",
   "private": true,
-  "version": "0.8.4",
-  "fmzReleaseLabel": "v0.8.4",
+  "version": "1.0.0",
+  "fmzReleaseLabel": "v1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:all": "concurrently -n reactions,vite -c cyan,magenta \"npm run reactions-server\" \"npm run dev\"",
+    "dev:all": "concurrently -n reactions,defense,vite -c cyan,blue,magenta \"npm run reactions-server\" \"npm run defense-tower-server\" \"npm run dev\"",
     "build": "vite build",
     "reactions-server": "npm run start --prefix server",
+    "defense-tower-server": "node server/defense-tower-server.mjs",
     "check:reactions": "node scripts/check-reactions.mjs",
     "pack": "vite build && node scripts/pack-release.mjs",
     "preview": "vite preview",

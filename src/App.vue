@@ -13,6 +13,7 @@ import CaptainCornersHud from "./components/CaptainCornersHud.vue";
 import PreliminaryPanel from "./components/PreliminaryPanel.vue";
 import UsersPanel from "./components/UsersPanel.vue";
 import TreasuryPanel from "./components/TreasuryPanel.vue";
+import DefenseTowerPanel from "./components/DefenseTowerPanel.vue";
 import { FMZ_RELEASE_LABEL } from "./buildInfo";
 import {
   FMZ_REACTIONS_CLIENT_KEY,
@@ -139,6 +140,7 @@ const preRef = ref<InstanceType<typeof PreliminaryPanel> | null>(null);
 const usrRef = ref<InstanceType<typeof UsersPanel> | null>(null);
 const battleRef = ref<InstanceType<typeof CaptainCornersHud> | null>(null);
 const treRef = ref<InstanceType<typeof TreasuryPanel> | null>(null);
+const siegeRef = ref<InstanceType<typeof DefenseTowerPanel> | null>(null);
 
 async function openTreasuryDetailFromAvatar(memberId: string | number | null | undefined) {
   if (memberId == null || String(memberId).trim() === "") return;
@@ -165,6 +167,7 @@ function onApply() {
   if (tab.value === "users") usrRef.value?.reload();
   if (tab.value === "battle") battleRef.value?.reload();
   if (tab.value === "treasury") treRef.value?.reload();
+  if (tab.value === "siege") siegeRef.value?.reload();
 }
 
 function loadActivePanel() {
@@ -173,6 +176,7 @@ function loadActivePanel() {
   if (tab.value === "users") usrRef.value?.reload();
   if (tab.value === "battle") battleRef.value?.reload();
   if (tab.value === "treasury") treRef.value?.reload();
+  if (tab.value === "siege") siegeRef.value?.reload();
 }
 
 function onWindowHashChange() {
@@ -217,9 +221,12 @@ watch(
 
 watch(tab, (t, prev) => {
   if (captainHudOnly.value) return;
+  /** 金库详情 Teleport 到 body；v-show 隐藏面板时 dlg 仍会挡在其他页上，离开金库页即关 */
+  if (t !== "treasury") treRef.value?.closeDlg();
   if (t === "users") usrRef.value?.reload();
   if (t === "battle") battleRef.value?.reload();
   if (t === "treasury") treRef.value?.reload();
+  if (t === "siege") siegeRef.value?.reload();
   if (t === "pre" && prev !== "pre") preRef.value?.load();
   syncHashFromState();
 });
@@ -240,21 +247,23 @@ watch(prePanelTab, () => {
   />
   <template v-else>
   <SettingsBar v-model="settings" @apply="onApply" />
-  <nav class="nav">
+  <nav class="nav" aria-label="主导航">
     <button :class="{ on: tab === 'pre' }" type="button" @click="selectTab('pre')">预赛数据</button>
     <button :class="{ on: tab === 'users' }" type="button" @click="selectTab('users')">用户积分</button>
     <button :class="{ on: tab === 'treasury' }" type="button" @click="selectTab('treasury')">团员金库</button>
     <button :class="{ on: tab === 'battle' }" type="button" @click="selectTab('battle')">战斗爽</button>
+    <button :class="{ on: tab === 'siege' }" type="button" @click="selectTab('siege')">大话攻城</button>
   </nav>
   <main>
+    <!-- 预赛 / 用户 / 攻城用 v-if，避免隐藏面板仍占 DOM、子级「页签」与顶栏叠套感；金库须 v-show 以便预赛里点头像时 ref 仍可用 -->
     <PreliminaryPanel
-      v-show="tab === 'pre'"
+      v-if="tab === 'pre'"
       ref="preRef"
       v-model:panel-tab="prePanelTab"
       :config="clientConfig"
     />
     <UsersPanel
-      v-show="tab === 'users'"
+      v-if="tab === 'users'"
       ref="usrRef"
       :config="clientConfig"
     />
@@ -271,6 +280,10 @@ watch(prePanelTab, () => {
       :poll-ms="4000"
       :battle-show-path="battleShowPath"
       @update:battle-show-path="onBattleShowPath"
+    />
+    <DefenseTowerPanel
+      v-if="tab === 'siege'"
+      ref="siegeRef"
     />
   </main>
   </template>

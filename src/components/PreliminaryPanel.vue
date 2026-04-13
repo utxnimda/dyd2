@@ -185,16 +185,52 @@ defineExpose({ load });
       </ul>
     </div>
 
-    <div class="tabs">
-      <button :class="{ on: panelTab === 'total' }" type="button" @click="panelTab = 'total'">总分排名</button>
-      <button :class="{ on: panelTab === 'nogf' }" type="button" @click="panelTab = 'nogf'">
+    <div class="pre-subview" role="tablist" aria-label="预赛数据子视图">
+      <button
+        :class="{ on: panelTab === 'total' }"
+        type="button"
+        role="tab"
+        :aria-selected="panelTab === 'total'"
+        @click="panelTab = 'total'"
+      >
+        总分排名
+      </button>
+      <button
+        :class="{ on: panelTab === 'nogf' }"
+        type="button"
+        role="tab"
+        :aria-selected="panelTab === 'nogf'"
+        @click="panelTab = 'nogf'"
+      >
         除掉伐木值积分（仅九轮之和）
       </button>
-      <button :class="{ on: panelTab === 'perround' }" type="button" @click="panelTab = 'perround'">每轮游戏排名</button>
-      <button :class="{ on: panelTab === 'gf' }" type="button" @click="panelTab = 'gf'">
+      <button
+        :class="{ on: panelTab === 'perround' }"
+        type="button"
+        role="tab"
+        :aria-selected="panelTab === 'perround'"
+        @click="panelTab = 'perround'"
+      >
+        每轮游戏排名
+      </button>
+      <button
+        :class="{ on: panelTab === 'gf' }"
+        type="button"
+        role="tab"
+        :aria-selected="panelTab === 'gf'"
+        @click="panelTab = 'gf'"
+      >
         伐木值积分
       </button>
-      <button :class="{ on: panelTab === 'logging' }" type="button" @click="panelTab = 'logging'">按日预赛伐木值</button>
+      <button
+        :class="{ on: panelTab === 'logging' }"
+        type="button"
+        role="tab"
+        :aria-selected="panelTab === 'logging'"
+        @click="panelTab = 'logging'"
+      >
+        按日预赛伐木值
+      </button>
     </div>
 
     <div v-if="panelTab === 'perround'" class="round-pick">
@@ -461,25 +497,37 @@ button.primary:disabled {
 .warn-url code {
   color: var(--muted);
 }
-.tabs {
+/* 与 App 顶栏主导航区分：下划线分段，避免「一排页签套一排页签」观感 */
+.pre-subview {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
-  margin: 1rem 0;
+  gap: 0;
+  margin: 0.75rem 0 1rem;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  max-width: 100%;
 }
-.tabs button {
-  padding: 0.4rem 0.75rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
+.pre-subview button {
+  margin: 0;
+  padding: 0.45rem 0.65rem 0.5rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  border-radius: 0;
   background: transparent;
-  color: var(--text);
+  color: var(--muted);
   cursor: pointer;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
+  font-weight: 600;
 }
-.tabs button.on {
-  background: var(--surface);
-  border-color: var(--primary);
-  color: var(--primary);
+.pre-subview button.on {
+  color: var(--text);
+  border-bottom-color: var(--primary);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+}
+.pre-subview button:hover:not(.on) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 35%, transparent);
 }
 .round-pick {
   margin-bottom: 0.75rem;

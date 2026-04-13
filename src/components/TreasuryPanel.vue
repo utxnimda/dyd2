@@ -225,7 +225,7 @@ watch(
 
 onMounted(() => loadCards());
 
-defineExpose({ reload: loadCards, openCard, isTreasuryMember });
+defineExpose({ reload: loadCards, openCard, isTreasuryMember, closeDlg });
 </script>
 
 <template>
