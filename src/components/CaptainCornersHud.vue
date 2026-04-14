@@ -1871,6 +1871,7 @@ defineExpose({ reload: manualLoad, startPoll, stopPoll });
 .orbit-board-scaler {
   position: relative;
   width: var(--orbit-side, 28rem);
+  height: var(--orbit-side, 28rem);
   aspect-ratio: 1;
   flex-shrink: 0;
 }
