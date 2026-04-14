@@ -54,14 +54,31 @@ async function reload() {
   await Promise.all([loadOverview(), loadRecentAttacks(), loadPrediction()]);
 }
 
+let lastSyncReloadSec = -1; // 避免同一秒重复拉取
+let reloading = false;
+
+/** 每秒检测：秒数到 50-53 时立即拉取（上游在第 48 秒刷新，服务端在第 50 秒拉取） */
+function onTick() {
+  tick.value++;
+  if (reloading) return;
+  const sec = new Date().getSeconds();
+  if (sec >= 50 && sec <= 53 && lastSyncReloadSec !== sec) {
+    lastSyncReloadSec = sec;
+    reloading = true;
+    void reload().finally(() => { reloading = false; });
+  }
+}
+
 onMounted(() => {
   void reload();
-  tickTimer = setInterval(() => {
-    tick.value++;
-  }, 1000);
+  tickTimer = setInterval(onTick, 1000);
+  // 兜底轮询：防止对齐拉取因为某种原因错过
   pollTimer = setInterval(() => {
-    void reload();
-  }, 15_000);
+    if (!reloading) {
+      reloading = true;
+      void reload().finally(() => { reloading = false; });
+    }
+  }, 30_000);
 });
 
 onUnmounted(() => {
