@@ -252,7 +252,7 @@ watch(prePanelTab, () => {
     <button :class="{ on: tab === 'users' }" type="button" @click="selectTab('users')">用户积分</button>
     <button :class="{ on: tab === 'treasury' }" type="button" @click="selectTab('treasury')">团员金库</button>
     <button :class="{ on: tab === 'battle' }" type="button" @click="selectTab('battle')">战斗爽</button>
-    <button :class="{ on: tab === 'siege' }" type="button" @click="selectTab('siege')">大话攻城</button>
+    <button :class="{ on: tab === 'siege' }" type="button" @click="selectTab('siege')">夜观星象</button>
   </nav>
   <main>
     <!-- 预赛 / 用户 / 攻城用 v-if，避免隐藏面板仍占 DOM、子级「页签」与顶栏叠套感；金库须 v-show 以便预赛里点头像时 ref 仍可用 -->

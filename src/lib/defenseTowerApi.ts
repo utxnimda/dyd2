@@ -22,6 +22,7 @@ export type DefenseOverview = {
   secondsToSync: number;
   snapshot: DefenseSnapshotPayload | null;
   historyCount: number;
+  attackRecordCount?: number;
   lastRow: { id: number; fetchedAt: number; httpStatus: number; ok: number } | null;
 };
 
@@ -30,6 +31,17 @@ export type DefenseHistoryRow = {
   fetched_at: number;
   http_status: number;
   ok: number;
+};
+
+export type DefenseAttackRow = {
+  id: number;
+  attack_at: number;
+  attack_time_label: string;
+  city_id: string;
+  city_name: string;
+  first_seen_snapshot_id: number;
+  last_seen_snapshot_id: number;
+  last_seen_fetched_at: number;
 };
 
 const BASE = "/__fmz_defense";
@@ -86,10 +98,73 @@ export async function fetchDefenseHistory(
   return j.data;
 }
 
+export async function fetchDefenseRecentAttacks(
+  limit = 60,
+): Promise<{ rows: DefenseAttackRow[]; totalCount: number }> {
+  const r = await fetch(`${BASE}/api/recent-attacks?limit=${encodeURIComponent(String(limit))}`);
+  if (!r.ok) throw new Error(`recent-attacks ${r.status}`);
+  const j = (await r.json()) as {
+    code: number;
+    data: { rows: DefenseAttackRow[]; totalCount: number };
+  };
+  if (j.code !== 0) throw new Error("recent-attacks code");
+  return j.data;
+}
+
+export type PredictionCity = {
+  cityId: string;
+  cityName: string;
+  weibull: { k: number; lambda: number; pity: number };
+  sinceLastMin: number | null;
+  justAppeared: boolean;
+  pityProgress: number;
+  prob5min: number;
+  eta50: number | null;
+  level: "high" | "medium" | "low" | "none";
+  predictedTimes: string[];
+  hotMinutes: { minute: number; count: number }[];
+  sampleCount: number;
+};
+
+export type NextCityProb = {
+  cityId: string;
+  cityName: string;
+  count: number;
+  prob: number;
+  pct: string;
+};
+
+export type PredictionData = {
+  now: number;
+  smallCityStreak: number;
+  lastCityId: string | null;
+  lastCityName: string | null;
+  nextCityProbs: NextCityProb[];
+  cities: PredictionCity[];
+};
+
+export async function fetchPrediction(): Promise<PredictionData> {
+  const r = await fetch(`${BASE}/api/prediction`);
+  if (!r.ok) throw new Error(`prediction ${r.status}`);
+  const j = (await r.json()) as { code: number; data: PredictionData };
+  if (j.code !== 0) throw new Error("prediction code");
+  return j.data;
+}
+
 export const DEFENSE_TOWER_NAMES: Record<string, string> = {
   "1": "洛阳",
   "2": "成都",
   "3": "建业",
+};
+
+export const DEFENSE_SIEGE_CITY_NAMES: Record<string, string> = {
+  "1": "洛阳",
+  "2": "成都",
+  "3": "建业",
+  "4": "荆州",
+  "5": "长安",
+  "6": "许昌",
+  "7": "汉中",
 };
 
 /** 近 60 分钟条目的合并热度（分钟 -> 合计次数） */

@@ -9,8 +9,9 @@ export type SiegeMinuteWindow = (typeof SIEGE_MINUTE_WINDOWS)[number];
 export const SIEGE_VISIBLE_CITY_COUNT = 6;
 /** 攻城城市环相对中心 Hub 的内侧偏移（rem） */
 export const SIEGE_CITY_INNER_OFFSET_REM = 0.28;
-/** 攻城城市扇形的径向厚度（rem）：只保留装下城市名+时间所需的厚度 */
-export const SIEGE_CITY_OUTER_EXTRA_REM = 1.58;
+/** 攻城城市扇形的径向厚度（rem）：与战斗爽轨道扇形保持同宽 */
+export const SIEGE_CITY_OUTER_EXTRA_REM =
+  ORBIT_SECTOR_PANEL.bandInnerRem + ORBIT_SECTOR_PANEL.bandOuterRem;
 /** 最近一次攻城城市固定占据 0–60°，因此扇形中线位于 30° */
 export const SIEGE_LATEST_CITY_MID_DEG = 30;
 
@@ -188,6 +189,94 @@ export function buildInnerCitySectors(
   });
 }
 
+/** 最内圈固定 6 个扇形 */
+export const SIEGE_INNER_SLOT_COUNT = 6;
+/** 相邻圈之间的径向间隙 rem */
+const RING_GAP_REM = 0.12;
+
+/** 第 N 圈的扇形个数：每圈是上一圈的 2 倍（6→12→24→48…） */
+function ringSlotCount(ring: number): number {
+  return SIEGE_INNER_SLOT_COUNT * (2 ** ring);
+}
+
+/** 圈数选项 */
+export const SIEGE_RING_COUNT_OPTIONS = [1, 2, 3, 4] as const;
+export type SiegeRingCountOption = (typeof SIEGE_RING_COUNT_OPTIONS)[number];
+
+/** 计算给定圈数的总扇形数 */
+export function totalSlotsForRings(rings: number): number {
+  let total = 0;
+  for (let r = 0; r < rings; r++) total += ringSlotCount(r);
+  return total;
+}
+
+/**
+ * 从本地数据库的最近 N 条攻城记录构建多圈圆盘扇形。
+ * - 径向厚度（直径方向）所有圈一样
+ * - 每圈个数 = 上一圈 × 2，刚好填满 360°
+ */
+export function buildSectorsFromAttackRows(
+  rows: { attack_time_label: string; city_id: string; city_name?: string }[],
+  ringCountTarget: number = 1,
+): SiegeInnerCitySector[] {
+  const P = ORBIT_SECTOR_PANEL;
+  const baseInner = P.hubSectorInnerRem + SIEGE_CITY_INNER_OFFSET_REM;
+  const bandThickness = SIEGE_CITY_OUTER_EXTRA_REM;
+
+  const out: SiegeInnerCitySector[] = [];
+  let dataIdx = 0;
+
+  for (let ring = 0; ring < ringCountTarget; ring++) {
+    const innerRem = baseInner + ring * (bandThickness + RING_GAP_REM);
+    const outerRem = innerRem + bandThickness;
+    const labelRem = innerRem + bandThickness * 0.52;
+    const slots = ringSlotCount(ring);
+    const spanDeg = 360 / slots;
+
+    for (let slot = 0; slot < slots; slot++) {
+      if (dataIdx >= rows.length) break;
+
+      const item = rows[dataIdx]!;
+      const def = CITY_DEF_MAP.get(item.city_id);
+      const a0 = slot * spanDeg;
+      const a1 = a0 + spanDeg;
+      const isLatest = dataIdx === 0;
+      const heatNorm = Math.max(0.28, 1 - dataIdx * 0.015);
+
+      out.push({
+        cityId: item.city_id,
+        name: item.city_name || def?.name || item.city_id,
+        accent: def?.accent || "#69A7BF",
+        latestTimeLabel: item.attack_time_label,
+        latestMinuteIndex: dataIdx,
+        attackCount: 1,
+        isLatest,
+        opacityScale: 1,
+        slotIndex: dataIdx,
+        a0,
+        a1,
+        innerRem,
+        outerRem,
+        labelRem,
+        heatNorm,
+      });
+      dataIdx++;
+    }
+  }
+
+  return out;
+}
+
+/** 计算 N 圈所需的圆盘最大外径 rem */
+export function sectorsBoardMaxRadius(ringCount: number): number {
+  const P = ORBIT_SECTOR_PANEL;
+  const baseInner = P.hubSectorInnerRem + SIEGE_CITY_INNER_OFFSET_REM;
+  const bandThickness = SIEGE_CITY_OUTER_EXTRA_REM;
+  const rings = Math.max(1, ringCount);
+  const lastInner = baseInner + (rings - 1) * (bandThickness + RING_GAP_REM);
+  return lastInner + bandThickness;
+}
+
 /** 外圈预测点相对内城环外沿的半径偏移 rem（在 siegeOrbitLayout 基值上叠加） */
 export function predictionRingOffsetRem(): number {
   const P = ORBIT_SECTOR_PANEL;
@@ -196,4 +285,36 @@ export function predictionRingOffsetRem(): number {
     + SIEGE_CITY_OUTER_EXTRA_REM
     + P.ringRadialSeamRem
     + 0.35;
+}
+
+/** 近 60 次记录行（按时间连续，最新在前） */
+export type SiegeMinuteRow = {
+  timeLabel: string;
+  cityName: string;
+  accent: string;
+};
+
+/**
+ * 从 report_minute 提取连续分钟行列表，格式与原站一致。
+ * report_minute 结构：[{ "13:00": 7 }, { "12:59": 5 }, ...]
+ */
+export function buildMinuteRows(
+  report: WeeklyReport | null | undefined,
+  limit = 60,
+): SiegeMinuteRow[] {
+  const rows = report?.report_minute;
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+
+  const out: SiegeMinuteRow[] = [];
+  for (const row of rows.slice(0, limit)) {
+    if (!row || typeof row !== "object") continue;
+    for (const [timeLabel, rawCityId] of Object.entries(row)) {
+      const cityId = String(rawCityId).trim();
+      const def = CITY_DEF_MAP.get(cityId);
+      if (!timeLabel || !def) continue;
+      out.push({ timeLabel, cityName: def.name, accent: def.accent });
+      break;
+    }
+  }
+  return out;
 }

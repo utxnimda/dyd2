@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
@@ -83,6 +83,22 @@ export default defineConfig({
           "<html lang=\"zh-CN\">",
           `<html lang="zh-CN" data-fmz-version="${esc(pkg.version)}" data-fmz-label="${esc(releaseLabel)}">`,
         );
+      },
+    },
+    {
+      name: "serve-image-dir",
+      configureServer(server) {
+        server.middlewares.use("/image", (req, res, next) => {
+          const filePath = join(__dirname, "image", req.url ?? "");
+          if (existsSync(filePath)) {
+            const ext = filePath.split(".").pop()?.toLowerCase();
+            const mime: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+            res.setHeader("Content-Type", mime[ext ?? ""] ?? "application/octet-stream");
+            res.end(readFileSync(filePath));
+          } else {
+            next();
+          }
+        });
       },
     },
   ],
