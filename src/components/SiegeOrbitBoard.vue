@@ -1162,6 +1162,7 @@ watchEffect(() => {
   left: 50%;
   top: 50%;
   z-index: 3;
+  /* 勿用独立属性 translate：部分手机 WebKit 支持不完整，会忽略导致太极左上角顶在圆心、整体偏位 */
   transform: translate(-50%, -50%);
   pointer-events: none;
 }
@@ -1169,15 +1170,18 @@ watchEffect(() => {
 .attack-hub-bh {
   --attack-hub-taiji-member: #5eb0e8;
   --attack-hub-taiji-other: #e9b949;
-  width: min(100%, 5.15rem);
+  width: min(100%, 5.25rem);
   min-width: 3.5rem;
   min-height: 3.5rem;
   aspect-ratio: 1;
-  max-width: 5.15rem;
-  max-height: 5.15rem;
+  max-width: 5.25rem;
+  max-height: 5.25rem;
   border-radius: 50%;
   position: relative;
+  border: none;
+  outline: none;
   background: transparent;
+  box-sizing: border-box;
   overflow: visible;
   flex-shrink: 0;
   filter: drop-shadow(0 0 10px color-mix(in srgb, var(--primary, #5b9cff) 32%, transparent))
