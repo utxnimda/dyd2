@@ -1121,6 +1121,7 @@ watchEffect(() => {
 .orbit-board-scaler {
   position: relative;
   width: var(--orbit-side, 28rem);
+  height: var(--orbit-side, 28rem);
   aspect-ratio: 1;
   flex-shrink: 0;
 }
@@ -1161,7 +1162,7 @@ watchEffect(() => {
   position: absolute;
   left: 50%;
   top: 50%;
-  z-index: 3;
+  z-index: 2;
   /* 勿用独立属性 translate：部分手机 WebKit 支持不完整，会忽略导致太极左上角顶在圆心、整体偏位 */
   transform: translate(-50%, -50%);
   pointer-events: none;
