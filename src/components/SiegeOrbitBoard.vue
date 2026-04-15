@@ -894,9 +894,9 @@ watchEffect(() => {
 }
 
 .siege-next-city {
-  font-size: 0.78rem;
+  font-size: 0.82rem;
   font-weight: 800;
-  min-width: 2.2rem;
+  min-width: 2.5rem;
   text-align: right;
 }
 
