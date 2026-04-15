@@ -697,7 +697,7 @@ watchEffect(() => {
           </select>
         </label>
       </div>
-      <div class="siege-minute-grid">
+      <div class="siege-minute-grid" :style="gridStyle">
         <div
           v-for="(row, i) in dbMinuteRows"
           :key="i"
@@ -1171,8 +1171,7 @@ watchEffect(() => {
 }
 
 .siege-minute-grid {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 6px;
 }
 
@@ -1187,6 +1186,8 @@ watchEffect(() => {
   border-radius: 4px;
   text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .siege-minute-row:hover {
