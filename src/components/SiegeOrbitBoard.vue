@@ -827,6 +827,7 @@ watchEffect(() => {
 
 .siege-minute-section {
   width: 100%;
+  padding-bottom: 3rem;
 }
 
 .siege-minute-header {
