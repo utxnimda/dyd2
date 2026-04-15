@@ -54,7 +54,7 @@ async function reload() {
 }
 
 let reloading = false;
-let lastPollSec = 0;
+let lastPollSec = 0; // 上次拉取的时间戳 ms
 
 /** 当前分钟标签，如 "12:37" */
 function currentMinuteLabel(): string {
@@ -70,28 +70,29 @@ function hasCurrentMinuteData(): boolean {
 
 /**
  * 每秒检测：
- * - 过了第 50 秒且还没拿到当前分钟数据 → 每 2 秒拉取
- * - 已经拿到当前分钟数据 → 每 10 秒常规拉取
+ * - 倒计时到0后（即过了每分钟第48秒），还没拿到当前分钟数据 → 每1秒拉取
+ * - 已有当前分钟数据 → 每10秒常规拉取
  */
 function onTick() {
   tick.value++;
   if (reloading) return;
 
-  const sec = new Date().getSeconds();
-  const elapsed = sec - lastPollSec;
+  const now = Date.now();
+  const countdown = secondsToUpstreamSyncTick();
+  const elapsed = now - lastPollSec;
 
-  if (sec >= 50 && !hasCurrentMinuteData()) {
-    // 追赶模式：每2秒拉一次
-    if (elapsed >= 2 || elapsed < 0) {
+  if (countdown === 0 || (new Date().getSeconds() >= 48 && !hasCurrentMinuteData())) {
+    // 倒计时归零或过了48秒还没数据：每1秒拉
+    if (!hasCurrentMinuteData() && elapsed >= 1000) {
       reloading = true;
-      lastPollSec = sec;
+      lastPollSec = now;
       void reload().finally(() => { reloading = false; });
     }
   } else {
-    // 常规模式：每10秒拉一次
-    if (elapsed >= 10 || elapsed < 0) {
+    // 常规：每10秒拉
+    if (elapsed >= 10_000) {
       reloading = true;
-      lastPollSec = sec;
+      lastPollSec = now;
       void reload().finally(() => { reloading = false; });
     }
   }
