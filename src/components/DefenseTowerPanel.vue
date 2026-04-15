@@ -16,7 +16,6 @@ const recentAttacks = ref<DefenseAttackRow[]>([]);
 const prediction = ref<PredictionData | null>(null);
 const tick = ref(0);
 let tickTimer: ReturnType<typeof setInterval> | null = null;
-let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 const countdownSec = computed(() => {
   void tick.value;
@@ -54,36 +53,41 @@ async function reload() {
   await Promise.all([loadOverview(), loadRecentAttacks(), loadPrediction()]);
 }
 
-let lastSyncReloadSec = -1; // 避免同一秒重复拉取
 let reloading = false;
+let lastPollTick = 0;
 
-/** 每秒检测：秒数到 50-53 时立即拉取（上游在第 48 秒刷新，服务端在第 50 秒拉取） */
+/**
+ * 每秒检测：
+ * - 倒计时 10~0 秒时每秒强制同步
+ * - 其他时候每 10 秒同步一次
+ */
 function onTick() {
   tick.value++;
   if (reloading) return;
-  const sec = new Date().getSeconds();
-  if (sec >= 50 && sec <= 53 && lastSyncReloadSec !== sec) {
-    lastSyncReloadSec = sec;
+  const countdown = secondsToUpstreamSyncTick();
+  const now = tick.value;
+
+  if (countdown <= 10) {
+    // 倒计时最后10秒，每秒同步
     reloading = true;
+    lastPollTick = now;
+    void reload().finally(() => { reloading = false; });
+  } else if (now - lastPollTick >= 10) {
+    // 其他时候每10秒同步一次
+    reloading = true;
+    lastPollTick = now;
     void reload().finally(() => { reloading = false; });
   }
 }
 
 onMounted(() => {
   void reload();
+  lastPollTick = 0;
   tickTimer = setInterval(onTick, 1000);
-  // 兜底轮询：防止对齐拉取因为某种原因错过
-  pollTimer = setInterval(() => {
-    if (!reloading) {
-      reloading = true;
-      void reload().finally(() => { reloading = false; });
-    }
-  }, 30_000);
 });
 
 onUnmounted(() => {
   if (tickTimer) clearInterval(tickTimer);
-  if (pollTimer) clearInterval(pollTimer);
 });
 
 defineExpose({ load: reload, reload });
