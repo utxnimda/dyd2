@@ -219,6 +219,27 @@ const gridStyle = computed(() => ({
   gap: "6px",
 }));
 
+/** 移动端色块网格：列数必须是总数的约数，偏好 10~20 */
+function bestMobileColumns(total: number): number {
+  if (total <= 0) return 1;
+  const divisors: number[] = [];
+  for (let d = 1; d <= total; d++) {
+    if (total % d === 0) divisors.push(d);
+  }
+  const preferred = divisors.filter((d) => d >= 10 && d <= 20);
+  if (preferred.length > 0) return preferred[preferred.length - 1]!;
+  // 其次选最接近 15 的
+  divisors.sort((a, b) => Math.abs(a - 15) - Math.abs(b - 15));
+  return divisors[0]!;
+}
+
+const mobileGridCols = computed(() => bestMobileColumns(dbMinuteRows.value.length));
+const mobileGridStyle = computed(() => ({
+  display: "grid",
+  gridTemplateColumns: `repeat(${mobileGridCols.value}, 1fr)`,
+  gap: "2px",
+}));
+
 /** 比例统计时间维度 */
 type RatioMode = "hour" | "day";
 const ratioMode = ref<RatioMode>("hour");
@@ -350,6 +371,31 @@ watchEffect(() => {
 
     <!-- ===== 移动端竖屏布局 ===== -->
     <div class="siege-mobile-only">
+      <!-- 高能预警（紧凑版） -->
+      <div class="siege-mobile-alert">
+        <div class="siege-mobile-alert-title">⚡ 高能预警</div>
+        <div class="siege-mobile-alert-cards">
+          <div
+            v-for="a in cityAlerts"
+            :key="'ma-' + a.cityId"
+            class="siege-mobile-alert-card"
+            :class="'siege-mobile-alert-card--' + a.level"
+          >
+            <span class="siege-mobile-alert-city" :style="{ color: a.accent }">{{ a.cityName }}</span>
+            <span v-if="a.justAppeared" class="siege-mobile-alert-tag">刚出</span>
+            <template v-else-if="a.predictedTimes.length">
+              <span v-if="a.level === 'high'">🔴</span>
+              <span v-else-if="a.level === 'medium'">🟡</span>
+              <span v-else-if="a.level === 'low'">🟢</span>
+              <span v-else>⚪</span>
+              <span class="siege-mobile-alert-times">{{ a.predictedTimes.slice(0, 2).join(', ') }}</span>
+            </template>
+            <template v-else><span>⚪</span></template>
+            <div v-if="a.sinceLastMin != null" class="siege-mobile-alert-since">{{ a.sinceLastMin }}分前</div>
+          </div>
+        </div>
+      </div>
+
       <div class="siege-mobile-legend">
         <span
           v-for="c in CITY_LEGEND"
@@ -369,7 +415,7 @@ watchEffect(() => {
           </select>
         </label>
       </div>
-      <div class="siege-mobile-grid">
+      <div class="siege-mobile-grid" :style="mobileGridStyle">
         <div
           v-for="(row, i) in dbMinuteRows"
           :key="'m-' + i"
@@ -1515,6 +1561,67 @@ watchEffect(() => {
 }
 
 /* === 移动端样式 === */
+.siege-mobile-alert {
+  margin-bottom: 8px;
+}
+
+.siege-mobile-alert-title {
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-align: center;
+  margin-bottom: 4px;
+  color: var(--text, #e8eef7);
+}
+
+.siege-mobile-alert-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: center;
+}
+
+.siege-mobile-alert-card {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  background: rgba(10, 16, 28, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.siege-mobile-alert-card--high {
+  border-color: rgba(255, 50, 50, 0.5);
+  background: rgba(255, 50, 50, 0.1);
+}
+
+.siege-mobile-alert-card--medium {
+  border-color: rgba(255, 170, 0, 0.4);
+  background: rgba(255, 170, 0, 0.08);
+}
+
+.siege-mobile-alert-city {
+  font-weight: 900;
+}
+
+.siege-mobile-alert-tag {
+  font-size: 0.6rem;
+  color: var(--muted, #8b9cb3);
+}
+
+.siege-mobile-alert-times {
+  font-size: 0.65rem;
+  color: var(--text, #e8eef7);
+  font-variant-numeric: tabular-nums;
+}
+
+.siege-mobile-alert-since {
+  font-size: 0.6rem;
+  color: var(--muted, #8b9cb3);
+}
+
 .siege-mobile-legend {
   display: flex;
   flex-wrap: wrap;
@@ -1553,15 +1660,11 @@ watchEffect(() => {
 }
 
 .siege-mobile-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
   margin-bottom: 12px;
 }
 
 .siege-mobile-cell {
-  width: 10px;
-  height: 10px;
+  aspect-ratio: 1;
   border-radius: 1px;
 }
 
