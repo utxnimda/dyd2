@@ -54,8 +54,7 @@ async function reload() {
 }
 
 let reloading = false;
-let lastPollTick = 0;
-let chasingMinute = ""; // 正在追赶的分钟标签（HH:MM）
+let lastPollSec = 0;
 
 /** 当前分钟标签，如 "12:37" */
 function currentMinuteLabel(): string {
@@ -71,52 +70,35 @@ function hasCurrentMinuteData(): boolean {
 
 /**
  * 每秒检测：
- * - 倒计时 10~0 秒时每秒强制同步
- * - 过了 50 秒还没拿到当前分钟数据 → 每 2 秒追赶拉取
- * - 其他时候每 10 秒同步一次
+ * - 过了第 50 秒且还没拿到当前分钟数据 → 每 2 秒拉取
+ * - 已经拿到当前分钟数据 → 每 10 秒常规拉取
  */
 function onTick() {
   tick.value++;
   if (reloading) return;
 
   const sec = new Date().getSeconds();
-  const countdown = secondsToUpstreamSyncTick();
-  const now = tick.value;
+  const elapsed = sec - lastPollSec;
 
-  // 追赶模式：过了 50 秒，当前分钟数据还没拿到
   if (sec >= 50 && !hasCurrentMinuteData()) {
-    const label = currentMinuteLabel();
-    if (chasingMinute !== label) {
-      chasingMinute = label;
-    }
-    // 每 2 秒重试
-    if (now - lastPollTick >= 2) {
+    // 追赶模式：每2秒拉一次
+    if (elapsed >= 2 || elapsed < 0) {
       reloading = true;
-      lastPollTick = now;
+      lastPollSec = sec;
       void reload().finally(() => { reloading = false; });
     }
-    return;
-  }
-
-  // 追赶成功，清除状态
-  if (chasingMinute && hasCurrentMinuteData()) {
-    chasingMinute = "";
-  }
-
-  if (countdown <= 10) {
-    reloading = true;
-    lastPollTick = now;
-    void reload().finally(() => { reloading = false; });
-  } else if (now - lastPollTick >= 10) {
-    reloading = true;
-    lastPollTick = now;
-    void reload().finally(() => { reloading = false; });
+  } else {
+    // 常规模式：每10秒拉一次
+    if (elapsed >= 10 || elapsed < 0) {
+      reloading = true;
+      lastPollSec = sec;
+      void reload().finally(() => { reloading = false; });
+    }
   }
 }
 
 onMounted(() => {
   void reload();
-  lastPollTick = 0;
   tickTimer = setInterval(onTick, 1000);
 });
 
