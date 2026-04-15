@@ -382,16 +382,18 @@ watchEffect(() => {
             :class="'siege-mobile-alert-card--' + a.level"
           >
             <span class="siege-mobile-alert-city" :style="{ color: a.accent }">{{ a.cityName }}</span>
-            <span v-if="a.justAppeared" class="siege-mobile-alert-tag">刚出</span>
-            <template v-else-if="a.predictedTimes.length">
-              <span v-if="a.level === 'high'">🔴</span>
-              <span v-else-if="a.level === 'medium'">🟡</span>
-              <span v-else-if="a.level === 'low'">🟢</span>
-              <span v-else>⚪</span>
-              <span class="siege-mobile-alert-times">{{ a.predictedTimes.slice(0, 2).join(', ') }}</span>
-            </template>
-            <template v-else><span>⚪</span></template>
-            <div v-if="a.sinceLastMin != null" class="siege-mobile-alert-since">{{ a.sinceLastMin }}分前</div>
+            <span class="siege-mobile-alert-mid">
+              <span v-if="a.justAppeared" class="siege-mobile-alert-tag">刚出</span>
+              <template v-else-if="a.predictedTimes.length">
+                <span v-if="a.level === 'high'">🔴</span>
+                <span v-else-if="a.level === 'medium'">🟡</span>
+                <span v-else-if="a.level === 'low'">🟢</span>
+                <span v-else>⚪</span>
+                <span class="siege-mobile-alert-times">{{ a.predictedTimes.slice(0, 2).join(', ') }}</span>
+              </template>
+              <template v-else><span>⚪</span></template>
+            </span>
+            <span v-if="a.sinceLastMin != null" class="siege-mobile-alert-since">{{ a.sinceLastMin }}分前</span>
           </div>
         </div>
       </div>
@@ -420,9 +422,10 @@ watchEffect(() => {
           v-for="(row, i) in dbMinuteRows"
           :key="'m-' + i"
           class="siege-mobile-cell"
+          :class="{ 'siege-mobile-cell--flash': i === 0 }"
           :style="{ backgroundColor: row.accent }"
           :title="row.timeLabel + ' ' + row.cityName"
-        />
+        >{{ row.cityName[0] }}</div>
       </div>
 
       <div class="siege-mobile-section">
@@ -1575,18 +1578,17 @@ watchEffect(() => {
 
 .siege-mobile-alert-cards {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 4px;
-  justify-content: center;
 }
 
 .siege-mobile-alert-card {
   display: flex;
   align-items: center;
-  gap: 3px;
-  padding: 2px 6px;
+  gap: 6px;
+  padding: 4px 8px;
   border-radius: 6px;
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   font-weight: 700;
   background: rgba(10, 16, 28, 0.5);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1604,6 +1606,14 @@ watchEffect(() => {
 
 .siege-mobile-alert-city {
   font-weight: 900;
+  min-width: 2rem;
+}
+
+.siege-mobile-alert-mid {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 3px;
 }
 
 .siege-mobile-alert-tag {
@@ -1612,7 +1622,7 @@ watchEffect(() => {
 }
 
 .siege-mobile-alert-times {
-  font-size: 0.65rem;
+  font-size: 0.68rem;
   color: var(--text, #e8eef7);
   font-variant-numeric: tabular-nums;
 }
@@ -1620,6 +1630,8 @@ watchEffect(() => {
 .siege-mobile-alert-since {
   font-size: 0.6rem;
   color: var(--muted, #8b9cb3);
+  text-align: right;
+  min-width: 3rem;
 }
 
 .siege-mobile-legend {
@@ -1665,7 +1677,24 @@ watchEffect(() => {
 
 .siege-mobile-cell {
   aspect-ratio: 1;
-  border-radius: 1px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.55rem;
+  font-weight: 900;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  line-height: 1;
+}
+
+.siege-mobile-cell--flash {
+  animation: siege-cell-flash 0.6s ease-in-out 4;
+}
+
+@keyframes siege-cell-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
 }
 
 .siege-mobile-section {
