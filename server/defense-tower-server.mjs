@@ -486,17 +486,42 @@ function secondsToDataTick() {
 }
 
 let lastPull = Promise.resolve();
+let lastNewMinuteLabel = ""; // 上次成功拉到的最新分钟标签
+
+function currentMinuteLabel() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** 拉取一次，如果没拿到当前分钟的新数据，每2秒重试最多10次 */
+async function pullWithRetry() {
+  const targetLabel = currentMinuteLabel();
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await pullUpstream();
+    // 检查最新记录是否是当前分钟的
+    const latest = selRecentAttacks.all(1);
+    if (latest.length > 0 && latest[0].attack_time_label === targetLabel) {
+      lastNewMinuteLabel = targetLabel;
+      return;
+    }
+    if (attempt < 9) {
+      await new Promise((r) => setTimeout(r, 2000)); // 等2秒后重试
+    }
+  }
+}
+
 function scheduleAlignedPoll() {
   const align = () => {
     const now = new Date();
     const sec = now.getSeconds();
     const ms = now.getMilliseconds();
-    let wait = (50 - sec) * 1000 - ms;
+    // 对齐到第48秒
+    let wait = (48 - sec) * 1000 - ms;
     if (wait < 2000) wait += 60_000;
     setTimeout(() => {
-      lastPull = lastPull.then(() => pullUpstream());
+      lastPull = lastPull.then(() => pullWithRetry());
       setInterval(() => {
-        lastPull = lastPull.then(() => pullUpstream());
+        lastPull = lastPull.then(() => pullWithRetry());
       }, 60_000);
     }, wait);
   };
