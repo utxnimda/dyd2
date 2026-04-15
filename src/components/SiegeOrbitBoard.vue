@@ -1184,7 +1184,9 @@ watchEffect(() => {
   font-weight: 700;
   border-radius: 4px;
   text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
-  white-space: nowrap;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .siege-minute-row:hover {
