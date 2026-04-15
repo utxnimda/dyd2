@@ -44,6 +44,17 @@ const CITY_ACCENT: Record<string, string> = {
   "7": "#69A7BF",
 };
 
+/** 颜色图例 */
+const CITY_LEGEND = [
+  { id: "1", name: "洛阳", accent: "#F7B52A" },
+  { id: "2", name: "成都", accent: "#8F42A2" },
+  { id: "3", name: "建业", accent: "#F17EDF" },
+  { id: "4", name: "荆州", accent: "#3B9E95" },
+  { id: "5", name: "长安", accent: "#477FBE" },
+  { id: "6", name: "许昌", accent: "#61A0C5" },
+  { id: "7", name: "汉中", accent: "#69A7BF" },
+];
+
 const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => i + 1);
 
 const selectedHours = ref(2);
@@ -336,6 +347,78 @@ watchEffect(() => {
         @input="onSkinInput"
       />
     </div>
+
+    <!-- ===== 移动端竖屏布局 ===== -->
+    <div class="siege-mobile-only">
+      <div class="siege-mobile-legend">
+        <span
+          v-for="c in CITY_LEGEND"
+          :key="c.id"
+          class="siege-mobile-legend-item"
+        >
+          <span class="siege-mobile-legend-dot" :style="{ backgroundColor: c.accent }" />
+          <span class="siege-mobile-legend-name">{{ c.name }}</span>
+        </span>
+      </div>
+
+      <div class="siege-mobile-minute-header">
+        <span>近 {{ dbMinuteRows.length }} 次</span>
+        <label class="siege-hour-select-wrap">
+          <select v-model.number="selectedHours" class="siege-hour-select">
+            <option v-for="h in HOUR_OPTIONS" :key="h" :value="h">{{ h }}h</option>
+          </select>
+        </label>
+      </div>
+      <div class="siege-mobile-grid">
+        <div
+          v-for="(row, i) in dbMinuteRows"
+          :key="'m-' + i"
+          class="siege-mobile-cell"
+          :style="{ backgroundColor: row.accent }"
+          :title="row.timeLabel + ' ' + row.cityName"
+        />
+      </div>
+
+      <div class="siege-mobile-section">
+        <div class="siege-next-title">下一城概率 <span class="siege-next-last-inline">当前: {{ lastCityName }}</span></div>
+        <div v-for="p in nextCityProbs" :key="'mn-' + p.cityId" class="siege-next-row">
+          <span class="siege-next-city" :style="{ color: p.accent }">{{ p.cityName }}</span>
+          <div class="siege-next-bar-wrap">
+            <div class="siege-next-bar" :style="{ width: p.pct + '%', backgroundColor: p.accent }" />
+          </div>
+          <span class="siege-next-pct">{{ p.pct }}%</span>
+        </div>
+      </div>
+
+      <div class="siege-mobile-section">
+        <div class="siege-ratio-header">
+          <span class="siege-ratio-title">城市出现比例</span>
+          <div class="siege-ratio-mode">
+            <button type="button" class="siege-range-btn" :class="{ 'siege-range-btn--active': ratioMode === 'hour' }" @click="ratioMode = 'hour'; ratioValue = 1">时</button>
+            <button type="button" class="siege-range-btn" :class="{ 'siege-range-btn--active': ratioMode === 'day' }" @click="ratioMode = 'day'; ratioValue = 1">天</button>
+          </div>
+          <select v-model.number="ratioValue" class="siege-hour-select">
+            <template v-if="ratioMode === 'hour'">
+              <option v-for="h in RATIO_HOUR_OPTIONS" :key="h" :value="h">{{ h }}</option>
+            </template>
+            <template v-else>
+              <option v-for="d in RATIO_DAY_OPTIONS" :key="d" :value="d">{{ d }}</option>
+            </template>
+          </select>
+          <span class="siege-ratio-actual">({{ ratioFilteredCount }}条)</span>
+        </div>
+        <div v-for="s in cityRatioStats" :key="'mr-' + s.cityId" class="siege-ratio-row">
+          <span class="siege-ratio-city" :style="{ color: s.accent }">{{ s.cityName }}</span>
+          <div class="siege-ratio-bar-wrap">
+            <div class="siege-ratio-bar" :style="{ width: s.pct + '%', backgroundColor: s.accent }" />
+          </div>
+          <span class="siege-ratio-pct">{{ s.pct }}%</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 桌面端布局 ===== -->
+    <div class="siege-desktop-only">
     <div class="siege-orbit-row">
       <div class="siege-next-panel">
         <div class="siege-next-title">下一城概率</div>
@@ -575,6 +658,7 @@ watchEffect(() => {
           {{ row.timeLabel }} {{ row.cityName }}
         </div>
       </div>
+    </div>
     </div>
   </div>
 </template>
@@ -1419,5 +1503,76 @@ watchEffect(() => {
   .attack-hub-taiji-water {
     animation: none;
   }
+}
+
+/* === 移动端/桌面端切换 === */
+.siege-mobile-only { display: none; }
+.siege-desktop-only { display: contents; }
+
+@media (max-width: 768px) {
+  .siege-mobile-only { display: block; }
+  .siege-desktop-only { display: none; }
+}
+
+/* === 移动端样式 === */
+.siege-mobile-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 12px;
+  margin-bottom: 8px;
+}
+
+.siege-mobile-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.siege-mobile-legend-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.siege-mobile-legend-name {
+  color: var(--text, #e8eef7);
+}
+
+.siege-mobile-minute-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text, #e8eef7);
+  margin-bottom: 6px;
+}
+
+.siege-mobile-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-bottom: 12px;
+}
+
+.siege-mobile-cell {
+  width: 10px;
+  height: 10px;
+  border-radius: 1px;
+}
+
+.siege-mobile-section {
+  margin-bottom: 12px;
+}
+
+.siege-next-last-inline {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted, #8b9cb3);
+  margin-left: 6px;
 }
 </style>
