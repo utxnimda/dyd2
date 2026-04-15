@@ -196,27 +196,51 @@ function labelSlotStyle(s: SiegeInnerCitySector): Record<string, string> {
   };
 }
 
-/** 找到最适合的每行个数：必须是 total 的约数，优先选 6~15 范围内的 */
-function bestColumnsForTotal(total: number): number {
-  if (total <= 0) return 1;
-  const divisors: number[] = [];
+/** 获取 total 的所有约数 */
+function getDivisors(total: number): number[] {
+  if (total <= 0) return [1];
+  const divs: number[] = [];
   for (let d = 1; d <= total; d++) {
-    if (total % d === 0) divisors.push(d);
+    if (total % d === 0) divs.push(d);
   }
-  // 优先选 6~15 范围内的约数
-  const preferred = divisors.filter((d) => d >= 6 && d <= 15);
-  if (preferred.length > 0) return preferred[preferred.length - 1]!;
-  // 其次选最接近 10 的
-  divisors.sort((a, b) => Math.abs(a - 10) - Math.abs(b - 10));
-  return divisors[0]!;
+  return divs;
 }
 
-const gridColumns = computed(() => bestColumnsForTotal(dbMinuteRows.value.length));
+/** 桌面端格子固定宽度（含 gap） */
+const CELL_WIDTH_PX = 90;
+const CELL_GAP_PX = 6;
+
+const minuteGridEl = ref<HTMLElement | null>(null);
+const gridContainerWidth = ref(1200);
+
+watchEffect((onCleanup) => {
+  const el = minuteGridEl.value;
+  if (!el) return;
+  gridContainerWidth.value = el.getBoundingClientRect().width;
+  const ro = new ResizeObserver((entries) => {
+    gridContainerWidth.value = entries[0]?.contentRect.width ?? 1200;
+  });
+  ro.observe(el);
+  onCleanup(() => ro.disconnect());
+});
+
+const gridColumns = computed(() => {
+  const total = dbMinuteRows.value.length;
+  if (total <= 0) return 1;
+  const maxFit = Math.max(1, Math.floor((gridContainerWidth.value + CELL_GAP_PX) / (CELL_WIDTH_PX + CELL_GAP_PX)));
+  const divs = getDivisors(total);
+  // 取不超过 maxFit 的最大约数
+  let best = 1;
+  for (const d of divs) {
+    if (d <= maxFit) best = d;
+  }
+  return best;
+});
 
 const gridStyle = computed(() => ({
   display: "grid",
-  gridTemplateColumns: `repeat(${gridColumns.value}, 1fr)`,
-  gap: "6px",
+  gridTemplateColumns: `repeat(${gridColumns.value}, minmax(0, 1fr))`,
+  gap: `${CELL_GAP_PX}px`,
 }));
 
 /** 移动端色块网格：列数必须是总数的约数，偏好 10~20 */
@@ -697,7 +721,7 @@ watchEffect(() => {
           </select>
         </label>
       </div>
-      <div class="siege-minute-grid" :style="gridStyle">
+      <div ref="minuteGridEl" class="siege-minute-grid" :style="gridStyle">
         <div
           v-for="(row, i) in dbMinuteRows"
           :key="i"
