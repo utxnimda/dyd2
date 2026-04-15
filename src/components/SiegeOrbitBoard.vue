@@ -410,7 +410,7 @@ watchEffect(() => {
       </div>
 
       <div class="siege-mobile-minute-header">
-        <span>近 {{ dbMinuteRows.length }} 次</span>
+        <span class="siege-mobile-section-title">近 {{ dbMinuteRows.length }} 次</span>
         <label class="siege-hour-select-wrap">
           <select v-model.number="selectedHours" class="siege-hour-select">
             <option v-for="h in HOUR_OPTIONS" :key="h" :value="h">{{ h }}h</option>
@@ -429,7 +429,7 @@ watchEffect(() => {
       </div>
 
       <div class="siege-mobile-section">
-        <div class="siege-next-title">下一城概率 <span class="siege-next-last-inline">当前: {{ lastCityName }}</span></div>
+        <div class="siege-mobile-section-title">下一城概率 <span class="siege-next-last-inline">当前: {{ lastCityName }}</span></div>
         <div v-for="p in nextCityProbs" :key="'mn-' + p.cityId" class="siege-next-row">
           <span class="siege-next-city" :style="{ color: p.accent }">{{ p.cityName }}</span>
           <div class="siege-next-bar-wrap">
@@ -440,8 +440,8 @@ watchEffect(() => {
       </div>
 
       <div class="siege-mobile-section">
-        <div class="siege-ratio-header">
-          <span class="siege-ratio-title">城市出现比例</span>
+        <div class="siege-mobile-ratio-header">
+          <span class="siege-mobile-section-title">城市出现比例</span>
           <div class="siege-ratio-mode">
             <button type="button" class="siege-range-btn" :class="{ 'siege-range-btn--active': ratioMode === 'hour' }" @click="ratioMode = 'hour'; ratioValue = 1">时</button>
             <button type="button" class="siege-range-btn" :class="{ 'siege-range-btn--active': ratioMode === 'day' }" @click="ratioMode = 'day'; ratioValue = 1">天</button>
@@ -1665,14 +1665,32 @@ watchEffect(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 0.78rem;
-  font-weight: 700;
+  margin-bottom: 6px;
+  padding: 0 4px;
+}
+
+.siege-mobile-section-title {
+  font-size: 0.88rem;
+  font-weight: 800;
   color: var(--text, #e8eef7);
+}
+
+.siege-mobile-section {
+  margin-bottom: 12px;
+  padding: 0 4px;
+}
+
+.siege-mobile-ratio-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
   margin-bottom: 6px;
 }
 
 .siege-mobile-grid {
   margin-bottom: 12px;
+  padding: 0 4px;
 }
 
 .siege-mobile-cell {
@@ -1695,10 +1713,6 @@ watchEffect(() => {
 @keyframes siege-cell-flash {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
-}
-
-.siege-mobile-section {
-  margin-bottom: 12px;
 }
 
 .siege-next-last-inline {
