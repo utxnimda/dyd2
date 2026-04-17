@@ -1357,17 +1357,17 @@ watchEffect(() => {
   overflow: hidden;
 }
 
-.siege-mobile-sync-fill {
-  height: 100%;
-  border-radius: 2px;
-  background: linear-gradient(
-    90deg,
-    rgba(61, 111, 168, 0.55),
-    rgba(92, 158, 255, 0.72)
-  );
-  box-shadow: 0 0 4px rgba(92, 158, 255, 0.2);
-  transition: width 0.12s linear;
-}
+  .siege-mobile-sync-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: linear-gradient(
+      90deg,
+      rgba(61, 111, 168, 0.55),
+      rgba(92, 158, 255, 0.72)
+    );
+    box-shadow: 0 0 4px rgba(92, 158, 255, 0.2);
+    transition: width 1s linear;
+  }
 
 .siege-mobile-sync-row--baby .siege-mobile-sync-fill {
   background: linear-gradient(
