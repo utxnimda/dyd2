@@ -1,0 +1,56 @@
+
+> fmz-dashboard@1.0.0 dev:all
+> concurrently -n reactions,defense,vite -c cyan,blue,magenta "npm run reactions-server" "npm run defense-tower-server" "npm run dev"
+
+[reactions] 
+[reactions] > fmz-dashboard@1.0.0 reactions-server
+[reactions] > npm run start --prefix server
+[reactions] 
+[vite] 
+[vite] > fmz-dashboard@1.0.0 dev
+[vite] > vite
+[vite] 
+[defense] 
+[defense] > fmz-dashboard@1.0.0 defense-tower-server
+[defense] > node server/defense-tower-server.mjs
+[defense] 
+[defense] fmz-defense-tower-server http://127.0.0.1:8788 db=E:\Workspace\Fun\Dyd2\server\data\defense_tower.db
+[reactions] 
+[reactions] > start
+[reactions] > node reactions-server.mjs
+[reactions] 
+[vite] 
+[vite]   [32m[1mVITE[22m v6.4.2[39m  [2mready in [0m[1m321[22m[2m[0m ms[22m
+[vite] 
+[vite]   [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
+[vite]   [32m➜[39m  [1mNetwork[22m: [36mhttp://10.30.143.20:[1m5173[22m/[39m
+[reactions] fmz-reactions-server http://127.0.0.1:8787 db=E:\Workspace\Fun\Dyd2\server\data\reactions.db
+[vite] [2m11:15:44[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/DefenseTowerPanel.vue[22m
+[vite] [2m11:16:34[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/DefenseTowerPanel.vue[22m
+[vite] [2m11:23:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m11:23:00[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/DefenseTowerPanel.vue, /src/components/DefenseTowerPanel.vue?vue&type=style&index=0&scoped=83ee479b&lang.css[22m
+[vite] [2m11:29:23[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m11:29:23[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m11:29:23[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/DefenseTowerPanel.vue?vue&type=style&index=0&scoped=83ee479b&lang.css[22m
+[vite] [2m11:30:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue, /src/components/SiegeOrbitBoard.vue?vue&type=style&index=0&scoped=4472c273&lang.css[22m
+[vite] [2m11:30:05[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue?vue&type=style&index=0&scoped=4472c273&lang.css[22m
+[vite] [2m11:31:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m11:31:29[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m11:32:28[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue, /src/components/SiegeOrbitBoard.vue?vue&type=style&index=0&scoped=4472c273&lang.css[22m
+[vite] [2m11:34:03[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue, /src/components/SiegeOrbitBoard.vue?vue&type=style&index=0&scoped=4472c273&lang.css[22m
+[vite] [2m11:36:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m11:36:20[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m11:36:50[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue?vue&type=style&index=0&scoped=4472c273&lang.css[22m
+[vite] [2m11:36:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue?vue&type=style&index=0&scoped=4472c273&lang.css[22m
+[vite] [2m11:43:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m11:43:47[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue?vue&type=style&index=0&scoped=4472c273&lang.css[22m
+[vite] [2m11:51:15[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m12:09:51[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m12:11:30[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m12:11:41[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue?vue&type=style&index=0&scoped=4472c273&lang.css[22m
+[vite] [2m12:17:24[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue[22m
+[vite] [2m12:17:24[22m [36m[1m[vite][22m[39m [90m[2m(client)[22m[39m [32mhmr update [39m[2m/src/components/SiegeOrbitBoard.vue, /src/components/SiegeOrbitBoard.vue?vue&type=style&index=0&scoped=4472c273&lang.css[22m
+[defense] npm run defense-tower-server exited with code 1
+[vite] npm run dev exited with code 1
+[reactions] ^C^C^C
+[reactions] npm run reactions-server exited with code 3221225786

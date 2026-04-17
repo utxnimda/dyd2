@@ -107,224 +107,6 @@ const upsertAttackBatch = db.transaction((records) => {
   for (const record of records) upsertAttack.run(record);
 });
 
-// ====== 预测算法 ======
-
-const PRED_CITY_IDS = ["1", "2", "3", "4"]; // 洛阳、成都、建业、荆州
-
-const selAllAttacksByCityDesc = db.prepare(
-  `SELECT attack_at FROM defense_attack_records WHERE city_id = ? ORDER BY attack_at DESC`,
-);
-
-const selAllAttacksDesc = db.prepare(
-  `SELECT city_id, attack_at FROM defense_attack_records ORDER BY attack_at DESC LIMIT 200`,
-);
-
-/**
- * 从间隔数组拟合韦布尔参数 (k, lambda)
- * 用 p50 和 p90 两点法：
- *   k = ln(ln(1/(1-0.5)) / ln(1/(1-0.9))) / ln(p50 / p90)  ... 但要用绝对值
- * 简化为：k = ln(-ln(0.5) / -ln(0.1)) / ln(p50 / p90) = ln(0.6931/2.3026) / ln(p50/p90)
- */
-function fitWeibull(intervals) {
-  if (intervals.length < 5) return { k: 1.2, lambda: 20, pity: 80 };
-  const sorted = [...intervals].sort((a, b) => a - b);
-  const p50 = sorted[Math.floor(sorted.length * 0.5)];
-  const p90 = sorted[Math.floor(sorted.length * 0.9)];
-  const max = sorted[sorted.length - 1];
-
-  if (p50 <= 0 || p90 <= 0 || p50 >= p90) return { k: 1.2, lambda: p50 || 20, pity: max || 80 };
-
-  // 二点拟合
-  const ln1 = Math.log(-Math.log(1 - 0.5)); // ln(ln(2)) ≈ -0.3665
-  const ln2 = Math.log(-Math.log(1 - 0.9)); // ln(ln(10/1)) ≈ 0.8340
-  const k = Math.max(0.5, Math.min(5, (ln2 - ln1) / Math.log(p90 / p50)));
-  // lambda from p50: p50 = lambda * (-ln(0.5))^(1/k)
-  const lambda = Math.max(1, p50 / Math.pow(-Math.log(0.5), 1 / k));
-  const pity = Math.max(max, lambda * 3);
-
-  return { k, lambda, pity: Math.round(pity) };
-}
-
-function weibullCDF(t, k, lambda) {
-  if (t <= 0) return 0;
-  return 1 - Math.exp(-Math.pow(t / lambda, k));
-}
-
-/** 条件概率 P(T <= s+dt | T > s)，叠加保底加速 */
-function conditionalProb(s, dt, k, lambda, pity) {
-  const base = 1 - Math.exp(
-    -(Math.pow((s + dt) / lambda, k) - Math.pow(Math.max(0, s) / lambda, k)),
-  );
-  const pityRatio = Math.min(1, s / pity);
-  const pityBoost = pityRatio > 0.7
-    ? Math.pow((pityRatio - 0.7) / 0.3, 2) * (1 - base)
-    : 0;
-  return Math.min(1, base + pityBoost);
-}
-
-/** 二分找 50% 概率对应的 ETA */
-function findEta50(s, k, lambda, pity) {
-  let lo = 0;
-  let hi = Math.max(1, pity - s + 10);
-  for (let i = 0; i < 40; i++) {
-    const mid = (lo + hi) / 2;
-    if (conditionalProb(s, mid, k, lambda, pity) >= 0.5) hi = mid;
-    else lo = mid;
-  }
-  return Math.round(hi);
-}
-
-function computePrediction() {
-  const now = Date.now();
-  const nowDate = new Date(now);
-  const nowMinute = nowDate.getMinutes();
-
-  // 小城连打检测
-  const recentAll = selAllAttacksDesc.all();
-  let smallCityStreak = 0;
-  for (const r of recentAll) {
-    if (["4", "5", "6", "7"].includes(r.city_id)) smallCityStreak++;
-    else break;
-  }
-  const lastCityId = recentAll.length > 0 ? recentAll[0].city_id : null;
-
-  // 转移概率（下一城预测）
-  const transCount = {};
-  let transTotal = 0;
-  if (lastCityId) {
-    for (let i = 1; i < recentAll.length; i++) {
-      if (recentAll[i].city_id === lastCityId) {
-        const nextId = recentAll[i - 1].city_id;
-        transCount[nextId] = (transCount[nextId] || 0) + 1;
-        transTotal++;
-      }
-    }
-  }
-  const nextCityProbs = Object.entries(transCount)
-    .map(([cityId, count]) => ({
-      cityId,
-      cityName: SIEGE_CITY_NAMES[cityId] ?? cityId,
-      count,
-      prob: transTotal > 0 ? count / transTotal : 0,
-      pct: transTotal > 0 ? ((count / transTotal) * 100).toFixed(1) : "0",
-    }))
-    .sort((a, b) => b.prob - a.prob);
-
-  // 逐城预测
-  const cities = PRED_CITY_IDS.map((cityId) => {
-    const cityName = SIEGE_CITY_NAMES[cityId] ?? cityId;
-    const allRows = selAllAttacksByCityDesc.all(cityId);
-
-    // 计算间隔
-    const intervals = [];
-    for (let i = 0; i < allRows.length - 1; i++) {
-      const gap = Math.round((allRows[i].attack_at - allRows[i + 1].attack_at) / 60000);
-      if (gap > 0 && gap < 500) intervals.push(gap);
-    }
-
-    // 动态拟合韦布尔
-    const wp = fitWeibull(intervals);
-
-    // 距上次
-    let sinceLastMin = null;
-    if (allRows.length > 0) {
-      sinceLastMin = Math.round((now - allRows[0].attack_at) / 60000);
-    }
-    const s = sinceLastMin ?? 0;
-    const justAppeared = lastCityId === cityId;
-    const pityProgress = sinceLastMin != null ? Math.min(1, s / wp.pity) : 0;
-
-    // 条件概率
-    let prob5min = conditionalProb(s, 5, wp.k, wp.lambda, wp.pity);
-    if (justAppeared) prob5min *= 0.05; // 连击抑制
-    if (smallCityStreak >= 6 && !justAppeared) {
-      prob5min = Math.min(1, prob5min * (1 + Math.min(0.5, smallCityStreak * 0.04)));
-    }
-
-    // 50% ETA
-    let eta50 = sinceLastMin != null ? findEta50(s, wp.k, wp.lambda, wp.pity) : null;
-    if (justAppeared && eta50 != null) {
-      eta50 = Math.max(eta50, Math.round(wp.lambda * 0.7));
-    }
-    if (smallCityStreak >= 6 && !justAppeared && eta50 != null) {
-      eta50 = Math.max(0, eta50 - Math.min(5, Math.floor(smallCityStreak / 3)));
-    }
-
-    // 预测时间点（eta50 附近 + 热力分钟）
-    // 热力分钟从最新快照的 report_minute_tower 取
-    const latestSnap = selLatestOk.get();
-    const report = parseWeeklyPayload(latestSnap?.payload);
-    const tower = report?.report_minute_tower?.[cityId];
-    const hotMinutes = [];
-    if (tower) {
-      for (const [m, c] of Object.entries(tower)) {
-        if (Number(c) > 0) hotMinutes.push({ minute: Number(m), count: Number(c) });
-      }
-      hotMinutes.sort((a, b) => b.count - a.count);
-    }
-    const hotSet = new Set(hotMinutes.slice(0, 12).map((h) => h.minute));
-
-    const predictedTimes = [];
-    const etaBase = eta50 ?? Math.round(wp.lambda);
-
-    // 50% ETA 时间
-    const t50 = new Date(now + etaBase * 60000);
-    predictedTimes.push(
-      `${String(t50.getHours()).padStart(2, "0")}:${String(t50.getMinutes()).padStart(2, "0")}`,
-    );
-
-    // 热力命中时间
-    for (let off = Math.max(0, etaBase - 8); off <= etaBase + 20 && predictedTimes.length < 4; off++) {
-      const t = new Date(now + off * 60000);
-      const m = t.getMinutes();
-      if (hotSet.has(m)) {
-        const label = `${String(t.getHours()).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-        if (!predictedTimes.includes(label)) predictedTimes.push(label);
-      }
-    }
-
-    // 等级
-    let level = "none";
-    const nearbyHot = hotMinutes.slice(0, 8).some((h) => {
-      const diff = Math.abs(h.minute - nowMinute);
-      return diff <= 3 || diff >= 57;
-    });
-    if (justAppeared) {
-      level = "none";
-    } else if (prob5min >= 0.4 || pityProgress >= 0.85) {
-      level = "high";
-    } else if (prob5min >= 0.2) {
-      level = nearbyHot ? "high" : "medium";
-    } else if (prob5min >= 0.08) {
-      level = nearbyHot ? "medium" : "low";
-    }
-
-    return {
-      cityId,
-      cityName,
-      weibull: { k: Math.round(wp.k * 100) / 100, lambda: Math.round(wp.lambda), pity: wp.pity },
-      sinceLastMin,
-      justAppeared,
-      pityProgress: Math.round(pityProgress * 1000) / 1000,
-      prob5min: Math.round(prob5min * 10000) / 10000,
-      eta50,
-      level,
-      predictedTimes,
-      hotMinutes: hotMinutes.slice(0, 5),
-      sampleCount: intervals.length,
-    };
-  });
-
-  return {
-    now,
-    smallCityStreak,
-    lastCityId,
-    lastCityName: lastCityId ? (SIEGE_CITY_NAMES[lastCityId] ?? lastCityId) : null,
-    nextCityProbs,
-    cities,
-  };
-}
-
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -458,6 +240,7 @@ async function pullUpstream() {
     const snapshotId = Number(info.lastInsertRowid);
     const report = j?.data?.[0] ?? null;
     const persistedAttackCount = persistAttackRecordsFromReport(report, snapshotId, fetchedAt);
+
     return { fetchedAt, httpStatus, ok: true, parsed: j, snapshotId, persistedAttackCount };
   } catch (e) {
     ins.run({
@@ -476,10 +259,10 @@ function parseWeeklyFromRow(row) {
   return { snapshotId: row.id, fetchedAt: row.fetched_at, report };
 }
 
-/** 与源站一致：有实时链路时用 48s，否则 55s（此处无 SSE，固定 48s 对齐其公告） */
+/** 与源站一致：有实时链路时用 50s，否则 55s（此处无 SSE，固定 50s 对齐其公告） */
 function secondsToDataTick() {
   const sec = new Date().getSeconds();
-  const target = 48;
+  const target = 50;
   let rem = target - sec;
   if (rem < 0) rem += 60;
   return rem;
@@ -515,8 +298,8 @@ function scheduleAlignedPoll() {
     const now = new Date();
     const sec = now.getSeconds();
     const ms = now.getMilliseconds();
-    // 对齐到第48秒
-    let wait = (48 - sec) * 1000 - ms;
+    // 对齐到第50秒
+    let wait = (50 - sec) * 1000 - ms;
     if (wait < 2000) wait += 60_000;
     setTimeout(() => {
       lastPull = lastPull.then(() => pullWithRetry());
@@ -622,15 +405,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (req.method === "GET" && pathname === "/api/prediction") {
-    try {
-      const predictionData = computePrediction();
-      json(res, 0, predictionData);
-    } catch (e) {
-      json(res, 500, { message: String(e) }, 500);
-    }
-    return;
-  }
+
 
   json(res, 404, { message: `no route ${pathname}` }, 404);
 });

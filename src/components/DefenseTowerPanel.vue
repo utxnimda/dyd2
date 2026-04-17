@@ -3,17 +3,14 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import {
   fetchDefenseOverview,
   fetchDefenseRecentAttacks,
-  fetchPrediction,
   secondsToUpstreamSyncTick,
   type DefenseAttackRow,
   type DefenseOverview,
-  type PredictionData,
 } from "../lib/defenseTowerApi";
 import SiegeOrbitBoard from "./SiegeOrbitBoard.vue";
 
 const overview = ref<DefenseOverview | null>(null);
 const recentAttacks = ref<DefenseAttackRow[]>([]);
-const prediction = ref<PredictionData | null>(null);
 const tick = ref(0);
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -41,16 +38,8 @@ async function loadRecentAttacks() {
   }
 }
 
-async function loadPrediction() {
-  try {
-    prediction.value = await fetchPrediction();
-  } catch {
-    // keep old data
-  }
-}
-
 async function reload() {
-  await Promise.all([loadOverview(), loadRecentAttacks(), loadPrediction()]);
+  await Promise.all([loadOverview(), loadRecentAttacks()]);
 }
 
 let reloading = false;
@@ -70,7 +59,7 @@ function hasCurrentMinuteData(): boolean {
 
 /**
  * 每秒检测：
- * - 倒计时到0后（即过了每分钟第48秒），还没拿到当前分钟数据 → 每1秒拉取
+ * - 倒计时到0后（即过了每分钟第50秒），还没拿到当前分钟数据 → 每2秒尝试拉取，最多尝试5次
  * - 已有当前分钟数据 → 每10秒常规拉取
  */
 function onTick() {
@@ -80,10 +69,11 @@ function onTick() {
   const now = Date.now();
   const countdown = secondsToUpstreamSyncTick();
   const elapsed = now - lastPollSec;
+  const currentSecond = new Date().getSeconds();
 
-  if (countdown === 0 || (new Date().getSeconds() >= 48 && !hasCurrentMinuteData())) {
-    // 倒计时归零或过了48秒还没数据：每1秒拉
-    if (!hasCurrentMinuteData() && elapsed >= 1000) {
+  if (countdown === 0 || (currentSecond >= 50 && !hasCurrentMinuteData())) {
+    // 倒计时归零或过了50秒还没数据：每2秒尝试拉取，最多尝试5次（50-60秒区间）
+    if (!hasCurrentMinuteData() && elapsed >= 2000 && currentSecond <= 60) {
       reloading = true;
       lastPollSec = now;
       void reload().finally(() => { reloading = false; });
@@ -117,7 +107,6 @@ defineExpose({ load: reload, reload });
       :seconds-to-sync="countdownSec"
       :clock="tick"
       :recent-attacks="recentAttacks"
-      :prediction="prediction"
     />
   </section>
 </template>

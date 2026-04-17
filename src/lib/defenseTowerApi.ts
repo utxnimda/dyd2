@@ -111,46 +111,6 @@ export async function fetchDefenseRecentAttacks(
   return j.data;
 }
 
-export type PredictionCity = {
-  cityId: string;
-  cityName: string;
-  weibull: { k: number; lambda: number; pity: number };
-  sinceLastMin: number | null;
-  justAppeared: boolean;
-  pityProgress: number;
-  prob5min: number;
-  eta50: number | null;
-  level: "high" | "medium" | "low" | "none";
-  predictedTimes: string[];
-  hotMinutes: { minute: number; count: number }[];
-  sampleCount: number;
-};
-
-export type NextCityProb = {
-  cityId: string;
-  cityName: string;
-  count: number;
-  prob: number;
-  pct: string;
-};
-
-export type PredictionData = {
-  now: number;
-  smallCityStreak: number;
-  lastCityId: string | null;
-  lastCityName: string | null;
-  nextCityProbs: NextCityProb[];
-  cities: PredictionCity[];
-};
-
-export async function fetchPrediction(): Promise<PredictionData> {
-  const r = await fetch(`${BASE}/api/prediction`);
-  if (!r.ok) throw new Error(`prediction ${r.status}`);
-  const j = (await r.json()) as { code: number; data: PredictionData };
-  if (j.code !== 0) throw new Error("prediction code");
-  return j.data;
-}
-
 export const DEFENSE_TOWER_NAMES: Record<string, string> = {
   "1": "洛阳",
   "2": "成都",
@@ -202,10 +162,10 @@ export function towerTopClockMinutes(
     .slice(0, top);
 }
 
-/** 与源站公告一致：数据在每分钟第 48 秒左右刷新 */
+/** 与源站公告一致：数据在每分钟第 50 秒左右刷新 */
 export function secondsToUpstreamSyncTick(): number {
   const sec = new Date().getSeconds();
-  const target = 48;
+  const target = 50;
   let rem = target - sec;
   if (rem < 0) rem += 60;
   return rem;

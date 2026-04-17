@@ -9,7 +9,7 @@ import {
   sectorClipPathForArc,
   sectorRadiiPctFromRem,
 } from "../lib/orbitSectorGeometry";
-import type { WeeklyReport, DefenseAttackRow, PredictionData, PredictionCity, NextCityProb } from "../lib/defenseTowerApi";
+import type { WeeklyReport, DefenseAttackRow } from "../lib/defenseTowerApi";
 import { DEFENSE_SIEGE_CITY_NAMES } from "../lib/defenseTowerApi";
 import {
   SIEGE_CITY_INNER_OFFSET_REM,
@@ -112,7 +112,6 @@ const props = defineProps<{
   secondsToSync: number;
   clock: number;
   recentAttacks: DefenseAttackRow[];
-  prediction: PredictionData | null;
 }>();
 
 const minuteWindow = 60;
@@ -274,14 +273,12 @@ const RATIO_DAY_OPTIONS = Array.from({ length: 7 }, (_, i) => i + 1);
 /** 实际参与统计的记录数 */
 const ratioFilteredCount = ref(0);
 
-/** 按时间维度分组统计各城市出现比例 */
+/** 按条数统计各城市出现比例（1小时=60条，1天=1440条） */
 const cityRatioStats = computed(() => {
-  const now = Date.now();
-  const windowMs = ratioMode.value === "hour"
-    ? ratioValue.value * 60 * 60_000
-    : ratioValue.value * 24 * 60 * 60_000;
-  const cutoff = now - windowMs;
-  const filtered = props.recentAttacks.filter((r) => r.attack_at >= cutoff);
+  const takeCount = ratioMode.value === "hour"
+    ? ratioValue.value * 60
+    : ratioValue.value * 1440;
+  const filtered = props.recentAttacks.slice(0, takeCount);
   ratioFilteredCount.value = filtered.length;
   const total = filtered.length;
 
@@ -307,39 +304,13 @@ const cityRatioStats = computed(() => {
     .sort((a, b) => b.count - a.count);
 });
 
-/** 预警数据直接来自服务端 /api/prediction */
-const cityAlerts = computed(() => {
-  const cities = props.prediction?.cities ?? [];
-  return cities.map((c) => ({
-    ...c,
-    accent: CITY_ACCENT[c.cityId] || "#69A7BF",
-  }));
-});
-
-const smallCityStreak = computed(() => props.prediction?.smallCityStreak ?? 0);
-
-const nextCityProbs = computed(() => {
-  const ALL_CITY_IDS = ["1", "2", "3", "4", "5", "6", "7"];
-  const serverProbs = props.prediction?.nextCityProbs ?? [];
-  const probMap = new Map(serverProbs.map((p) => [p.cityId, p]));
-  return ALL_CITY_IDS
-    .map((cityId) => {
-      const sp = probMap.get(cityId);
-      return {
-        cityId,
-        cityName: sp?.cityName || DEFENSE_SIEGE_CITY_NAMES[cityId] || cityId,
-        accent: CITY_ACCENT[cityId] || "#69A7BF",
-        count: sp?.count ?? 0,
-        prob: sp?.prob ?? 0,
-        pct: sp?.pct ?? "0.0",
-      };
-    })
-    .sort((a, b) => b.prob - a.prob);
-});
-
-const lastCityName = computed(() => props.prediction?.lastCityName ?? "—");
-
 const secondsToSync = computed(() => props.secondsToSync);
+
+/** 移动端顶栏：距下次 :50 同步的剩余秒数占满一格（60s）的进度，风格接近源站细条 */
+const syncBarFillPct = computed(() => {
+  const rem = secondsToSync.value;
+  return Math.min(100, Math.max(0, (rem / 60) * 100));
+});
 
 /** 检测 --bg 亮度，浅色背景用洛阳金黄，深色用白色 */
 const countdownColor = ref("#fff");
@@ -395,31 +366,18 @@ watchEffect(() => {
 
     <!-- ===== 移动端竖屏布局 ===== -->
     <div class="siege-mobile-only">
-      <!-- 高能预警（紧凑版） -->
-      <div class="siege-mobile-alert">
-        <div class="siege-mobile-alert-title">⚡ 高能预警</div>
-        <div class="siege-mobile-alert-cards">
+      <div
+        class="siege-mobile-sync-row"
+        :class="{ 'siege-mobile-sync-row--baby': skinMode === 'baby' }"
+        aria-label="距下次数据同步"
+      >
+        <div class="siege-mobile-sync-track">
           <div
-            v-for="a in cityAlerts"
-            :key="'ma-' + a.cityId"
-            class="siege-mobile-alert-card"
-            :class="'siege-mobile-alert-card--' + a.level"
-          >
-            <span class="siege-mobile-alert-city" :style="{ color: a.accent }">{{ a.cityName }}</span>
-            <span class="siege-mobile-alert-mid">
-              <span v-if="a.justAppeared" class="siege-mobile-alert-tag">刚出</span>
-              <template v-else-if="a.predictedTimes.length">
-                <span v-if="a.level === 'high'">🔴</span>
-                <span v-else-if="a.level === 'medium'">🟡</span>
-                <span v-else-if="a.level === 'low'">🟢</span>
-                <span v-else>⚪</span>
-                <span class="siege-mobile-alert-times">{{ a.predictedTimes.slice(0, 2).join(', ') }}</span>
-              </template>
-              <template v-else><span>⚪</span></template>
-            </span>
-            <span v-if="a.sinceLastMin != null" class="siege-mobile-alert-since">{{ a.sinceLastMin }}分前</span>
-          </div>
+            class="siege-mobile-sync-fill"
+            :style="{ width: syncBarFillPct + '%' }"
+          />
         </div>
+        <div class="siege-mobile-sync-num">{{ secondsToSync }}</div>
       </div>
 
       <div class="siege-mobile-legend">
@@ -453,17 +411,6 @@ watchEffect(() => {
       </div>
 
       <div class="siege-mobile-section">
-        <div class="siege-mobile-section-title">下一城概率 <span class="siege-next-last-inline">当前: {{ lastCityName }}</span></div>
-        <div v-for="p in nextCityProbs" :key="'mn-' + p.cityId" class="siege-next-row">
-          <span class="siege-next-city" :style="{ color: p.accent }">{{ p.cityName }}</span>
-          <div class="siege-next-bar-wrap">
-            <div class="siege-next-bar" :style="{ width: p.pct + '%', backgroundColor: p.accent }" />
-          </div>
-          <span class="siege-next-pct">{{ p.pct }}%</span>
-        </div>
-      </div>
-
-      <div class="siege-mobile-section">
         <div class="siege-mobile-ratio-header">
           <span class="siege-mobile-section-title">城市出现比例</span>
           <div class="siege-ratio-mode">
@@ -486,25 +433,71 @@ watchEffect(() => {
             <div class="siege-ratio-bar" :style="{ width: s.pct + '%', backgroundColor: s.accent }" />
           </div>
           <span class="siege-ratio-pct">{{ s.pct }}%</span>
+          <span class="siege-ratio-count">({{ s.count }})</span>
         </div>
       </div>
     </div>
 
     <!-- ===== 桌面端布局 ===== -->
     <div class="siege-desktop-only">
-    <div class="siege-orbit-row">
-      <div class="siege-next-panel">
-        <div class="siege-next-title">下一城概率</div>
-        <div class="siege-next-last">当前: <strong>{{ lastCityName }}</strong></div>
-        <div v-if="nextCityProbs.length === 0" class="siege-next-empty">数据不足</div>
-        <div v-for="p in nextCityProbs" :key="p.cityId" class="siege-next-row">
-          <span class="siege-next-city" :style="{ color: p.accent }">{{ p.cityName }}</span>
-          <div class="siege-next-bar-wrap">
-            <div class="siege-next-bar" :style="{ width: p.pct + '%', backgroundColor: p.accent }" />
-          </div>
-          <span class="siege-next-pct">{{ p.pct }}%</span>
+    <div class="siege-cities-layout">
+      <!-- Row 1: A B C D E (5 cities) -->
+      <div v-if="skinMode === 'baby'" class="siege-cities-row1">
+        <div v-for="id in ['2','7','5','6','1']" :key="'r1-' + id" class="siege-city-item">
+          <img :src="CITY_YUCE_IMG[id]" :alt="DEFENSE_SIEGE_CITY_NAMES[id]" class="siege-city-img siege-city-img--tall" :style="{ '--city-accent': CITY_ACCENT[id] }" />
         </div>
       </div>
+      <!-- Row 2: F + ratio panel + G -->
+      <div class="siege-cities-row2">
+        <div v-if="skinMode === 'baby'" class="siege-city-item siege-city-item--side">
+          <img :src="CITY_YUCE_IMG['4']" :alt="DEFENSE_SIEGE_CITY_NAMES['4']" class="siege-city-img siege-city-img--tall" :style="{ '--city-accent': CITY_ACCENT['4'] }" />
+        </div>
+        <div class="siege-ratio-panel siege-ratio-panel--inline">
+          <div class="siege-ratio-header">
+            <span class="siege-ratio-title">城市出现比例</span>
+            <div class="siege-ratio-mode">
+              <button type="button" class="siege-range-btn" :class="{ 'siege-range-btn--active': ratioMode === 'hour' }" @click="ratioMode = 'hour'; ratioValue = 1">时</button>
+              <button type="button" class="siege-range-btn" :class="{ 'siege-range-btn--active': ratioMode === 'day' }" @click="ratioMode = 'day'; ratioValue = 1">天</button>
+            </div>
+            <select v-model.number="ratioValue" class="siege-hour-select">
+              <template v-if="ratioMode === 'hour'">
+                <option v-for="h in RATIO_HOUR_OPTIONS" :key="h" :value="h">{{ h }}</option>
+              </template>
+              <template v-else>
+                <option v-for="d in RATIO_DAY_OPTIONS" :key="d" :value="d">{{ d }}</option>
+              </template>
+            </select>
+            <span class="siege-ratio-actual">({{ ratioFilteredCount }}条)</span>
+          </div>
+          <div v-if="cityRatioStats.length === 0" class="siege-ratio-empty">暂无数据</div>
+          <div v-for="s in cityRatioStats" :key="s.cityId" class="siege-ratio-row">
+            <span class="siege-ratio-city" :style="{ color: s.accent }">{{ s.cityName }}</span>
+            <div class="siege-ratio-bar-wrap">
+              <div class="siege-ratio-bar" :style="{ width: s.pct + '%', backgroundColor: s.accent }" />
+            </div>
+            <span class="siege-ratio-pct">{{ s.pct }}%</span>
+            <span class="siege-ratio-count">({{ s.count }})</span>
+          </div>
+        </div>
+        <div v-if="skinMode === 'baby'" class="siege-city-item siege-city-item--side">
+          <img :src="CITY_YUCE_IMG['3']" :alt="DEFENSE_SIEGE_CITY_NAMES['3']" class="siege-city-img siege-city-img--tall" :style="{ '--city-accent': CITY_ACCENT['3'] }" />
+        </div>
+      </div>
+    </div>
+    <div
+      class="siege-desktop-sync-row"
+      :class="{ 'siege-desktop-sync-row--baby': skinMode === 'baby' }"
+      aria-label="距下次数据同步"
+    >
+      <div class="siege-desktop-sync-track">
+        <div
+          class="siege-desktop-sync-fill"
+          :style="{ width: syncBarFillPct + '%' }"
+        />
+      </div>
+      <div class="siege-desktop-sync-num">{{ secondsToSync }}</div>
+    </div>
+    <div v-show="false" class="siege-orbit-row">
       <div
         ref="orbitBoardEl"
         class="orbit-board"
@@ -611,104 +604,6 @@ watchEffect(() => {
         </div>
       </div>
     </div>
-
-    <div class="siege-ratio-panel">
-      <div class="siege-ratio-header">
-        <span class="siege-ratio-title">城市出现比例</span>
-        <div class="siege-ratio-mode">
-          <button
-            type="button"
-            class="siege-range-btn"
-            :class="{ 'siege-range-btn--active': ratioMode === 'hour' }"
-            @click="ratioMode = 'hour'; ratioValue = 1"
-          >按小时</button>
-          <button
-            type="button"
-            class="siege-range-btn"
-            :class="{ 'siege-range-btn--active': ratioMode === 'day' }"
-            @click="ratioMode = 'day'; ratioValue = 1"
-          >按天</button>
-        </div>
-      </div>
-      <div class="siege-ratio-controls">
-        <label class="siege-ratio-select-wrap">
-          最近
-          <select v-model.number="ratioValue" class="siege-hour-select">
-            <template v-if="ratioMode === 'hour'">
-              <option v-for="h in RATIO_HOUR_OPTIONS" :key="h" :value="h">{{ h }}</option>
-            </template>
-            <template v-else>
-              <option v-for="d in RATIO_DAY_OPTIONS" :key="d" :value="d">{{ d }}</option>
-            </template>
-          </select>
-          {{ ratioMode === 'hour' ? '小时' : '天' }}
-        </label>
-        <span class="siege-ratio-actual">（实际 {{ ratioFilteredCount }} 条记录）</span>
-      </div>
-      <div v-if="cityRatioStats.length === 0" class="siege-ratio-empty">暂无数据</div>
-      <div v-for="s in cityRatioStats" :key="s.cityId" class="siege-ratio-row">
-        <span class="siege-ratio-city" :style="{ color: s.accent }">{{ s.cityName }}</span>
-        <div class="siege-ratio-bar-wrap">
-          <div class="siege-ratio-bar" :style="{ width: s.pct + '%', backgroundColor: s.accent }" />
-        </div>
-        <span class="siege-ratio-pct">{{ s.pct }}%</span>
-        <span class="siege-ratio-count">({{ s.count }})</span>
-      </div>
-    </div>
-    </div>
-
-    <div class="siege-alert-section">
-      <div class="siege-alert-title">⚡ 高能预警 — 洛阳 · 成都 · 建业 · 荆州</div>
-      <div class="siege-alert-disclaimer">仅供参考，请勿盲目</div>
-      <div v-if="smallCityStreak > 0" class="siege-alert-streak">
-        小城连打中：已连续 {{ smallCityStreak }} 次小城
-      </div>
-      <div class="siege-alert-cards">
-        <div
-          v-for="a in cityAlerts"
-          :key="a.cityId"
-          class="siege-alert-card"
-          :class="'siege-alert-card--' + a.level"
-          :style="{ '--alert-accent': a.accent }"
-        >
-          <div class="siege-alert-city" :style="{ color: a.accent }">
-            {{ a.cityName }}
-            <span v-if="a.justAppeared" class="siege-alert-just">刚出</span>
-          </div>
-          <img
-            v-if="skinMode === 'baby' && CITY_YUCE_IMG[a.cityId]"
-            :src="CITY_YUCE_IMG[a.cityId]"
-            :alt="a.cityName + '预测'"
-            class="siege-alert-img"
-          />
-          <div class="siege-alert-eta">
-            <template v-if="a.justAppeared">⚪ 刚出现，短期概率低</template>
-            <template v-else-if="a.predictedTimes.length">
-              <span v-if="a.level === 'high'">🔴</span>
-              <span v-else-if="a.level === 'medium'">🟡</span>
-              <span v-else-if="a.level === 'low'">🟢</span>
-              <span v-else>⚪</span>
-              预测 {{ a.predictedTimes.join(', ') }}
-            </template>
-            <template v-else>⚪ 暂无预警</template>
-          </div>
-          <div class="siege-alert-pity">
-            <span class="siege-alert-pity-label">保底</span>
-            <div class="siege-alert-pity-bar-wrap">
-              <div
-                class="siege-alert-pity-bar"
-                :style="{ width: (a.pityProgress * 100) + '%', backgroundColor: a.accent }"
-              />
-            </div>
-            <span class="siege-alert-pity-text">{{ a.sinceLastMin ?? 0 }}分</span>
-          </div>
-          <div class="siege-alert-detail">
-            <span>5分内 {{ (a.prob5min * 100).toFixed(0) }}%</span>
-            <span v-if="a.eta50 != null"> · 50%概率 {{ a.eta50 }}分后</span>
-          </div>
-          <div class="siege-alert-reason">{{ a.reason }}</div>
-        </div>
-      </div>
     </div>
 
     <div class="siege-minute-section">
@@ -883,74 +778,10 @@ watchEffect(() => {
   border-color: var(--primary, #5b9cff);
 }
 
-.siege-next-panel {
-  flex: 0 0 auto;
-  min-width: 11rem;
-  max-width: 15rem;
-}
-
-.siege-next-title {
-  font-size: 0.9rem;
-  font-weight: 800;
-  color: var(--text, #e8eef7);
-  margin-bottom: 0.35rem;
-}
-
-.siege-next-last {
-  font-size: 0.78rem;
-  color: var(--muted, #8b9cb3);
-  margin-bottom: 0.45rem;
-}
-
-.siege-next-last strong {
-  color: var(--text, #e8eef7);
-}
-
-.siege-next-empty {
-  font-size: 0.78rem;
-  color: var(--muted, #8b9cb3);
-}
-
-.siege-next-row {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin-bottom: 0.3rem;
-}
-
-.siege-next-city {
-  font-size: 0.82rem;
-  font-weight: 800;
-  min-width: 2.5rem;
-  text-align: right;
-}
-
-.siege-next-bar-wrap {
-  flex: 1;
-  height: 0.6rem;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-.siege-next-bar {
-  height: 100%;
-  border-radius: 3px;
-  transition: width 0.3s;
-}
-
-.siege-next-pct {
-  font-size: 0.75rem;
-  font-weight: 700;
-  color: var(--text, #e8eef7);
-  min-width: 2.8rem;
-  text-align: right;
-}
-
 .siege-ratio-panel {
-  flex: 0 0 auto;
-  min-width: 14rem;
-  max-width: 18rem;
+  margin: 0 auto 12px;
+  max-width: 36rem;
+  width: 100%;
 }
 
 .siege-ratio-header {
@@ -1015,7 +846,7 @@ watchEffect(() => {
 
 .siege-ratio-bar-wrap {
   flex: 1;
-  height: 0.7rem;
+  height: 8px;
   background: rgba(255, 255, 255, 0.08);
   border-radius: 4px;
   overflow: hidden;
@@ -1039,160 +870,6 @@ watchEffect(() => {
   font-size: 0.72rem;
   color: var(--muted, #8b9cb3);
   min-width: 2.2rem;
-}
-
-.siege-alert-section {
-  width: 100%;
-}
-
-.siege-alert-title {
-  font-size: 1rem;
-  font-weight: 800;
-  text-align: center;
-  margin-bottom: 0.5rem;
-  color: var(--text, #e8eef7);
-}
-
-.siege-alert-cards {
-  display: flex;
-  gap: 0.75rem;
-  justify-content: center;
-  flex-wrap: wrap;
-}
-
-.siege-alert-card {
-  flex: 1 1 0;
-  min-width: 12rem;
-  max-width: 18rem;
-  padding: 0.6rem 0.8rem;
-  border-radius: 10px;
-  background: rgba(10, 16, 28, 0.6);
-  border: 1.5px solid rgba(255, 255, 255, 0.08);
-  transition: border-color 0.3s;
-}
-
-.siege-alert-card--high {
-  border-color: color-mix(in srgb, var(--alert-accent) 70%, #ff4444);
-  background: linear-gradient(160deg, rgba(255, 50, 50, 0.12), rgba(10, 16, 28, 0.7));
-}
-
-.siege-alert-card--medium {
-  border-color: color-mix(in srgb, var(--alert-accent) 60%, #ffaa00);
-  background: linear-gradient(160deg, rgba(255, 170, 0, 0.08), rgba(10, 16, 28, 0.7));
-}
-
-.siege-alert-card--low {
-  border-color: color-mix(in srgb, var(--alert-accent) 40%, #44cc66);
-}
-
-.siege-alert-city {
-  font-size: 1rem;
-  font-weight: 900;
-  margin-bottom: 0.25rem;
-}
-
-.siege-alert-img {
-  width: 100%;
-  aspect-ratio: 10 / 7;
-  object-fit: cover;
-  object-position: top;
-  border-radius: 6px;
-  margin-bottom: 0.3rem;
-}
-
-.siege-alert-eta {
-  font-size: 0.88rem;
-  font-weight: 700;
-  color: var(--text, #e8eef7);
-  margin-bottom: 0.2rem;
-}
-
-.siege-alert-detail {
-  font-size: 0.72rem;
-  color: var(--muted, #8b9cb3);
-  margin-bottom: 0.15rem;
-}
-
-.siege-alert-upstream {
-  font-size: 0.72rem;
-  color: var(--muted, #8b9cb3);
-  margin-bottom: 0.1rem;
-}
-
-.siege-alert-hot {
-  font-size: 0.68rem;
-  color: var(--muted, #8b9cb3);
-  font-variant-numeric: tabular-nums;
-}
-
-.siege-alert-disclaimer {
-  text-align: center;
-  font-size: 0.75rem;
-  color: var(--muted, #8b9cb3);
-  margin-bottom: 0.3rem;
-  opacity: 0.7;
-}
-
-.siege-alert-streak {
-  text-align: center;
-  font-size: 0.82rem;
-  font-weight: 700;
-  color: #ffaa00;
-  margin-bottom: 0.4rem;
-}
-
-.siege-alert-just {
-  font-size: 0.65rem;
-  font-weight: 600;
-  background: rgba(255, 255, 255, 0.12);
-  padding: 1px 5px;
-  border-radius: 4px;
-  margin-left: 0.3rem;
-  color: var(--muted, #8b9cb3);
-}
-
-.siege-alert-pity {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin: 0.25rem 0;
-}
-
-.siege-alert-pity-label {
-  font-size: 0.68rem;
-  font-weight: 700;
-  color: var(--muted, #8b9cb3);
-  min-width: 1.8rem;
-}
-
-.siege-alert-pity-bar-wrap {
-  flex: 1;
-  height: 0.5rem;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-.siege-alert-pity-bar {
-  height: 100%;
-  border-radius: 3px;
-  transition: width 0.5s;
-}
-
-.siege-alert-pity-text {
-  font-size: 0.68rem;
-  font-weight: 700;
-  color: var(--text, #e8eef7);
-  min-width: 2.5rem;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.siege-alert-reason {
-  font-size: 0.65rem;
-  color: var(--muted, #8b9cb3);
-  margin-top: 0.15rem;
-  opacity: 0.8;
 }
 
 .siege-minute-grid {
@@ -1586,80 +1263,140 @@ watchEffect(() => {
 .siege-mobile-only { display: none; }
 .siege-desktop-only { display: contents; }
 
+/* === 桌面端倒计时条 === */
+.siege-desktop-sync-row {
+  --siege-sync-h: 6px;
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  margin: 0 auto 12px;
+  max-width: 36rem;
+  width: 100%;
+}
+
+.siege-desktop-sync-track {
+  flex: 1;
+  min-width: 0;
+  height: var(--siege-sync-h);
+  align-self: center;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.22);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.siege-desktop-sync-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(
+    90deg,
+    rgba(61, 111, 168, 0.55),
+    rgba(92, 158, 255, 0.72)
+  );
+  box-shadow: 0 0 4px rgba(92, 158, 255, 0.2);
+  transition: width 1s linear;
+}
+
+.siege-desktop-sync-row--baby .siege-desktop-sync-fill {
+  background: linear-gradient(
+    90deg,
+    rgba(201, 138, 30, 0.55),
+    rgba(247, 181, 42, 0.72)
+  );
+  box-shadow: 0 0 4px rgba(247, 181, 42, 0.22);
+}
+
+.siege-desktop-sync-num {
+  flex-shrink: 0;
+  height: var(--siege-sync-h);
+  min-width: 2rem;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--siege-countdown-color, #fff);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  background: rgba(10, 16, 28, 0.36);
+  -webkit-backdrop-filter: blur(5px);
+  backdrop-filter: blur(5px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+}
+
 @media (max-width: 768px) {
   .siege-mobile-only { display: block; }
   .siege-desktop-only { display: none; }
 }
 
 /* === 移动端样式 === */
-.siege-mobile-alert {
-  margin-bottom: 8px;
-}
-
-.siege-mobile-alert-title {
-  font-size: 0.78rem;
-  font-weight: 800;
-  text-align: center;
-  margin-bottom: 4px;
-  color: var(--text, #e8eef7);
-}
-
-.siege-mobile-alert-cards {
+/* 与 .siege-mobile-legend-dot 同为 12px 高，视觉一条线 */
+.siege-mobile-sync-row {
+  --siege-sync-h: 6px;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: stretch;
+  gap: 8px;
+  margin: 0 4px 10px;
 }
 
-.siege-mobile-alert-card {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  background: rgba(10, 16, 28, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.siege-mobile-alert-card--high {
-  border-color: rgba(255, 50, 50, 0.5);
-  background: rgba(255, 50, 50, 0.1);
-}
-
-.siege-mobile-alert-card--medium {
-  border-color: rgba(255, 170, 0, 0.4);
-  background: rgba(255, 170, 0, 0.08);
-}
-
-.siege-mobile-alert-city {
-  font-weight: 900;
-  min-width: 2rem;
-}
-
-.siege-mobile-alert-mid {
+.siege-mobile-sync-track {
   flex: 1;
+  min-width: 0;
+  height: var(--siege-sync-h);
+  align-self: center;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.22);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.siege-mobile-sync-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    rgba(61, 111, 168, 0.55),
+    rgba(92, 158, 255, 0.72)
+  );
+  box-shadow: 0 0 4px rgba(92, 158, 255, 0.2);
+  transition: width 0.12s linear;
+}
+
+.siege-mobile-sync-row--baby .siege-mobile-sync-fill {
+  background: linear-gradient(
+    90deg,
+    rgba(201, 138, 30, 0.55),
+    rgba(247, 181, 42, 0.72)
+  );
+  box-shadow: 0 0 4px rgba(247, 181, 42, 0.22);
+}
+
+.siege-mobile-sync-num {
+  flex-shrink: 0;
+  height: var(--siege-sync-h);
+  min-width: 1.6rem;
+  padding: 0 4px;
   display: flex;
   align-items: center;
-  gap: 3px;
-}
-
-.siege-mobile-alert-tag {
-  font-size: 0.6rem;
-  color: var(--muted, #8b9cb3);
-}
-
-.siege-mobile-alert-times {
-  font-size: 0.68rem;
-  color: var(--text, #e8eef7);
+  justify-content: center;
+  border-radius: 2px;
+  font-size: 0.72rem;
+  font-weight: 900;
   font-variant-numeric: tabular-nums;
-}
-
-.siege-mobile-alert-since {
-  font-size: 0.6rem;
-  color: var(--muted, #8b9cb3);
-  text-align: right;
-  min-width: 3rem;
+  line-height: 1;
+  color: var(--siege-countdown-color, #fff);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  background: rgba(10, 16, 28, 0.36);
+  -webkit-backdrop-filter: blur(5px);
+  backdrop-filter: blur(5px);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
 }
 
 .siege-mobile-legend {
@@ -1743,10 +1480,70 @@ watchEffect(() => {
   50% { opacity: 0.3; }
 }
 
-.siege-next-last-inline {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--muted, #8b9cb3);
-  margin-left: 6px;
+/* === Cities layout: 2 rows above countdown === */
+.siege-cities-layout {
+  width: 100%;
+  margin-bottom: 0.6rem;
+}
+
+/* Row 1: 5 cities (A B C D E), aligned with minute-section edges */
+.siege-cities-row1 {
+  display: flex;
+  justify-content: space-between;
+  align-items: stretch;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Row 2: F + ratio panel + G */
+.siege-cities-row2 {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.siege-city-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.siege-city-item--side {
+  /* Same width as row1 items: 1/5 of container */
+  width: calc((100% - 2rem) / 5);
+  align-items: stretch;
+}
+
+.siege-cities-row1 .siege-city-item {
+  width: calc((100% - 2rem) / 5);
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.siege-ratio-panel--inline {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.siege-city-img {
+  border-radius: 8px;
+  border: 3px solid var(--city-accent, rgba(212, 175, 55, 0.6));
+  box-shadow: 0 0 10px color-mix(in srgb, var(--city-accent, #d4af37) 50%, transparent), 0 2px 6px rgba(0, 0, 0, 0.3);
+  object-fit: cover;
+}
+
+/* F / G tall images: fill the full height of row2 */
+.siege-city-img--tall {
+  aspect-ratio: auto;
+  max-width: none;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 </style>
