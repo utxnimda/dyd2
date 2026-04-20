@@ -83,7 +83,7 @@ function save() {
 <template>
   <header class="bar">
     <div class="brand">
-      伐木训练营 · 数据面板
+机器猫的百宝箱
       <span v-if="FMZ_RELEASE_LABEL" class="release" :title="`构建 ${FMZ_RELEASE_LABEL}`">{{
         FMZ_RELEASE_LABEL
       }}</span>

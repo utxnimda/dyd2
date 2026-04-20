@@ -51,10 +51,22 @@ function currentMinuteLabel(): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-/** 最新一条记录是否已经是当前分钟的 */
+/**
+ * Check whether the latest snapshot was fetched after the current minute's
+ * :50 mark. This is more reliable than checking attack_time_label because
+ * not every minute has a siege event.
+ */
 function hasCurrentMinuteData(): boolean {
-  if (recentAttacks.value.length === 0) return false;
-  return recentAttacks.value[0].attack_time_label === currentMinuteLabel();
+  const fetchedAt = overview.value?.snapshot?.fetchedAt;
+  if (!fetchedAt) return false;
+  const now = new Date();
+  // The upstream refreshes at :50 of each minute.
+  // Build a timestamp for the current minute's :50 mark.
+  const mark = new Date(now);
+  mark.setSeconds(50, 0);
+  // If we haven't reached :50 yet this minute, use last minute's :50
+  if (now < mark) mark.setMinutes(mark.getMinutes() - 1);
+  return fetchedAt >= mark.getTime();
 }
 
 /**

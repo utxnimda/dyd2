@@ -66,7 +66,7 @@ function applyTheme() {
     );
   }
 }
-const tab = ref<MainTab>("pre");
+const tab = ref<MainTab>("siege");
 const prePanelTab = ref<PrePanelTab>("total");
 
 /** 战斗爽展示筛选路径段（#/battle/<此段>），刷新后由 hash 或 localStorage 恢复 */
@@ -76,7 +76,7 @@ const captainHudOnly = ref(false);
 function refreshDocTitle() {
   const suffix = FMZ_RELEASE_LABEL ? ` ${FMZ_RELEASE_LABEL}` : "";
   if (captainHudOnly.value) document.title = `战斗爽${suffix}`;
-  else document.title = `伐木训练营数据面板${suffix}`;
+else document.title = `机器猫的百宝箱${suffix}`;
 }
 
 function applyHashToState() {
@@ -163,19 +163,19 @@ const treasuryAvatarBridge: TreasuryAvatarBridge = {
 provide(FMZ_TREASURY_AVATAR_KEY, treasuryAvatarBridge);
 
 function onApply() {
-  if (tab.value === "pre") preRef.value?.load();
-  if (tab.value === "users") usrRef.value?.reload();
-  if (tab.value === "battle") battleRef.value?.reload();
-  if (tab.value === "treasury") treRef.value?.reload();
+  // if (tab.value === "pre") preRef.value?.load();
+  // if (tab.value === "users") usrRef.value?.reload();
+  // if (tab.value === "battle") battleRef.value?.reload();
+  // if (tab.value === "treasury") treRef.value?.reload();
   if (tab.value === "siege") siegeRef.value?.reload();
 }
 
 function loadActivePanel() {
   if (captainHudOnly.value) return;
-  if (tab.value === "pre") preRef.value?.load();
-  if (tab.value === "users") usrRef.value?.reload();
-  if (tab.value === "battle") battleRef.value?.reload();
-  if (tab.value === "treasury") treRef.value?.reload();
+  // if (tab.value === "pre") preRef.value?.load();
+  // if (tab.value === "users") usrRef.value?.reload();
+  // if (tab.value === "battle") battleRef.value?.reload();
+  // if (tab.value === "treasury") treRef.value?.reload();
   if (tab.value === "siege") siegeRef.value?.reload();
 }
 
@@ -222,12 +222,12 @@ watch(
 watch(tab, (t, prev) => {
   if (captainHudOnly.value) return;
   /** 金库详情 Teleport 到 body；v-show 隐藏面板时 dlg 仍会挡在其他页上，离开金库页即关 */
-  if (t !== "treasury") treRef.value?.closeDlg();
-  if (t === "users") usrRef.value?.reload();
-  if (t === "battle") battleRef.value?.reload();
-  if (t === "treasury") treRef.value?.reload();
+  // if (t !== "treasury") treRef.value?.closeDlg();
+  // if (t === "users") usrRef.value?.reload();
+  // if (t === "battle") battleRef.value?.reload();
+  // if (t === "treasury") treRef.value?.reload();
   if (t === "siege") siegeRef.value?.reload();
-  if (t === "pre" && prev !== "pre") preRef.value?.load();
+  // if (t === "pre" && prev !== "pre") preRef.value?.load();
   syncHashFromState();
 });
 
@@ -248,14 +248,15 @@ watch(prePanelTab, () => {
   <template v-else>
   <SettingsBar v-model="settings" @apply="onApply" />
   <nav class="nav" aria-label="主导航">
-    <button :class="{ on: tab === 'pre' }" type="button" @click="selectTab('pre')">预赛数据</button>
-    <button :class="{ on: tab === 'users' }" type="button" @click="selectTab('users')">用户积分</button>
-    <button :class="{ on: tab === 'treasury' }" type="button" @click="selectTab('treasury')">团员金库</button>
-    <button :class="{ on: tab === 'battle' }" type="button" @click="selectTab('battle')">战斗爽</button>
+    <!-- <button :class="{ on: tab === 'pre' }" type="button" @click="selectTab('pre')">预赛数据</button> -->
+    <!-- <button :class="{ on: tab === 'users' }" type="button" @click="selectTab('users')">用户积分</button> -->
+    <!-- <button :class="{ on: tab === 'treasury' }" type="button" @click="selectTab('treasury')">团员金库</button> -->
+    <!-- <button :class="{ on: tab === 'battle' }" type="button" @click="selectTab('battle')">战斗爽</button> -->
     <button :class="{ on: tab === 'siege' }" type="button" @click="selectTab('siege')">夜观星象</button>
   </nav>
   <main>
-    <!-- 预赛 / 用户 / 攻城用 v-if，避免隐藏面板仍占 DOM、子级「页签」与顶栏叠套感；金库须 v-show 以便预赛里点头像时 ref 仍可用 -->
+    <!-- 其他页签暂时隐藏 -->
+    <!--
     <PreliminaryPanel
       v-if="tab === 'pre'"
       ref="preRef"
@@ -281,6 +282,7 @@ watch(prePanelTab, () => {
       :battle-show-path="battleShowPath"
       @update:battle-show-path="onBattleShowPath"
     />
+    -->
     <DefenseTowerPanel
       v-if="tab === 'siege'"
       ref="siegeRef"

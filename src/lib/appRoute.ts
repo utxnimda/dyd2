@@ -24,7 +24,7 @@ export function parseAppHash(hash: string): ParsedAppHash {
   const parts = h.split("/").filter(Boolean);
   if (parts[0] === "captain-hud") return { kind: "captain-hud" };
   if (parts.length === 0)
-    return { kind: "main", tab: "pre", prePanel: "total", battleShowPath: null };
+    return { kind: "main", tab: "siege", prePanel: "total", battleShowPath: null };
 
   const head = parts[0];
   if (head === "pre" || head === "preliminary") {
@@ -44,7 +44,7 @@ export function parseAppHash(hash: string): ParsedAppHash {
   if (head === "siege" || head === "defense" || head === "douyuDefenseTower")
     return { kind: "main", tab: "siege", prePanel: "total", battleShowPath: null };
 
-  return { kind: "main", tab: "pre", prePanel: "total", battleShowPath: null };
+  return { kind: "main", tab: "siege", prePanel: "total", battleShowPath: null };
 }
 
 /** 生成与 parseAppHash 一致的 hash 字符串（含 # 前缀） */

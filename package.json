@@ -1,8 +1,8 @@
 {
   "name": "fmz-dashboard",
   "private": true,
-  "version": "1.0.0",
-  "fmzReleaseLabel": "v1.0.0",
+  "version": "1.0.1",
+  "fmzReleaseLabel": "v1.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,7 @@
     "reactions-server": "npm run start --prefix server",
     "defense-tower-server": "node server/defense-tower-server.mjs",
     "check:reactions": "node scripts/check-reactions.mjs",
-    "pack": "vite build && node scripts/pack-release.mjs",
+    "pack": "node scripts/bump-patch.mjs && vite build && node scripts/pack-release.mjs",
     "preview": "vite preview",
     "preview:public": "vite preview --host 0.0.0.0 --port 4173",
     "test:e2e": "playwright test"

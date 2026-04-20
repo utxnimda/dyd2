@@ -306,6 +306,14 @@ const cityRatioStats = computed(() => {
 
 const secondsToSync = computed(() => props.secondsToSync);
 
+/** Current time string (UTC+8), refreshed every tick */
+const currentTime = computed(() => {
+  void props.clock; // reactivity driver
+  const now = new Date();
+  const utc8 = new Date(now.getTime() + (now.getTimezoneOffset() + 480) * 60_000);
+  return `${String(utc8.getHours()).padStart(2, "0")}:${String(utc8.getMinutes()).padStart(2, "0")}:${String(utc8.getSeconds()).padStart(2, "0")}`;
+});
+
 /** 移动端顶栏：距下次 :50 同步的剩余秒数占满一格（60s）的进度，风格接近源站细条 */
 const syncBarFillPct = computed(() => {
   const rem = secondsToSync.value;
@@ -368,16 +376,22 @@ watchEffect(() => {
     <div class="siege-mobile-only">
       <div
         class="siege-mobile-sync-row"
-        :class="{ 'siege-mobile-sync-row--baby': skinMode === 'baby' }"
+        :class="[
+          { 'siege-mobile-sync-row--baby': skinMode === 'baby' },
+          secondsToSync <= 10 ? 'siege-sync-row--urgent' : ''
+        ]"
         aria-label="距下次数据同步"
       >
+        <div class="siege-sync-clock">{{ currentTime }}</div>
         <div class="siege-mobile-sync-track">
           <div
             class="siege-mobile-sync-fill"
             :style="{ width: syncBarFillPct + '%' }"
-          />
+          >
+            <div class="siege-sync-fill-glow" />
+          </div>
         </div>
-        <div class="siege-mobile-sync-num">{{ secondsToSync }}</div>
+        <div class="siege-sync-num" :class="{ 'siege-sync-num--urgent': secondsToSync <= 10 }">{{ secondsToSync }}s</div>
       </div>
 
       <div class="siege-mobile-legend">
@@ -486,16 +500,22 @@ watchEffect(() => {
     </div>
     <div
       class="siege-desktop-sync-row"
-      :class="{ 'siege-desktop-sync-row--baby': skinMode === 'baby' }"
+      :class="[
+        { 'siege-desktop-sync-row--baby': skinMode === 'baby' },
+        secondsToSync <= 10 ? 'siege-sync-row--urgent' : ''
+      ]"
       aria-label="距下次数据同步"
     >
+      <div class="siege-sync-clock">{{ currentTime }}</div>
       <div class="siege-desktop-sync-track">
         <div
           class="siege-desktop-sync-fill"
           :style="{ width: syncBarFillPct + '%' }"
-        />
+        >
+          <div class="siege-sync-fill-glow" />
+        </div>
       </div>
-      <div class="siege-desktop-sync-num">{{ secondsToSync }}</div>
+      <div class="siege-sync-num" :class="{ 'siege-sync-num--urgent': secondsToSync <= 10 }">{{ secondsToSync }}s</div>
     </div>
     <div v-show="false" class="siege-orbit-row">
       <div
@@ -1263,11 +1283,28 @@ watchEffect(() => {
 .siege-mobile-only { display: none; }
 .siege-desktop-only { display: contents; }
 
+/* === Countdown bar animations === */
+@keyframes siege-pulse-glow {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+@keyframes siege-urgent-flash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+@keyframes siege-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
 /* === 桌面端倒计时条 === */
 .siege-desktop-sync-row {
   --siege-sync-h: 6px;
+  --siege-accent: rgba(92, 158, 255, 0.85);
+  --siege-accent-dim: rgba(61, 111, 168, 0.55);
+  --siege-glow: rgba(92, 158, 255, 0.35);
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: 10px;
   margin: 0 auto 12px;
   max-width: 36rem;
@@ -1278,55 +1315,110 @@ watchEffect(() => {
   flex: 1;
   min-width: 0;
   height: var(--siege-sync-h);
-  align-self: center;
-  border-radius: 3px;
-  background: rgba(0, 0, 0, 0.22);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
   overflow: hidden;
+  position: relative;
 }
 
 .siege-desktop-sync-fill {
   height: 100%;
-  border-radius: 3px;
-  background: linear-gradient(
-    90deg,
-    rgba(61, 111, 168, 0.55),
-    rgba(92, 158, 255, 0.72)
-  );
-  box-shadow: 0 0 4px rgba(92, 158, 255, 0.2);
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--siege-accent-dim), var(--siege-accent));
+  box-shadow:
+    0 0 8px var(--siege-glow),
+    0 0 2px var(--siege-accent);
   transition: width 1s linear;
+  position: relative;
+  overflow: hidden;
 }
 
-.siege-desktop-sync-row--baby .siege-desktop-sync-fill {
-  background: linear-gradient(
-    90deg,
-    rgba(201, 138, 30, 0.55),
-    rgba(247, 181, 42, 0.72)
-  );
-  box-shadow: 0 0 4px rgba(247, 181, 42, 0.22);
+.siege-desktop-sync-fill .siege-sync-fill-glow {
+  position: absolute;
+  top: 0; right: 0;
+  width: 20px;
+  height: 100%;
+  background: radial-gradient(ellipse at right center, rgba(255,255,255,0.6), transparent 70%);
+  animation: siege-pulse-glow 2s ease-in-out infinite;
 }
 
-.siege-desktop-sync-num {
+.siege-desktop-sync-row--baby {
+  --siege-accent: rgba(247, 181, 42, 0.85);
+  --siege-accent-dim: rgba(201, 138, 30, 0.55);
+  --siege-glow: rgba(247, 181, 42, 0.35);
+}
+
+/* === Shared countdown number === */
+.siege-sync-num {
   flex-shrink: 0;
-  height: var(--siege-sync-h);
-  min-width: 2rem;
-  padding: 0 6px;
+  min-width: 2.2rem;
+  padding: 2px 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 3px;
-  font-size: 0.75rem;
+  border-radius: 6px;
+  font-size: 0.72rem;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
+  font-family: "Menlo", "Consolas", "Courier New", monospace;
   line-height: 1;
+  letter-spacing: 0.02em;
   color: var(--siege-countdown-color, #fff);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
-  background: rgba(10, 16, 28, 0.36);
-  -webkit-backdrop-filter: blur(5px);
-  backdrop-filter: blur(5px);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+  text-shadow: 0 0 6px var(--siege-glow, rgba(92,158,255,0.4)), 0 1px 2px rgba(0,0,0,0.5);
+  background: rgba(10, 16, 28, 0.5);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 0 8px rgba(0, 0, 0, 0.2);
+  transition: color 0.3s, text-shadow 0.3s, background 0.3s;
+}
+
+.siege-sync-num--urgent {
+  color: #ff6b6b;
+  text-shadow: 0 0 10px rgba(255, 80, 80, 0.7), 0 0 20px rgba(255, 80, 80, 0.3);
+  background: rgba(40, 10, 10, 0.55);
+  animation: siege-urgent-flash 1s ease-in-out infinite;
+}
+
+/* === Shared clock === */
+.siege-sync-clock {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-family: "Menlo", "Consolas", "Courier New", monospace;
+  line-height: 1;
+  letter-spacing: 0.05em;
+  color: var(--siege-countdown-color, #fff);
+  opacity: 0.55;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+  transition: opacity 0.3s;
+}
+.siege-sync-clock:hover {
+  opacity: 0.85;
+}
+
+/* === Urgent row glow === */
+.siege-sync-row--urgent .siege-desktop-sync-track,
+.siege-sync-row--urgent .siege-mobile-sync-track {
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 0 6px rgba(255, 80, 80, 0.2);
+}
+.siege-sync-row--urgent .siege-desktop-sync-fill,
+.siege-sync-row--urgent .siege-mobile-sync-fill {
+  background: linear-gradient(90deg, rgba(168, 61, 61, 0.55), rgba(255, 100, 100, 0.8));
+  box-shadow: 0 0 10px rgba(255, 80, 80, 0.4), 0 0 3px rgba(255, 100, 100, 0.6);
 }
 
 @media (max-width: 768px) {
@@ -1335,11 +1427,13 @@ watchEffect(() => {
 }
 
 /* === 移动端样式 === */
-/* 与 .siege-mobile-legend-dot 同为 12px 高，视觉一条线 */
 .siege-mobile-sync-row {
   --siege-sync-h: 6px;
+  --siege-accent: rgba(92, 158, 255, 0.85);
+  --siege-accent-dim: rgba(61, 111, 168, 0.55);
+  --siege-glow: rgba(92, 158, 255, 0.35);
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: 8px;
   margin: 0 4px 10px;
 }
@@ -1348,55 +1442,40 @@ watchEffect(() => {
   flex: 1;
   min-width: 0;
   height: var(--siege-sync-h);
-  align-self: center;
-  border-radius: 2px;
-  background: rgba(0, 0, 0, 0.22);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+  position: relative;
+}
+
+.siege-mobile-sync-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--siege-accent-dim), var(--siege-accent));
+  box-shadow:
+    0 0 8px var(--siege-glow),
+    0 0 2px var(--siege-accent);
+  transition: width 1s linear;
+  position: relative;
   overflow: hidden;
 }
 
-  .siege-mobile-sync-fill {
-    height: 100%;
-    border-radius: 2px;
-    background: linear-gradient(
-      90deg,
-      rgba(61, 111, 168, 0.55),
-      rgba(92, 158, 255, 0.72)
-    );
-    box-shadow: 0 0 4px rgba(92, 158, 255, 0.2);
-    transition: width 1s linear;
-  }
-
-.siege-mobile-sync-row--baby .siege-mobile-sync-fill {
-  background: linear-gradient(
-    90deg,
-    rgba(201, 138, 30, 0.55),
-    rgba(247, 181, 42, 0.72)
-  );
-  box-shadow: 0 0 4px rgba(247, 181, 42, 0.22);
+.siege-mobile-sync-fill .siege-sync-fill-glow {
+  position: absolute;
+  top: 0; right: 0;
+  width: 16px;
+  height: 100%;
+  background: radial-gradient(ellipse at right center, rgba(255,255,255,0.6), transparent 70%);
+  animation: siege-pulse-glow 2s ease-in-out infinite;
 }
 
-.siege-mobile-sync-num {
-  flex-shrink: 0;
-  height: var(--siege-sync-h);
-  min-width: 1.6rem;
-  padding: 0 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 2px;
-  font-size: 0.72rem;
-  font-weight: 900;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
-  color: var(--siege-countdown-color, #fff);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
-  background: rgba(10, 16, 28, 0.36);
-  -webkit-backdrop-filter: blur(5px);
-  backdrop-filter: blur(5px);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+.siege-mobile-sync-row--baby {
+  --siege-accent: rgba(247, 181, 42, 0.85);
+  --siege-accent-dim: rgba(201, 138, 30, 0.55);
+  --siege-glow: rgba(247, 181, 42, 0.35);
 }
 
 .siege-mobile-legend {

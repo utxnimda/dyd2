@@ -276,19 +276,40 @@ function currentMinuteLabel() {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-/** 拉取一次，如果没拿到当前分钟的新数据，每2秒重试最多10次 */
+/**
+ * Check whether the latest OK snapshot's report_minute already contains
+ * the given minute label (meaning upstream has refreshed for that minute).
+ */
+function snapshotHasMinute(targetLabel) {
+  const row = selLatestOk.get();
+  if (!row) return false;
+  const report = parseWeeklyPayload(row.payload);
+  if (!report || !Array.isArray(report.report_minute)) return false;
+  for (const entry of report.report_minute) {
+    if (entry && typeof entry === "object") {
+      const keys = Object.keys(entry);
+      if (keys.length > 0 && keys[0] === targetLabel) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Pull upstream once; if the current minute's data hasn't appeared yet,
+ * retry up to 5 times (every 2 s). We check the snapshot's report_minute
+ * instead of attack_records so that minutes with no siege event don't
+ * cause pointless retries.
+ */
 async function pullWithRetry() {
   const targetLabel = currentMinuteLabel();
-  for (let attempt = 0; attempt < 10; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     await pullUpstream();
-    // 检查最新记录是否是当前分钟的
-    const latest = selRecentAttacks.all(1);
-    if (latest.length > 0 && latest[0].attack_time_label === targetLabel) {
+    if (snapshotHasMinute(targetLabel)) {
       lastNewMinuteLabel = targetLabel;
       return;
     }
-    if (attempt < 9) {
-      await new Promise((r) => setTimeout(r, 2000)); // 等2秒后重试
+    if (attempt < 4) {
+      await new Promise((r) => setTimeout(r, 2000));
     }
   }
 }
