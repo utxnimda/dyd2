@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
+import { pluginPayloads } from "../../shared/plugins";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                             */
@@ -290,6 +291,24 @@ function resetAll() {
 onMounted(() => {
   checkDeps();
 });
+
+/** Watch for external trigger (e.g. from BilibiliSearchPanel's audio extract button) */
+watch(
+  () => pluginPayloads.value["audio"],
+  (payload) => {
+    if (!payload?.url) return;
+    const url = String(payload.url);
+    // Clear the payload so it doesn't re-trigger
+    pluginPayloads.value = { ...pluginPayloads.value, audio: undefined };
+    // Reset state and fill in the URL
+    resetAll();
+    videoUrl.value = url;
+    // Auto-start extraction if deps are ready
+    if (isReady.value) {
+      doExtract();
+    }
+  },
+);
 </script>
 
 <template>
@@ -507,16 +526,16 @@ onMounted(() => {
 
 <style scoped>
 .audio-panel {
-  padding: 1rem 1.25rem 5rem;
-  max-width: 900px;
+  padding: 0.85rem 1rem 4.5rem;
+  max-width: 100%;
   margin: 0 auto;
 }
 
 .panel-title {
-  font-size: 1.3rem;
+  font-size: 1.1rem;
   font-weight: 700;
   color: var(--text);
-  margin: 0 0 1rem;
+  margin: 0 0 0.75rem;
 }
 
 /* ---- Status bar ---- */
@@ -884,18 +903,20 @@ onMounted(() => {
 
 /* ---- Audio player bar ---- */
 .audio-player-bar {
-  position: fixed;
+  position: sticky;
   bottom: 0;
   left: 0;
   right: 0;
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.5rem 1rem;
+  gap: 0.6rem;
+  padding: 0.45rem 0.75rem;
   background: var(--surface);
   border-top: 1px solid var(--border);
-  box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.2);
-  z-index: 1000;
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.15);
+  z-index: 10;
+  margin: 0 -1rem;
+  width: calc(100% + 2rem);
 }
 .player-label {
   font-size: 0.85rem;
@@ -935,7 +956,7 @@ onMounted(() => {
 /* ---- Mobile ---- */
 @media (max-width: 600px) {
   .audio-panel {
-    padding: 0.75rem 0.75rem 5rem;
+    padding: 0.6rem 0.6rem 4rem;
   }
   .url-input-row {
     flex-direction: column;

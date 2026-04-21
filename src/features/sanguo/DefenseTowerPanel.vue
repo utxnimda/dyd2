@@ -43,7 +43,9 @@ async function reload() {
 }
 
 let reloading = false;
-let lastPollSec = 0; // 上次拉取的时间戳 ms
+let lastPollMs = 0; // last poll timestamp (ms)
+let retryCount = 0; // retry counter within the :50 window
+const MAX_RETRIES = 6; // max retries after :50 (covers ~12s window)
 
 /** 当前分钟标签，如 "12:37" */
 function currentMinuteLabel(): string {
@@ -52,49 +54,58 @@ function currentMinuteLabel(): string {
 }
 
 /**
- * Check whether the latest snapshot was fetched after the current minute's
- * :50 mark. This is more reliable than checking attack_time_label because
- * not every minute has a siege event.
+ * Check whether the latest snapshot already contains the current minute's
+ * data by looking at the report_minute array for the current HH:MM label.
+ * This is more reliable than checking fetchedAt because the server may
+ * have fetched but upstream hadn't refreshed yet.
  */
 function hasCurrentMinuteData(): boolean {
-  const fetchedAt = overview.value?.snapshot?.fetchedAt;
-  if (!fetchedAt) return false;
-  const now = new Date();
-  // The upstream refreshes at :50 of each minute.
-  // Build a timestamp for the current minute's :50 mark.
-  const mark = new Date(now);
-  mark.setSeconds(50, 0);
-  // If we haven't reached :50 yet this minute, use last minute's :50
-  if (now < mark) mark.setMinutes(mark.getMinutes() - 1);
-  return fetchedAt >= mark.getTime();
+  const report = overview.value?.snapshot?.report;
+  if (!report || !Array.isArray(report.report_minute)) return false;
+  const label = currentMinuteLabel();
+  for (const entry of report.report_minute) {
+    if (entry && typeof entry === "object") {
+      const keys = Object.keys(entry);
+      if (keys.length > 0 && keys[0] === label) return true;
+    }
+  }
+  return false;
 }
 
 /**
- * 每秒检测：
- * - 倒计时到0后（即过了每分钟第50秒），还没拿到当前分钟数据 → 每2秒尝试拉取，最多尝试5次
- * - 已有当前分钟数据 → 每10秒常规拉取
+ * Every-second tick handler:
+ * - When countdown reaches 0 (second >= 50), start aggressive polling
+ *   every 2s until we get the current minute's data or exhaust retries.
+ * - Once we have the data (or outside the :50 window), poll every 10s.
  */
 function onTick() {
   tick.value++;
   if (reloading) return;
 
   const now = Date.now();
-  const countdown = secondsToUpstreamSyncTick();
-  const elapsed = now - lastPollSec;
-  const currentSecond = new Date().getSeconds();
+  const elapsed = now - lastPollMs;
+  const sec = new Date().getSeconds();
 
-  if (countdown === 0 || (currentSecond >= 50 && !hasCurrentMinuteData())) {
-    // 倒计时归零或过了50秒还没数据：每2秒尝试拉取，最多尝试5次（50-60秒区间）
-    if (!hasCurrentMinuteData() && elapsed >= 2000 && currentSecond <= 60) {
+  // Inside the :50 window (sec >= 50 or sec < 4 of next minute after wrap)
+  const inSyncWindow = sec >= 50 || sec < 4;
+
+  if (inSyncWindow && !hasCurrentMinuteData() && retryCount < MAX_RETRIES) {
+    // Aggressive: poll every 2s
+    if (elapsed >= 2000) {
       reloading = true;
-      lastPollSec = now;
+      lastPollMs = now;
+      retryCount++;
       void reload().finally(() => { reloading = false; });
     }
   } else {
-    // 常规：每10秒拉
+    // Reset retry counter when we leave the sync window or got data
+    if (!inSyncWindow || hasCurrentMinuteData()) {
+      retryCount = 0;
+    }
+    // Normal: poll every 10s
     if (elapsed >= 10_000) {
       reloading = true;
-      lastPollSec = now;
+      lastPollMs = now;
       void reload().finally(() => { reloading = false; });
     }
   }

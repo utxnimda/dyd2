@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, computed } from "vue";
-import { getEnabledPlugins, type PluginDescriptor } from "../shared/plugins";
+import {
+  getEnabledPlugins,
+  onPluginOpen,
+  pluginPayloads,
+  type PluginDescriptor,
+} from "../shared/plugins";
 
 const plugins = getEnabledPlugins();
 
@@ -17,8 +22,16 @@ const menuRef = ref<HTMLElement | null>(null);
 /** Per-plugin drag position */
 const positions = reactive<Record<string, { x: number; y: number }>>({});
 
+/** Per-plugin size (persisted during resize) */
+const sizes = reactive<Record<string, { w: number; h: number }>>({});
+
 function defaultPos(idx: number) {
-  return { x: window.innerWidth - 420, y: 80 + idx * 40 };
+  // Centre the panel in the viewport
+  const w = Math.min(680, window.innerWidth - 40);
+  return {
+    x: Math.max(20, Math.round((window.innerWidth - w) / 2)),
+    y: Math.max(40, 60 + idx * 30),
+  };
 }
 
 function togglePlugin(id: string) {
@@ -81,15 +94,40 @@ function onClickOutside(e: MouseEvent) {
   }
 }
 
+/* ---- Plugin open event listener ---- */
+let unsubPluginOpen: (() => void) | null = null;
+
 onMounted(() => {
   document.addEventListener("mousemove", onDragMove);
   document.addEventListener("mouseup", onDragEnd);
   document.addEventListener("mousedown", onClickOutside);
+
+  // Listen for external plugin-open requests
+  unsubPluginOpen = onPluginOpen((evt) => {
+    const idx = plugins.findIndex((p) => p.id === evt.pluginId);
+    if (idx < 0) return;
+    // Store payload so the plugin component can read it
+    if (evt.payload) {
+      pluginPayloads.value = { ...pluginPayloads.value, [evt.pluginId]: evt.payload };
+    }
+    // Activate the plugin if not already active
+    if (!activePlugins.has(evt.pluginId)) {
+      activePlugins.add(evt.pluginId);
+      minimised.delete(evt.pluginId);
+      if (!positions[evt.pluginId]) {
+        positions[evt.pluginId] = defaultPos(idx);
+      }
+    } else {
+      // If minimised, restore it
+      minimised.delete(evt.pluginId);
+    }
+  });
 });
 onUnmounted(() => {
   document.removeEventListener("mousemove", onDragMove);
   document.removeEventListener("mouseup", onDragEnd);
   document.removeEventListener("mousedown", onClickOutside);
+  unsubPluginOpen?.();
 });
 
 const hasPlugins = computed(() => plugins.length > 0);
@@ -123,7 +161,10 @@ const activeList = computed(() =>
           @click="togglePlugin(p.id)"
         >
           <span class="plugin-icon">{{ p.icon }}</span>
-          <span class="plugin-label">{{ p.label }}</span>
+          <div class="plugin-menu-item-text">
+            <span class="plugin-label">{{ p.label }}</span>
+            <span class="plugin-desc">{{ p.description }}</span>
+          </div>
           <span class="plugin-toggle" :class="{ on: activePlugins.has(p.id) }">
             {{ activePlugins.has(p.id) ? "ON" : "OFF" }}
           </span>
@@ -148,27 +189,38 @@ const activeList = computed(() =>
     </div>
 
     <!-- Active floating panels -->
-    <div
+    <Transition
       v-for="p in activeList"
-      v-show="!minimised.has(p.id)"
       :key="p.id"
-      class="plugin-float"
-      :style="{
-        left: (positions[p.id]?.x ?? 100) + 'px',
-        top: (positions[p.id]?.y ?? 80) + 'px',
-      }"
+      name="pfloat"
     >
-      <div class="plugin-float-header" @mousedown="onDragStart($event, p.id)">
-        <span class="plugin-float-title">{{ p.icon }} {{ p.label }}</span>
-        <span class="plugin-float-actions">
-          <button type="button" title="最小化" @click.stop="minimisePlugin(p.id)">─</button>
-          <button type="button" title="关闭" @click.stop="closePlugin(p.id)">✕</button>
-        </span>
+      <div
+        v-show="!minimised.has(p.id)"
+        class="plugin-float"
+        :style="{
+          left: (positions[p.id]?.x ?? 100) + 'px',
+          top: (positions[p.id]?.y ?? 80) + 'px',
+          width: (sizes[p.id]?.w ?? 680) + 'px',
+        }"
+      >
+        <div class="plugin-float-header" @mousedown="onDragStart($event, p.id)">
+          <div class="plugin-float-header-left">
+            <span class="plugin-float-icon">{{ p.icon }}</span>
+            <div class="plugin-float-header-text">
+              <span class="plugin-float-title">{{ p.label }}</span>
+              <span class="plugin-float-desc">{{ p.description }}</span>
+            </div>
+          </div>
+          <span class="plugin-float-actions">
+            <button type="button" title="最小化" @click.stop="minimisePlugin(p.id)">─</button>
+            <button type="button" title="关闭" @click.stop="closePlugin(p.id)">✕</button>
+          </span>
+        </div>
+        <div class="plugin-float-body">
+          <component :is="p.component!" />
+        </div>
       </div>
-      <div class="plugin-float-body">
-        <component :is="p.component!" />
-      </div>
-    </div>
+    </Transition>
   </Teleport>
 </template>
 
@@ -221,8 +273,8 @@ const activeList = computed(() =>
 .plugin-menu-item {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 1rem;
+  gap: 0.6rem;
+  padding: 0.55rem 1rem;
   cursor: pointer;
   transition: background 0.12s;
 }
@@ -230,12 +282,27 @@ const activeList = computed(() =>
   background: var(--bg);
 }
 .plugin-icon {
-  font-size: 1rem;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+.plugin-menu-item-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 .plugin-label {
-  flex: 1;
   font-size: 0.85rem;
   color: var(--text);
+  font-weight: 500;
+}
+.plugin-desc {
+  font-size: 0.7rem;
+  color: var(--muted);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .plugin-toggle {
   font-size: 0.7rem;
@@ -272,64 +339,116 @@ const activeList = computed(() =>
 .plugin-float {
   position: fixed;
   z-index: 9000;
-  width: 400px;
-  max-height: 80vh;
+  width: 680px;
+  max-width: calc(100vw - 32px);
+  max-height: 85vh;
   display: flex;
   flex-direction: column;
-  border-radius: 12px;
+  border-radius: 14px;
   border: 1px solid var(--border);
   background: var(--surface);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.28),
+    0 2px 8px rgba(0, 0, 0, 0.12);
   overflow: hidden;
   resize: both;
-  min-width: 320px;
-  min-height: 200px;
+  min-width: 380px;
+  min-height: 240px;
+  backdrop-filter: blur(12px);
 }
 .plugin-float-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.5rem 0.75rem;
-  background: var(--bg);
+  padding: 0.6rem 0.85rem;
+  background: linear-gradient(180deg, rgba(255,255,255,0.04) 0%, transparent 100%);
   border-bottom: 1px solid var(--border);
   cursor: grab;
   user-select: none;
   flex-shrink: 0;
+  gap: 0.5rem;
 }
 .plugin-float-header:active {
   cursor: grabbing;
 }
+.plugin-float-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.plugin-float-icon {
+  font-size: 1.3rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.plugin-float-header-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
 .plugin-float-title {
-  font-size: 0.85rem;
+  font-size: 0.88rem;
   font-weight: 700;
   color: var(--text);
+  line-height: 1.2;
+}
+.plugin-float-desc {
+  font-size: 0.72rem;
+  color: var(--muted);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .plugin-float-actions {
   display: flex;
-  gap: 0.25rem;
+  gap: 0.3rem;
+  flex-shrink: 0;
 }
 .plugin-float-actions button {
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.8rem;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.12s, color 0.12s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 .plugin-float-actions button:hover {
   background: var(--bg);
   color: var(--text);
+  border-color: var(--border);
+}
+.plugin-float-actions button:last-child:hover {
+  color: #ff6b6b;
+  border-color: rgba(255, 107, 107, 0.4);
 }
 .plugin-float-body {
   flex: 1;
   overflow: auto;
-  padding: 0.75rem;
+  padding: 0;
+}
+
+/* Float panel transition */
+.pfloat-enter-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.pfloat-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.pfloat-enter-from {
+  opacity: 0;
+  transform: scale(0.92) translateY(8px);
+}
+.pfloat-leave-to {
+  opacity: 0;
+  transform: scale(0.95) translateY(4px);
 }
 
 /* ---- Minimised pills ---- */
@@ -344,19 +463,25 @@ const activeList = computed(() =>
   justify-content: flex-end;
 }
 .plugin-pill {
-  padding: 0.4rem 0.85rem;
-  border-radius: 20px;
+  padding: 0.45rem 1rem;
+  border-radius: 22px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-  transition: background 0.12s, transform 0.12s;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  transition: background 0.15s, transform 0.15s, box-shadow 0.15s;
+  animation: pill-pop 0.25s ease;
 }
 .plugin-pill:hover {
   background: var(--bg);
-  transform: translateY(-2px);
+  transform: translateY(-3px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+@keyframes pill-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.9); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 </style>

@@ -1,17 +1,17 @@
 {
   "name": "fmz-dashboard",
   "private": true,
-  "version": "1.0.2",
-  "fmzReleaseLabel": "v1.0.2",
+"version": "1.0.3",
+  "fmzReleaseLabel": "v1.0.3",
   "fmzFeatures": {
     "sanguo": true,
     "baobao": true,
-    "audio": "local",
+"audio": "local",
     "battle": false,
     "treasury": false,
     "preliminary": false,
     "users": false,
-    "quota": "local"
+"quota": "local"
   },
   "type": "module",
   "scripts": {

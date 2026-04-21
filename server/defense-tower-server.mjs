@@ -296,32 +296,33 @@ function snapshotHasMinute(targetLabel) {
 
 /**
  * Pull upstream once; if the current minute's data hasn't appeared yet,
- * retry up to 5 times (every 2 s). We check the snapshot's report_minute
- * instead of attack_records so that minutes with no siege event don't
- * cause pointless retries.
+ * retry up to 6 times (every 2 s, covering :50 to :02 of next minute).
+ * We check the snapshot's report_minute instead of attack_records so that
+ * minutes with no siege event don't cause pointless retries.
  */
 async function pullWithRetry() {
   const targetLabel = currentMinuteLabel();
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 6; attempt++) {
     await pullUpstream();
     if (snapshotHasMinute(targetLabel)) {
       lastNewMinuteLabel = targetLabel;
       return;
     }
-    if (attempt < 4) {
+    if (attempt < 5) {
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
 }
 
 function scheduleAlignedPoll() {
-  const align = () => {
+  const startPoll = () => {
     const now = new Date();
     const sec = now.getSeconds();
     const ms = now.getMilliseconds();
-    // 对齐到第50秒
+    // Align to the :50 mark of the current or next minute
     let wait = (50 - sec) * 1000 - ms;
-    if (wait < 2000) wait += 60_000;
+    if (wait <= 0) wait += 60_000;
+    console.log(`[poll] Next pull in ${(wait / 1000).toFixed(1)}s (aligning to :50)`);
     setTimeout(() => {
       lastPull = lastPull.then(() => pullWithRetry());
       setInterval(() => {
@@ -329,7 +330,7 @@ function scheduleAlignedPoll() {
       }, 60_000);
     }, wait);
   };
-  align();
+  startPoll();
 }
 
 const server = http.createServer((req, res) => {
