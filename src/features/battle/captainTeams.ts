@@ -1,5 +1,5 @@
-import type { MoneyCard } from "../types";
-import { douyuAvatarUrl } from "./api";
+import type { MoneyCard } from "../../shared/types";
+import { douyuAvatarUrl } from "../../shared/api";
 
 function tryParseMoneyAttribute(card: MoneyCard): Record<string, unknown> | null {
   if (!card.attribute) return null;

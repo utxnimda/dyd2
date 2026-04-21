@@ -1,4 +1,4 @@
-import { douyuAvatarUrl, nicknameLetterDataUrl } from "./api";
+import { douyuAvatarUrl, nicknameLetterDataUrl } from "../../shared/api";
 import type { CaptainMoneyCard } from "./captainTeams";
 
 /**

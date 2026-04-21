@@ -6,7 +6,7 @@ import {
   secondsToUpstreamSyncTick,
   type DefenseAttackRow,
   type DefenseOverview,
-} from "../lib/defenseTowerApi";
+} from "./defenseTowerApi";
 import SiegeOrbitBoard from "./SiegeOrbitBoard.vue";
 
 const overview = ref<DefenseOverview | null>(null);

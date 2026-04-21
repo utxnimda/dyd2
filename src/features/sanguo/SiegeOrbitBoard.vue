@@ -3,35 +3,23 @@ import { computed, nextTick, ref, watch, watchEffect } from "vue";
 import {
   ORBIT_SECTOR_PANEL,
   orbitSectorPanelCssVars,
-} from "../lib/orbitSectorPanel";
+} from "../../shared/orbitSectorPanel";
 import {
   orbitArcMidDeg,
   sectorClipPathForArc,
   sectorRadiiPctFromRem,
-} from "../lib/orbitSectorGeometry";
-import type { WeeklyReport, DefenseAttackRow } from "../lib/defenseTowerApi";
-import { DEFENSE_SIEGE_CITY_NAMES } from "../lib/defenseTowerApi";
+} from "./orbitSectorGeometry";
+import type { WeeklyReport, DefenseAttackRow } from "./defenseTowerApi";
+import { DEFENSE_SIEGE_CITY_NAMES } from "./defenseTowerApi";
 import {
   SIEGE_CITY_INNER_OFFSET_REM,
   SIEGE_CITY_OUTER_EXTRA_REM,
   buildSectorsFromAttackRows,
   sectorsBoardMaxRadius,
   type SiegeInnerCitySector,
-} from "../lib/siegeCityOrbit";
+} from "./siegeCityOrbit";
 
-/** 页面 logo */
-const LOGO_SRC = "/image/baokemeng.jpg";
 
-/** 城市 ID -> 预测图路径 */
-const CITY_YUCE_IMG: Record<string, string> = {
-  "1": "/image/yuce/luoyang.jpg",
-  "2": "/image/yuce/chengdu.jpg",
-  "3": "/image/yuce/jianye.jpg",
-  "4": "/image/yuce/jingzhou.jpg",
-  "5": "/image/yuce/changan.jpg",
-  "6": "/image/yuce/xuchang.jpg",
-  "7": "/image/yuce/hanzhong.jpg",
-};
 
 /** 城市 ID -> accent 颜色 */
 const CITY_ACCENT: Record<string, string> = {
@@ -60,52 +48,7 @@ const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => i + 1);
 const selectedHours = ref(2);
 const selectedRange = computed(() => selectedHours.value * 60);
 
-type SkinMode = "pure" | "baby";
-const SKIN_LABELS: Record<SkinMode, string> = { pure: "纯净版", baby: "宝宝版" };
-const BABY_KEYS = ["lsy", "宝宝", "电饭宝", "梁诗颖"];
-const STORAGE_UNLOCKED = "siege-skin-unlocked";
-const STORAGE_CURRENT = "siege-skin-current";
 
-function loadUnlocked(): Set<SkinMode> {
-  try {
-    const raw = localStorage.getItem(STORAGE_UNLOCKED);
-    if (raw) return new Set(JSON.parse(raw) as SkinMode[]);
-  } catch { /* ignore */ }
-  return new Set<SkinMode>(["pure"]);
-}
-
-function saveUnlocked(s: Set<SkinMode>) {
-  localStorage.setItem(STORAGE_UNLOCKED, JSON.stringify([...s]));
-}
-
-function loadCurrentSkin(): SkinMode {
-  try {
-    const raw = localStorage.getItem(STORAGE_CURRENT) as SkinMode | null;
-    if (raw && loadUnlocked().has(raw)) return raw;
-  } catch { /* ignore */ }
-  return "pure";
-}
-
-const unlockedSkins = ref(loadUnlocked());
-const skinMode = ref<SkinMode>(loadCurrentSkin());
-const skinInput = ref("");
-
-function onSkinInput() {
-  const val = skinInput.value.trim().toLowerCase();
-  if (BABY_KEYS.some((k) => k.toLowerCase() === val)) {
-    unlockedSkins.value.add("baby");
-    saveUnlocked(unlockedSkins.value);
-    skinMode.value = "baby";
-    localStorage.setItem(STORAGE_CURRENT, "baby");
-    skinInput.value = "";
-  }
-}
-
-function onSkinSelect(e: Event) {
-  const val = (e.target as HTMLSelectElement).value as SkinMode;
-  skinMode.value = val;
-  localStorage.setItem(STORAGE_CURRENT, val);
-}
 
 const props = defineProps<{
   report: WeeklyReport | null | undefined;
@@ -332,9 +275,7 @@ function updateCountdownColor() {
   const g = parseInt(m[2]!.length === 1 ? m[2]! + m[2]! : m[2]!, 16);
   const b = parseInt(m[3]!.length === 1 ? m[3]! + m[3]! : m[3]!, 16);
   const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-  countdownColor.value = skinMode.value === "baby"
-    ? "#F7B52A"
-    : luma > 128 ? "#F7B52A" : "#fff";
+  countdownColor.value = luma > 128 ? "#F7B52A" : "#fff";
 }
 
 const wrapStyle = computed(() => ({
@@ -349,37 +290,13 @@ watchEffect(() => {
 
 <template>
   <div class="siege-orbit-wrap" :style="wrapStyle">
-    <div class="siege-skin-toggle">
-      <select
-        :value="skinMode"
-        class="siege-skin-select"
-        @change="onSkinSelect"
-      >
-        <option
-          v-for="mode in [...unlockedSkins]"
-          :key="mode"
-          :value="mode"
-        >{{ SKIN_LABELS[mode] }}</option>
-      </select>
-      <input
-        v-model="skinInput"
-        type="text"
-        class="siege-skin-input"
-        placeholder="口令"
-        autocomplete="off"
-        maxlength="10"
-        @input="onSkinInput"
-      />
-    </div>
+
 
     <!-- ===== 移动端竖屏布局 ===== -->
     <div class="siege-mobile-only">
       <div
         class="siege-mobile-sync-row"
-        :class="[
-          { 'siege-mobile-sync-row--baby': skinMode === 'baby' },
-          secondsToSync <= 10 ? 'siege-sync-row--urgent' : ''
-        ]"
+        :class="[secondsToSync <= 10 ? 'siege-sync-row--urgent' : '']"
         aria-label="距下次数据同步"
       >
         <div class="siege-sync-clock">{{ currentTime }}</div>
@@ -455,17 +372,7 @@ watchEffect(() => {
     <!-- ===== 桌面端布局 ===== -->
     <div class="siege-desktop-only">
     <div class="siege-cities-layout">
-      <!-- Row 1: A B C D E (5 cities) -->
-      <div v-if="skinMode === 'baby'" class="siege-cities-row1">
-        <div v-for="id in ['2','7','5','6','1']" :key="'r1-' + id" class="siege-city-item">
-          <img :src="CITY_YUCE_IMG[id]" :alt="DEFENSE_SIEGE_CITY_NAMES[id]" class="siege-city-img siege-city-img--tall" :style="{ '--city-accent': CITY_ACCENT[id] }" />
-        </div>
-      </div>
-      <!-- Row 2: F + ratio panel + G -->
       <div class="siege-cities-row2">
-        <div v-if="skinMode === 'baby'" class="siege-city-item siege-city-item--side">
-          <img :src="CITY_YUCE_IMG['4']" :alt="DEFENSE_SIEGE_CITY_NAMES['4']" class="siege-city-img siege-city-img--tall" :style="{ '--city-accent': CITY_ACCENT['4'] }" />
-        </div>
         <div class="siege-ratio-panel siege-ratio-panel--inline">
           <div class="siege-ratio-header">
             <span class="siege-ratio-title">城市出现比例</span>
@@ -493,17 +400,11 @@ watchEffect(() => {
             <span class="siege-ratio-count">({{ s.count }})</span>
           </div>
         </div>
-        <div v-if="skinMode === 'baby'" class="siege-city-item siege-city-item--side">
-          <img :src="CITY_YUCE_IMG['3']" :alt="DEFENSE_SIEGE_CITY_NAMES['3']" class="siege-city-img siege-city-img--tall" :style="{ '--city-accent': CITY_ACCENT['3'] }" />
-        </div>
       </div>
     </div>
     <div
       class="siege-desktop-sync-row"
-      :class="[
-        { 'siege-desktop-sync-row--baby': skinMode === 'baby' },
-        secondsToSync <= 10 ? 'siege-sync-row--urgent' : ''
-      ]"
+      :class="[secondsToSync <= 10 ? 'siege-sync-row--urgent' : '']"
       aria-label="距下次数据同步"
     >
       <div class="siege-sync-clock">{{ currentTime }}</div>
@@ -535,10 +436,6 @@ watchEffect(() => {
         </div>
 
         <div class="orbit-hub attack-hub-bh" aria-hidden="true">
-          <template v-if="skinMode === 'baby'">
-            <img :src="LOGO_SRC" alt="" class="siege-hub-logo" />
-          </template>
-          <template v-else>
             <div class="attack-hub-taiji-wrap">
               <div class="attack-hub-taiji-water" aria-hidden="true" />
               <svg
@@ -596,7 +493,6 @@ watchEffect(() => {
                 </g>
               </svg>
             </div>
-          </template>
           <div class="siege-hub-countdown">
             <div class="siege-hub-num">{{ secondsToSync }}</div>
           </div>
@@ -658,40 +554,6 @@ watchEffect(() => {
   flex-direction: column;
   align-items: center;
   gap: 1rem;
-}
-
-.siege-skin-toggle {
-  display: flex;
-  justify-content: center;
-  gap: 6px;
-  align-items: center;
-}
-
-.siege-skin-select {
-  padding: 3px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border, #2d3a4d);
-  background: var(--surface, #1a2332);
-  color: var(--text, #e8eef7);
-  font-size: 0.78rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.siege-skin-input {
-  width: 6rem;
-  padding: 3px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border, #2d3a4d);
-  background: var(--surface, #1a2332);
-  color: var(--text, #e8eef7);
-  font-size: 0.78rem;
-  text-align: center;
-}
-
-.siege-skin-input::placeholder {
-  color: var(--muted, #8b9cb3);
-  opacity: 0.6;
 }
 
 .siege-logo-row {
@@ -1174,16 +1036,6 @@ watchEffect(() => {
   pointer-events: none;
 }
 
-.siege-hub-logo {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border-radius: 50%;
-  z-index: 2;
-}
-
 .siege-hub-num {
   font-size: 1.55rem;
   font-weight: 900;
@@ -1345,11 +1197,7 @@ watchEffect(() => {
   animation: siege-pulse-glow 2s ease-in-out infinite;
 }
 
-.siege-desktop-sync-row--baby {
-  --siege-accent: rgba(247, 181, 42, 0.85);
-  --siege-accent-dim: rgba(201, 138, 30, 0.55);
-  --siege-glow: rgba(247, 181, 42, 0.35);
-}
+
 
 /* === Shared countdown number === */
 .siege-sync-num {
@@ -1472,11 +1320,7 @@ watchEffect(() => {
   animation: siege-pulse-glow 2s ease-in-out infinite;
 }
 
-.siege-mobile-sync-row--baby {
-  --siege-accent: rgba(247, 181, 42, 0.85);
-  --siege-accent-dim: rgba(201, 138, 30, 0.55);
-  --siege-glow: rgba(247, 181, 42, 0.35);
-}
+
 
 .siege-mobile-legend {
   display: flex;

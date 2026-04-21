@@ -8,28 +8,45 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8")) as {
   version: string;
   fmzReleaseLabel?: string;
+  fmzFeatures?: Record<string, boolean | string>;
 };
 const releaseLabel = String(pkg.fmzReleaseLabel ?? `v${pkg.version}`).trim();
+const rawFeatures = (pkg.fmzFeatures ?? {}) as Record<string, boolean | string>;
+
+/**
+ * Resolve feature flags: false = off, "local" = dev-only, true = always on.
+ * During dev (vite dev / vite preview) both "local" and true are treated as enabled.
+ * During build (vite build, called by `npm run pack`) bump-patch.mjs already
+ * downgrades "local" → false before the build runs, so only true survives.
+ */
+const features = Object.fromEntries(
+  Object.entries(rawFeatures).map(([k, v]) => [k, v === true || v === "local"]),
+) as Record<string, boolean>;
 
 /** 与官网 SPA Origin 一致（官方为 https://fmz.dongdongne.com ，勿用 api2）；可设 FMZ_UPSTREAM_BROWSER_ORIGIN 覆盖 */
 const FMZ_UPSTREAM_BROWSER_ORIGIN = (
   process.env.FMZ_UPSTREAM_BROWSER_ORIGIN || "https://fmz.dongdongne.com"
 ).replace(/\/$/, "");
 
-/**
- * 开发时通过同源代理转发，避免浏览器 CORS。
- * 生产环境需自行配置反向代理或将 API 与前端同域部署。
- */
-const apiProxy = {
-  "/__fmz_api": {
+/** Proxy entries — only register proxies for enabled features */
+const apiProxy: Record<string, import("vite").ProxyOptions> = {};
+
+/** Helper: register a simple reverse-proxy entry (no header rewriting). */
+function addSimpleProxy(prefix: string, target: string) {
+  apiProxy[prefix] = {
+    target,
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(new RegExp(`^${prefix.replace(/\//g, "\\/")}`), ""),
+  };
+}
+
+// FMZ API proxy (needed by battle/treasury/users/preliminary)
+if (features.battle || features.treasury || features.users || features.preliminary) {
+  apiProxy["/__fmz_api"] = {
     target: "https://api2.dongdongne.com",
     changeOrigin: true,
     secure: true,
     rewrite: (p: string) => p.replace(/^\/__fmz_api/, ""),
-    /**
-     * 上游校验 Origin；仪表盘域名会被拒。伪造为 fmz 官网 Origin，并去掉/重写 Sec-Fetch-*，
-     * 否则浏览器仍带 same-origin 等，与伪造 Origin 不一致易 403。
-     */
     configure: (proxy) => {
       proxy.on("proxyReq", (proxyReq) => {
         const strip = [
@@ -49,27 +66,50 @@ const apiProxy = {
         proxyReq.setHeader("sec-fetch-dest", "empty");
       });
     },
-  },
-  /** [在看直播](https://www.doseeing.com/) 搜索与房间页，供头像补全（避免浏览器 CORS） */
-  "/doseeing": {
-    target: "https://www.doseeing.com",
+  };
+}
+
+// Doseeing proxy (needed by battle/treasury)
+if (features.battle || features.treasury) {
+  addSimpleProxy("/doseeing", "https://www.doseeing.com");
+}
+
+// Reactions server (needed by battle/treasury/users/preliminary)
+if (features.battle || features.treasury || features.users || features.preliminary) {
+  addSimpleProxy("/__fmz_reactions", "http://127.0.0.1:8787");
+}
+
+// Defense tower server (needed by sanguo)
+if (features.sanguo) {
+  addSimpleProxy("/__fmz_defense", "http://127.0.0.1:8788");
+}
+
+// Audio extractor server (needed by audio)
+if (features.audio) {
+  addSimpleProxy("/__fmz_audio", "http://127.0.0.1:8789");
+}
+
+// Bilibili API proxy (needed by baobao)
+if (features.baobao) {
+  apiProxy["/__bili_api"] = {
+    target: "https://api.bilibili.com",
     changeOrigin: true,
     secure: true,
-    rewrite: (p: string) => p.replace(/^\/doseeing/, ""),
-  },
-  /** 赞踩 SQLite服务：本地先 `cd server && npm i && npm start` */
-  "/__fmz_reactions": {
-    target: "http://127.0.0.1:8787",
-    changeOrigin: true,
-    rewrite: (p) => p.replace(/^\/__fmz_reactions/, ""),
-  },
-  /** 大话三国攻城快照：本地 `npm run defense-tower-server`（默认 8788） */
-  "/__fmz_defense": {
-    target: "http://127.0.0.1:8788",
-    changeOrigin: true,
-    rewrite: (p) => p.replace(/^\/__fmz_defense/, ""),
-  },
-} as const satisfies Record<string, import("vite").ProxyOptions>;
+    rewrite: (p: string) => p.replace(/^\/__bili_api/, ""),
+    configure: (proxy) => {
+      proxy.on("proxyReq", (proxyReq, req) => {
+        proxyReq.setHeader("referer", "https://www.bilibili.com/");
+        proxyReq.setHeader("origin", "https://www.bilibili.com");
+        proxyReq.setHeader("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
+        const buvid3 = (req.headers["x-bili-buvid3"] as string) || "";
+        if (buvid3) {
+          proxyReq.setHeader("cookie", `buvid3=${buvid3}`);
+        }
+        proxyReq.removeHeader("x-bili-buvid3");
+      });
+    },
+  };
+}
 
 export default defineConfig({
   plugins: [
@@ -105,6 +145,14 @@ export default defineConfig({
   define: {
     __FMZ_RELEASE_LABEL__: JSON.stringify(releaseLabel),
     __FMZ_APP_VERSION__: JSON.stringify(pkg.version),
+    __FEATURE_SANGUO__: JSON.stringify(!!features.sanguo),
+    __FEATURE_BAOBAO__: JSON.stringify(!!features.baobao),
+    __FEATURE_AUDIO__: JSON.stringify(!!features.audio),
+    __FEATURE_BATTLE__: JSON.stringify(!!features.battle),
+    __FEATURE_TREASURY__: JSON.stringify(!!features.treasury),
+    __FEATURE_PRELIMINARY__: JSON.stringify(!!features.preliminary),
+    __FEATURE_USERS__: JSON.stringify(!!features.users),
+    __FEATURE_QUOTA__: JSON.stringify(!!features.quota),
   },
   server: {
     /** 显式0.0.0.0：本机局域网请用 http://内网IP:5173，不要用公网 IP（多数路由器不支持回环） */

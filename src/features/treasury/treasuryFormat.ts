@@ -1,4 +1,4 @@
-import type { MoneyRecord } from "../types";
+import type { MoneyRecord } from "../../shared/types";
 
 /** 与站点 TreasuryDetail 展示文案尽量一致 */
 export function formatRecordContent(h: MoneyRecord): string {

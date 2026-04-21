@@ -1,5 +1,5 @@
 import type { WeeklyReport } from "./defenseTowerApi";
-import { ORBIT_SECTOR_PANEL } from "./orbitSectorPanel";
+import { ORBIT_SECTOR_PANEL } from "../../shared/orbitSectorPanel";
 
 /** 分钟窗口选项：展示最近 N 分钟里各城的最近一次攻城时间 */
 export const SIEGE_MINUTE_WINDOWS = [10, 30, 60, 120] as const;

@@ -11,44 +11,44 @@ import {
   watch,
   watchEffect,
 } from "vue";
-import { createApi } from "../lib/api";
-import type { ClientConfig } from "../lib/api";
+import { createApi } from "../../shared/api";
+import type { ClientConfig } from "../../shared/api";
 import {
   enrichMissingAvatarsFromDoseeing,
   resolveAvatarForNicknameDisplay,
-} from "../lib/doseeingAvatar";
+} from "./doseeingAvatar";
 import {
   normalizeMoneyList,
   TEAM_DEFS,
   type CaptainMoneyCard,
-} from "../lib/captainTeams";
+} from "./captainTeams";
 import {
   captainTeamsFromRoster,
   hudBottomTeamFromRoster,
   hudOtherMembersFromRoster,
-} from "../lib/rosterClassify";
+} from "./rosterClassify";
 import {
   clearRosterStore,
   initRosterFromFetchedCards,
   loadRosterMap,
   type RosterEntry,
-} from "../lib/rosterDb";
-import type { FlyActorHint } from "../lib/recordSource";
-import { inferFlyActorFromRecord } from "../lib/recordSource";
-import { FMZ_TREASURY_AVATAR_KEY } from "../lib/treasuryAvatarOpen";
-import type { ApiListResponse, MoneyCard, MoneyRecord } from "../types";
+} from "./rosterDb";
+import type { FlyActorHint } from "./recordSource";
+import { inferFlyActorFromRecord } from "./recordSource";
+import { FMZ_TREASURY_AVATAR_KEY } from "../../shared/treasuryAvatarOpen";
+import type { ApiListResponse, MoneyCard, MoneyRecord } from "../../shared/types";
 import {
   formatBattleShowPath,
   loadBattleShowFromStorage,
   parseBattleShowPath,
   saveBattleShowToStorage,
   type BattleShowState,
-} from "../lib/battleShowRoute";
+} from "./battleShowRoute";
 import HudBattleMemberSlot from "./HudBattleMemberSlot.vue";
 import {
   ORBIT_SECTOR_PANEL,
   orbitSectorPanelCssVars,
-} from "../lib/orbitSectorPanel";
+} from "../../shared/orbitSectorPanel";
 
 type OrbitPlaced = {
   card: CaptainMoneyCard;

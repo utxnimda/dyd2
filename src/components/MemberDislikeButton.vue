@@ -6,8 +6,8 @@ import {
   memberDislikesState,
   reactionsClientFromSettings,
   type ReactionsClient,
-} from "../lib/memberLikes";
-import { loadSettings } from "../settings";
+} from "../shared/memberLikes";
+import { loadSettings } from "../shared/settings";
 
 const props = withDefaults(
   defineProps<{

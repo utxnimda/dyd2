@@ -1,21 +1,21 @@
 <script setup lang="ts">
 import axios from "axios";
 import { computed, inject, ref } from "vue";
-import { createApi, douyuAvatarUrl } from "../lib/api";
-import type { ClientConfig } from "../lib/api";
+import { createApi, douyuAvatarUrl } from "../../shared/api";
+import type { ClientConfig } from "../../shared/api";
 import {
   aggregatePreliminary,
   gameSum,
   withRank,
-} from "../lib/preliminary";
+} from "./preliminary";
 import type {
   PreliminaryAbilityRow,
   PreliminaryDateRank,
   PreliminaryFetchWarning,
-} from "../types";
-import MemberReactionsInline from "./MemberReactionsInline.vue";
-import type { PrePanelTab } from "../lib/appRoute";
-import { FMZ_TREASURY_AVATAR_KEY } from "../lib/treasuryAvatarOpen";
+} from "../../shared/types";
+import MemberReactionsInline from "../../components/MemberReactionsInline.vue";
+import type { PrePanelTab } from "../../shared/appRoute";
+import { FMZ_TREASURY_AVATAR_KEY } from "../../shared/treasuryAvatarOpen";
 
 /** 表头用：游戏 1–9 */
 const GAME_INDEXES = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;

@@ -1,6 +1,6 @@
-import { douyuAvatarUrl } from "./api";
-import type { MoneyCard, MoneyRecord } from "../types";
-import { formatRecordContent } from "./treasuryFormat";
+import { douyuAvatarUrl } from "../../shared/api";
+import type { MoneyCard, MoneyRecord } from "../../shared/types";
+import { formatRecordContent } from "../treasury/treasuryFormat";
 
 type CaptainLite = Pick<MoneyCard, "id" | "name" | "avatar">;
 

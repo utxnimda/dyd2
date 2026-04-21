@@ -4,7 +4,7 @@ import type {
   PreliminaryAbilityRow,
   PreliminaryDateRank,
   PreliminaryFetchWarning,
-} from "../types";
+} from "../../shared/types";
 
 function num(v: string | number | undefined, fallback = 0): number {
   if (v === undefined || v === null) return fallback;

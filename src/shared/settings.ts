@@ -1,5 +1,5 @@
-import { type ClientConfig } from "./lib/api";
-import type { ThemePresetId } from "./lib/themePresets";
+import { type ClientConfig } from "./api";
+import type { ThemePresetId } from "./themePresets";
 
 const KEY = "fmz_dashboard_settings_v1";
 
@@ -22,6 +22,8 @@ export type StoredSettings = {
   backgroundColor: string;
   /** 主正文 / 标题用字色（自定义时生效；预设会覆盖到界面变量） */
   textColor: string;
+  /** 宝宝版全局开关 — 开启后显示宝宝魅力时刻等宝宝专属功能 */
+  baobaoMode: boolean;
 };
 
 function envNum(raw: string | undefined, fallback: number): number {
@@ -45,6 +47,7 @@ export const defaultSettings = (): StoredSettings => ({
   themePreset: "dark-default",
   backgroundColor: "#0f1419",
   textColor: "#e8eef7",
+  baobaoMode: false,
 });
 
 export function loadSettings(): StoredSettings {
@@ -67,6 +70,9 @@ export function loadSettings(): StoredSettings {
     }
     if (parsed.reactionsSecret == null) {
       merged.reactionsSecret = base.reactionsSecret;
+    }
+    if (parsed.baobaoMode == null) {
+      merged.baobaoMode = base.baobaoMode;
     }
     return merged;
   } catch {

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { createApi } from "../lib/api";
-import type { ClientConfig } from "../lib/api";
-import { enrichMissingAvatarsFromDoseeing } from "../lib/doseeingAvatar";
+import { createApi } from "../../shared/api";
+import type { ClientConfig } from "../../shared/api";
+import { enrichMissingAvatarsFromDoseeing } from "../battle/doseeingAvatar";
 import {
   CAPTAIN_COUNT,
   captainTeamsFromCards,
@@ -11,15 +11,15 @@ import {
   normalizeMoneyList,
   TEAM_DEFS,
   type CaptainMoneyCard,
-} from "../lib/captainTeams";
-import { extractRecordSourceLabel } from "../lib/recordSource";
-import { formatRecordContent } from "../lib/treasuryFormat";
-import type { ApiListResponse, MoneyCard, MoneyRecord } from "../types";
+} from "../battle/captainTeams";
+import { extractRecordSourceLabel } from "../battle/recordSource";
+import { formatRecordContent } from "./treasuryFormat";
+import type { ApiListResponse, MoneyCard, MoneyRecord } from "../../shared/types";
 
 /** 流水行：展示用 content 已格式化，sourceLabel 自原始记录解析 */
 type TreasuryRecordRow = MoneyRecord & { sourceLabel: string };
-import MemberDislikeButton from "./MemberDislikeButton.vue";
-import MemberLikeButton from "./MemberLikeButton.vue";
+import MemberDislikeButton from "../../components/MemberDislikeButton.vue";
+import MemberLikeButton from "../../components/MemberLikeButton.vue";
 type TreasuryCard = CaptainMoneyCard;
 
 const props = defineProps<{ config: ClientConfig }>();

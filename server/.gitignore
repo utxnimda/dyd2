@@ -1,2 +1,6 @@
 data/
 node_modules/
+.env.quota
+.cb-ide-cache-quota.json
+.port.quota
+quota-dashboard.html

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, inject } from "vue";
-import type { CaptainMoneyCard } from "../lib/captainTeams";
-import { ORBIT_SECTOR_PANEL } from "../lib/orbitSectorPanel";
-import MemberDislikeButton from "./MemberDislikeButton.vue";
-import MemberLikeButton from "./MemberLikeButton.vue";
-import { FMZ_TREASURY_AVATAR_KEY } from "../lib/treasuryAvatarOpen";
+import type { CaptainMoneyCard } from "./captainTeams";
+import { ORBIT_SECTOR_PANEL } from "../../shared/orbitSectorPanel";
+import MemberDislikeButton from "../../components/MemberDislikeButton.vue";
+import MemberLikeButton from "../../components/MemberLikeButton.vue";
+import { FMZ_TREASURY_AVATAR_KEY } from "../../shared/treasuryAvatarOpen";
 
 const MAX_ORBIT_NAME_ARC_GRAPHEMES = 14;
 const MAX_ORBIT_SCORE_ARC_CHARS = 16;

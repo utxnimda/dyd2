@@ -3,6 +3,16 @@
 declare const __FMZ_RELEASE_LABEL__: string;
 declare const __FMZ_APP_VERSION__: string;
 
+/** Feature flags — injected at build time from package.json fmzFeatures */
+declare const __FEATURE_SANGUO__: boolean;
+declare const __FEATURE_BAOBAO__: boolean;
+declare const __FEATURE_AUDIO__: boolean;
+declare const __FEATURE_BATTLE__: boolean;
+declare const __FEATURE_TREASURY__: boolean;
+declare const __FEATURE_PRELIMINARY__: boolean;
+declare const __FEATURE_USERS__: boolean;
+declare const __FEATURE_QUOTA__: boolean;
+
 declare module "*.vue" {
   import type { DefineComponent } from "vue";
   const component: DefineComponent<object, object, unknown>;

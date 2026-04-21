@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { inject, onMounted, ref, watch } from "vue";
-import { createApi, douyuAvatarUrl } from "../lib/api";
-import type { ClientConfig } from "../lib/api";
-import type { ApiListResponse, LiveUser } from "../types";
-import MemberLikeButton from "./MemberLikeButton.vue";
-import { FMZ_TREASURY_AVATAR_KEY } from "../lib/treasuryAvatarOpen";
+import { createApi, douyuAvatarUrl } from "../../shared/api";
+import type { ClientConfig } from "../../shared/api";
+import type { ApiListResponse, LiveUser } from "../../shared/types";
+import MemberLikeButton from "../../components/MemberLikeButton.vue";
+import { FMZ_TREASURY_AVATAR_KEY } from "../../shared/treasuryAvatarOpen";
 
 const props = defineProps<{ config: ClientConfig }>();
 
