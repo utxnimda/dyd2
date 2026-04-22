@@ -52,6 +52,10 @@ const smartExtracting = ref(false);
 const smartDone = ref(false);
 const smartError = ref("");
 const songs = ref<Song[]>([]);
+const mergeBusy = ref(false);
+const mergeError = ref("");
+/** 要合并的连续分轨，存 music/xx.mp3，合并成功后清空 */
+const selectedMergeFiles = ref<string[]>([]);
 
 // Playback (now uses global store)
 
@@ -97,6 +101,28 @@ const canExtract = computed(() => {
   const url = videoUrl.value.trim();
   return url.length > 0 && (url.includes("bilibili.com") || url.includes("b23.tv") || url.startsWith("BV"));
 });
+
+const mergeSelectCount = computed(() => selectedMergeFiles.value.length);
+
+function isMergeOutputFile(f: string | undefined): boolean {
+  if (!f) return true;
+  const b = f.replace(/^music\//, "");
+  return b === "merged_full_span.mp3" || b === "merged_selection.mp3";
+}
+
+function mergeFileChecked(f: string | undefined): boolean {
+  return !!(f && !isMergeOutputFile(f) && selectedMergeFiles.value.includes(f));
+}
+
+function toggleMergeFile(f: string | undefined) {
+  if (!f || isMergeOutputFile(f)) return;
+  const i = selectedMergeFiles.value.indexOf(f);
+  if (i >= 0) {
+    selectedMergeFiles.value = selectedMergeFiles.value.filter((x) => x !== f);
+  } else {
+    selectedMergeFiles.value = [...selectedMergeFiles.value, f];
+  }
+}
 
 const isReady = computed(() => depsStatus.value?.ok === true);
 
@@ -353,31 +379,128 @@ function resetAll() {
   songs.value = [];
   audioDuration.value = 0;
   audioFile.value = "";
+  mergeBusy.value = false;
+  mergeError.value = "";
+  selectedMergeFiles.value = [];
+  loadingLocal.value = false;
+}
+
+/** 与 loadExistingData 中相同的列表结构，供合并等操作后同步服务端 */
+async function refreshSongsFromStatus() {
+  if (!videoId.value) return;
+  mergeError.value = "";
+  try {
+    const resp = await fetch(`${API_BASE}/status/${encodeURIComponent(videoId.value)}?p=${videoPage.value}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data.ok || !data.hasMusic || !data.musicFiles?.length) return;
+    const rows = data.musicFiles.slice();
+    const isMerged = (n: string) => n === "merged_full_span.mp3" || n === "merged_selection.mp3";
+    rows.sort((a: { name: string }, b: { name: string }) => (isMerged(a.name) ? 1 : 0) - (isMerged(b.name) ? 1 : 0));
+    songs.value = rows.map((mf: any, i: number) => ({
+      start: mf.start ?? 0,
+      end: mf.end ?? 0,
+      duration: mf.duration ?? 0,
+      label: mf.label || `[${formatTime(mf.start ?? 0)}-${formatTime(mf.end ?? 0)}] ${String(i + 1).padStart(2, "0")}`,
+      file: `music/${mf.name}`,
+    }));
+    smartDone.value = true;
+  } catch {
+    /* ignore */
+  }
+  selectedMergeFiles.value = [];
+}
+
+async function doMergeSelected() {
+  if (!videoId.value) return;
+  if (selectedMergeFiles.value.length < 2) {
+    mergeError.value = "请至少勾选 2 个分轨，且这些分轨在时间上须连续（如 01、02、03）";
+    return;
+  }
+  for (const f of selectedMergeFiles.value) {
+    const u = currentTrack.value?.url;
+    if (u && (u.includes(f) || u.includes(encodeURIComponent(f)))) {
+      stopPlayback();
+      break;
+    }
+  }
+  mergeError.value = "";
+  mergeBusy.value = true;
+  try {
+    const resp = await fetch(`${API_BASE}/merge-selected`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        videoId: videoId.value,
+        page: videoPage.value,
+        fileNames: selectedMergeFiles.value,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) {
+      throw new Error((data as { error?: string }).error || "合并失败");
+    }
+    selectedMergeFiles.value = [];
+    await refreshSongsFromStatus();
+  } catch (e: unknown) {
+    mergeError.value = e instanceof Error ? e.message : "合并失败";
+  } finally {
+    mergeBusy.value = false;
+  }
+}
+
+async function doMergeFullSpan() {
+  if (!videoId.value) return;
+  mergeError.value = "";
+  mergeBusy.value = true;
+  try {
+    const resp = await fetch(`${API_BASE}/merge-full-span`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ videoId: videoId.value, page: videoPage.value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) {
+      throw new Error((data as { error?: string }).error || "合并失败");
+    }
+    await refreshSongsFromStatus();
+  } catch (e: unknown) {
+    mergeError.value = e instanceof Error ? e.message : "合并失败";
+  } finally {
+    mergeBusy.value = false;
+  }
 }
 
 /* ------------------------------------------------------------------ */
 /*  Auto-load existing extraction data when URL is set                 */
 /* ------------------------------------------------------------------ */
 
-async function loadExistingData(url: string) {
+const loadingLocal = ref(false);
+
+/** 仅手动：按当前链接向服务端查询是否已有本机提取（不会发起下载/重新提取） */
+async function loadExistingData() {
+  let url = videoUrl.value.trim();
+  if (!url) return;
+  if (url.startsWith("BV") && !url.includes("http")) {
+    url = `https://www.bilibili.com/video/${url}`;
+  }
   const bvid = parseBvid(url);
   if (!bvid) return;
   const page = parsePageFromUrl(url);
 
+  loadingLocal.value = true;
   try {
     const resp = await fetch(`${API_BASE}/status/${bvid}?p=${page}`);
     if (!resp.ok) return;
     const data = await resp.json();
     if (!data.ok || !data.extracted) return;
 
-    // Populate state with existing data
     videoId.value = bvid;
     videoPage.value = page;
     audioFile.value = data.sourceFile || "";
     audioDuration.value = data.duration || 0;
     extractDone.value = true;
 
-    // If there are music files, populate songs list
     if (data.hasMusic && data.musicFiles?.length > 0) {
       songs.value = data.musicFiles.map((mf: any, i: number) => ({
         start: mf.start ?? 0,
@@ -388,7 +511,9 @@ async function loadExistingData(url: string) {
       }));
       smartDone.value = true;
     }
-  } catch { /* ignore — server may not be running */ }
+  } catch { /* ignore */ } finally {
+    loadingLocal.value = false;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -406,8 +531,7 @@ function handlePayload() {
   resetAll();
   videoUrl.value = url;
   videoPage.value = parsePageFromUrl(url);
-  // Auto-load existing extraction data
-  loadExistingData(url);
+  // 不自动按 BV 拉取本机已提取；请点「读取本机已提取」
 }
 
 onMounted(() => {
@@ -467,6 +591,16 @@ watch(pluginPayloadVersion, () => handlePayload());
           <span v-if="smartExtracting" class="spinner"></span>
           <span v-else>🎶 提取并分割歌曲</span>
         </button>
+        <button
+          type="button"
+          class="ap-btn secondary"
+          :disabled="!canExtract || !isReady || loadingLocal || extracting || smartExtracting"
+          title="仅查询本机 data，不下载、不自动提取"
+          @click="loadExistingData"
+        >
+          <span v-if="loadingLocal" class="spinner"></span>
+          <span v-else>📂 读取本机已提取</span>
+        </button>
       </div>
     </div>
 
@@ -499,10 +633,52 @@ watch(pluginPayloadVersion, () => handlePayload());
         </div>
       </div>
 
+      <div v-if="mergeError" class="ap-msg error" style="margin: 0.5rem 0.75rem 0;">⚠️ {{ mergeError }}</div>
+
       <!-- Song list -->
       <div v-if="smartDone && songs.length > 0" class="ap-songs">
-        <div class="ap-songs-title">🎶 提取到 {{ songs.length }} 首歌曲</div>
-        <div v-for="(song, i) in songs" :key="i" class="ap-song">
+        <div class="ap-songs-title-row">
+          <span class="ap-songs-title">🎶 提取到 {{ songs.length }} 首</span>
+          <div class="ap-songs-title-actions">
+            <button
+              v-if="videoId"
+              type="button"
+              class="ap-small-btn primary"
+              :disabled="mergeBusy || mergeSelectCount < 2"
+              title="合并勾选且时间上相邻的分轨，生成 merged_selection.mp3，原分轨会删除"
+              @click="doMergeSelected"
+            >
+              <span v-if="mergeBusy" class="spinner"></span>
+              <span v-else>✂️ 合并已选 ({{ mergeSelectCount }}) 并删原轨</span>
+            </button>
+            <button
+              v-if="videoId"
+              type="button"
+              class="ap-small-btn"
+              :disabled="mergeBusy"
+              title="全部普通分轨：最早起点—最晚终点一条；不删分轨，生成 merged_full_span.mp3"
+              @click="doMergeFullSpan"
+            >
+              <span v-if="mergeBusy" class="spinner"></span>
+              <span v-else>🔗 全轨合并</span>
+            </button>
+          </div>
+        </div>
+        <div class="ap-merge-hint">合并已选：请勾选时间上连续的片段（如第 1、2、3 行），不能跳行。</div>
+        <div
+          v-for="(song, i) in songs"
+          :key="song.file || i"
+          class="ap-song"
+        >
+          <label v-if="song.file && !isMergeOutputFile(song.file)" class="ap-merge-cb-wrap" @click.stop>
+            <input
+              type="checkbox"
+              class="ap-merge-cb"
+              :checked="mergeFileChecked(song.file)"
+              @change="() => toggleMergeFile(song.file)"
+            />
+          </label>
+          <span v-else class="ap-merge-cb-spacer" aria-hidden="true"></span>
           <div class="ap-song-color" :style="{ background: `hsl(${(i * 60 + 200) % 360}, 60%, 55%)` }"></div>
           <div class="ap-song-info">
             <!-- Inline rename mode -->
@@ -613,6 +789,7 @@ watch(pluginPayloadVersion, () => handlePayload());
 .ap-url::placeholder { color: var(--muted); font-size: 0.82rem; }
 .ap-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.4rem;
 }
 .ap-btn {
@@ -716,6 +893,48 @@ watch(pluginPayloadVersion, () => handlePayload());
   font-weight: 600;
   color: var(--text);
   margin-bottom: 0.4rem;
+}
+.ap-songs-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.4rem;
+}
+.ap-songs-title-row > .ap-songs-title {
+  margin-bottom: 0;
+}
+.ap-songs-title-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.ap-merge-hint {
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin: -0.15rem 0 0.45rem 0.1rem;
+  line-height: 1.3;
+}
+.ap-merge-cb-wrap {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  margin: 0 0.1rem 0 0;
+}
+.ap-merge-cb {
+  width: 0.95rem;
+  height: 0.95rem;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.ap-merge-cb-spacer {
+  display: inline-block;
+  width: 1.15rem;
+  flex-shrink: 0;
+  margin-right: 0.1rem;
 }
 .ap-song {
   display: flex;

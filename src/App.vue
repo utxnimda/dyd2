@@ -313,7 +313,7 @@ watch(showBaobao, (visible) => {
     <button v-if="F_SANGUO" :class="{ on: tab === 'sanguo' }" type="button" @click="selectTab('sanguo')">夜观星象</button>
     <button v-if="showBaobao" :class="{ on: tab === 'baobao' }" type="button" @click="selectTab('baobao')">宝宝魅力时刻</button>
     <button v-if="F_QUOTA" :class="{ on: tab === 'quota' }" type="button" @click="selectTab('quota')">用量看板</button>
-    <button v-if="F_AUDIO" :class="{ on: tab === 'songs' }" type="button" @click="selectTab('songs')">🎶 歌曲库</button>
+    <button v-if="F_AUDIO" :class="{ on: tab === 'songs' }" type="button" @click="selectTab('songs')">忽闻宝声</button>
   </nav>
   <main>
     <PreliminaryPanel

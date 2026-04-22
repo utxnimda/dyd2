@@ -374,6 +374,272 @@ function loadMusicMetadata(musicDir) {
   } catch { return {}; }
 }
 
+/** 全部分轨合并（不删原片） */
+const MERGE_OUTPUT_BASENAME = "merged_full_span.mp3";
+/** 选中连续分轨合并（会删除被选中的原分轨） */
+const MERGE_SELECTION_BASENAME = "merged_selection.mp3";
+
+function isMergeOutputBasename(f) {
+  return f === MERGE_OUTPUT_BASENAME || f === MERGE_SELECTION_BASENAME;
+}
+
+function parseTimeRangeFromFileName(fname) {
+  const timeMatch = fname.match(/\[(\d{2})[_:](\d{2})[_:](\d{2})-(\d{2})[_:](\d{2})[_:](\d{2})\]/);
+  if (!timeMatch) return null;
+  const start =
+    parseInt(timeMatch[1], 10) * 3600 + parseInt(timeMatch[2], 10) * 60 + parseInt(timeMatch[3], 10);
+  const end =
+    parseInt(timeMatch[4], 10) * 3600 + parseInt(timeMatch[5], 10) * 60 + parseInt(timeMatch[6], 10);
+  return { start, end };
+}
+
+/**
+ * 普通分轨（排除合并结果文件），按时间起点排序。用于全轨合并、选中合并的连续性判定。
+ * @returns {Array<{ file: string, start: number, end: number, label: string }>}
+ */
+function buildOrderedNormalSegments(musicDir) {
+  if (!fs.existsSync(musicDir)) return [];
+  const meta = loadMusicMetadata(musicDir);
+  const out = [];
+  for (const f of fs.readdirSync(musicDir)) {
+    if (f === "metadata.json" || isMergeOutputBasename(f)) continue;
+    const full = path.join(musicDir, f);
+    if (fs.statSync(full).isDirectory() || !f.toLowerCase().endsWith(".mp3")) continue;
+
+    const m = meta[f] || {};
+    let start = m.start;
+    let end = m.end;
+    if (typeof start !== "number" || typeof end !== "number" || (start === 0 && end === 0)) {
+      const parsed = parseTimeRangeFromFileName(f);
+      if (parsed) {
+        start = parsed.start;
+        end = parsed.end;
+      }
+    }
+    if (typeof start === "number" && typeof end === "number" && end > start) {
+      out.push({ file: f, start, end, label: m.label || f.replace(/\.mp3$/i, "") });
+    }
+  }
+  out.sort((a, b) => a.start - b.start || a.end - b.end);
+  return out;
+}
+
+/**
+ * 收集各分轨在完整 source 上的时间范围（排除合并输出文件本身）。
+ * @returns {Array<{ file: string, start: number, end: number }>}
+ */
+function collectSegmentBoundsForMerge(musicDir) {
+  return buildOrderedNormalSegments(musicDir).map((r) => ({ file: r.file, start: r.start, end: r.end }));
+}
+
+/**
+ * 按盘上实际 mp3、按起播时间重排，将 metadata 中 index 置为 1..N，并删已无文件的条目。
+ * 合并后只保留与当前分轨文件一致的索引信息。
+ */
+function reindexAllMusicInDir(musicDir, page) {
+  if (!fs.existsSync(musicDir)) return;
+  const meta = loadMusicMetadata(musicDir);
+  const onDisk = fs
+    .readdirSync(musicDir)
+    .filter((f) => f !== "metadata.json" && f.toLowerCase().endsWith(".mp3"))
+    .filter((f) => {
+      const fp = path.join(musicDir, f);
+      return fs.existsSync(fp) && fs.statSync(fp).isFile();
+    });
+  const onSet = new Set(onDisk);
+  for (const k of Object.keys(meta)) {
+    if (!onSet.has(k)) delete meta[k];
+  }
+  const rows = onDisk.map((f) => {
+    const m = meta[f] || {};
+    let start = m.start;
+    let end = m.end;
+    if (typeof start !== "number" || typeof end !== "number" || (start === 0 && end === 0)) {
+      const parsed = parseTimeRangeFromFileName(f);
+      if (parsed) {
+        start = parsed.start;
+        end = parsed.end;
+      }
+    }
+    if (typeof start !== "number") start = 0;
+    if (typeof end !== "number") end = 0;
+    return { f, start, end };
+  });
+  rows.sort((a, b) => a.start - b.start || a.end - b.end || a.f.localeCompare(b.f));
+  const pg = page != null && page > 0 ? page : 1;
+  for (let i = 0; i < rows.length; i++) {
+    const f = rows[i].f;
+    const idx = i + 1;
+    if (!meta[f]) {
+      const dur = rows[i].end > rows[i].start ? Math.round((rows[i].end - rows[i].start) * 100) / 100 : 0;
+      meta[f] = {
+        start: rows[i].start,
+        end: rows[i].end,
+        duration: dur,
+        index: idx,
+        page: pg,
+        originalName: f,
+        label: f.replace(/\.mp3$/i, ""),
+      };
+    } else {
+      meta[f] = { ...meta[f], index: idx, page: meta[f].page != null ? meta[f].page : pg };
+    }
+  }
+  const metaPath = path.join(musicDir, "metadata.json");
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf-8");
+}
+
+/**
+ * 从完整 source 截取 [tFirst, tLast] 为一条音轨。中间原片若存在非歌曲间隙，保留为原样（不剪接多段、不补静音段）。
+ * 等效于「从最早分轨起点到最晚分轨终点」一条连续时间线。
+ */
+async function writeMergedFullSpanFromSource(audioPath, musicDir, page) {
+  const bounds = collectSegmentBoundsForMerge(musicDir);
+  if (bounds.length === 0) {
+    throw new Error("没有分轨时间信息：请先完成「分割歌曲」或保留可解析时间码的文件名");
+  }
+  const tFirst = Math.min(...bounds.map((b) => b.start));
+  const tLast = Math.max(...bounds.map((b) => b.end));
+  if (!(tLast > tFirst)) {
+    throw new Error("分轨时间范围无效");
+  }
+
+  const outFile = path.join(musicDir, MERGE_OUTPUT_BASENAME);
+  const args = [
+    "-y",
+    "-i",
+    audioPath,
+    "-ss",
+    String(tFirst),
+    "-to",
+    String(tLast),
+    "-acodec",
+    "libmp3lame",
+    "-q:a",
+    "2",
+    outFile,
+  ];
+  await execFileAsync("ffmpeg", args, { timeout: 600_000 });
+
+  const duration = Math.round((tLast - tFirst) * 100) / 100;
+  const result = {
+    file: `music/${MERGE_OUTPUT_BASENAME}`,
+    label: `【合并】${fmtTime(tFirst)} — ${fmtTime(tLast)}（含间隙原声）`,
+    start: tFirst,
+    end: tLast,
+    duration,
+    index: 0,
+  };
+  saveMusicMetadata(musicDir, [result], page);
+  reindexAllMusicInDir(musicDir, page);
+  const m = loadMusicMetadata(musicDir);
+  const re = m[MERGE_OUTPUT_BASENAME] || {};
+  return { ...result, index: re.index != null ? re.index : result.index };
+}
+
+/**
+ * 将「按时间排序后两两相邻」的若干分轨合并为一轨，从 source 一次截取；合并成功后删除原分轨文件与 metadata 项。
+ */
+async function mergeSelectedConsecutiveAndDeleteFromSource(audioPath, musicDir, page, fileNames) {
+  const basenames = (fileNames || []).map((x) => String(x).replace(/^music\//, "").trim()).filter(Boolean);
+  if (basenames.length < 2) {
+    throw new Error("请至少选择 2 个分轨");
+  }
+  for (const f of basenames) {
+    if (isMergeOutputBasename(f)) {
+      throw new Error("不能选择合并结果文件");
+    }
+  }
+  const set = new Set(basenames);
+  if (set.size !== basenames.length) {
+    throw new Error("选中了重复项");
+  }
+
+  const ordered = buildOrderedNormalSegments(musicDir);
+  const byFile = new Map(ordered.map((r) => [r.file, r]));
+  for (const f of basenames) {
+    if (!byFile.has(f)) {
+      throw new Error(`分轨不存在或不是普通分轨: ${f}`);
+    }
+  }
+
+  const selectedIndices = [];
+  for (let i = 0; i < ordered.length; i++) {
+    if (set.has(ordered[i].file)) selectedIndices.push(i);
+  }
+  if (selectedIndices.length !== set.size) {
+    throw new Error("选中项与分轨表不一致");
+  }
+  for (let j = 1; j < selectedIndices.length; j++) {
+    if (selectedIndices[j] !== selectedIndices[j - 1] + 1) {
+      throw new Error("所选分轨在时间上须连续：按起点排序后必须相邻，例如可勾选 01、02、03，不可跳段");
+    }
+  }
+
+  const rows = selectedIndices.map((i) => ordered[i]);
+  const t0 = Math.min(...rows.map((r) => r.start));
+  const t1 = Math.max(...rows.map((r) => r.end));
+  if (!(t1 > t0)) {
+    throw new Error("时间范围无效");
+  }
+
+  const outFile = path.join(musicDir, MERGE_SELECTION_BASENAME);
+  const args = [
+    "-y",
+    "-i",
+    audioPath,
+    "-ss",
+    String(t0),
+    "-to",
+    String(t1),
+    "-acodec",
+    "libmp3lame",
+    "-q:a",
+    "2",
+    outFile,
+  ];
+  await execFileAsync("ffmpeg", args, { timeout: 600_000 });
+
+  const meta = loadMusicMetadata(musicDir);
+  delete meta[MERGE_SELECTION_BASENAME];
+
+  for (const r of rows) {
+    const fp = path.join(musicDir, r.file);
+    if (fs.existsSync(fp)) {
+      await fsp.unlink(fp);
+    }
+    delete meta[r.file];
+  }
+
+  const duration = Math.round((t1 - t0) * 100) / 100;
+  const label = `【合并】${rows.length}段（${fmtTime(t0)}—${fmtTime(t1)}）`;
+  meta[MERGE_SELECTION_BASENAME] = {
+    start: t0,
+    end: t1,
+    duration,
+    index: 0,
+    page,
+    originalName: MERGE_SELECTION_BASENAME,
+    label,
+  };
+  const metaPath = path.join(musicDir, "metadata.json");
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf-8");
+
+  reindexAllMusicInDir(musicDir, page);
+  const mAfter = loadMusicMetadata(musicDir);
+  const mSel = mAfter[MERGE_SELECTION_BASENAME] || {};
+
+  return {
+    file: `music/${MERGE_SELECTION_BASENAME}`,
+    label,
+    start: t0,
+    end: t1,
+    duration,
+    index: mSel.index != null ? mSel.index : 0,
+    deleted: rows.map((r) => r.file),
+  };
+}
+
 function updateMusicMetadataLabel(musicDir, fileName, newLabel) {
   const meta = loadMusicMetadata(musicDir);
   if (meta[fileName]) {
@@ -735,6 +1001,71 @@ const server = http.createServer(async (req, res) => {
         musicFrames: detectResult.musicFrames,
         speechFrames: detectResult.speechFrames,
       });
+    }
+
+    /* ---- POST /merge-full-span — 最早分轨起点 ~ 最晚分轨终点，一条整轨（原片间隙原样保留） ---- */
+    if (req.method === "POST" && pathname === "/merge-full-span") {
+      const body = await readBody(req);
+      const { videoId: vid, page: pg } = body;
+      if (!vid) return json(res, 400, { error: "Missing videoId" });
+
+      const p = parseInt(String(pg || "1"), 10) || 1;
+      const baseDir = p > 1 ? path.join(DATA_DIR, vid, `p${p}`) : path.join(DATA_DIR, vid);
+      if (!fs.existsSync(baseDir)) {
+        return json(res, 404, { error: "未找到该 BV 的提取目录" });
+      }
+      const sourceFile = fs.readdirSync(baseDir).find((f) => f.startsWith("source."));
+      if (!sourceFile) {
+        return json(res, 404, { error: "尚未提取完整音频，请先执行提取" });
+      }
+      const audioPath = path.join(baseDir, sourceFile);
+      const musicDir = path.join(baseDir, "music");
+      if (!fs.existsSync(musicDir)) {
+        return json(res, 404, { error: "没有 music/ 分轨，请先分割歌曲" });
+      }
+
+      try {
+        const result = await writeMergedFullSpanFromSource(audioPath, musicDir, p);
+        console.log(`[merge-full-span] ${vid} p${p} -> ${result.file} [${result.start}–${result.end}]`);
+        return json(res, 200, { ok: true, ...result });
+      } catch (err) {
+        return json(res, 400, { error: err.message || String(err) });
+      }
+    }
+
+    /* ---- POST /merge-selected — 勾选时间上连续的多段，合并为 merged_selection.mp3 并删除原分轨 ---- */
+    if (req.method === "POST" && pathname === "/merge-selected") {
+      const body = await readBody(req);
+      const { videoId: vid, page: pg, fileNames } = body;
+      if (!vid) {
+        return json(res, 400, { error: "Missing videoId" });
+      }
+      if (!Array.isArray(fileNames) || fileNames.length < 2) {
+        return json(res, 400, { error: "请传 fileNames 数组且至少 2 项" });
+      }
+
+      const p = parseInt(String(pg || "1"), 10) || 1;
+      const baseDir = p > 1 ? path.join(DATA_DIR, vid, `p${p}`) : path.join(DATA_DIR, vid);
+      if (!fs.existsSync(baseDir)) {
+        return json(res, 404, { error: "未找到该 BV 的提取目录" });
+      }
+      const sourceFile = fs.readdirSync(baseDir).find((f) => f.startsWith("source."));
+      if (!sourceFile) {
+        return json(res, 404, { error: "尚未提取完整音频" });
+      }
+      const audioPath = path.join(baseDir, sourceFile);
+      const musicDir = path.join(baseDir, "music");
+      if (!fs.existsSync(musicDir)) {
+        return json(res, 404, { error: "没有 music/ 分轨" });
+      }
+
+      try {
+        const result = await mergeSelectedConsecutiveAndDeleteFromSource(audioPath, musicDir, p, fileNames);
+        console.log(`[merge-selected] ${vid} p${p} -> ${result.file}, deleted: ${result.deleted?.join(", ")}`);
+        return json(res, 200, { ok: true, ...result });
+      } catch (err) {
+        return json(res, 400, { error: err.message || String(err) });
+      }
     }
 
     /* ---- POST /rename-song — Update song label (file stays unchanged) ---- */

@@ -30,7 +30,7 @@ dist/index.html 或 release/<fmzReleaseLabel>/index.html
 npm run pack
 ```
 
-等价于 **`vite build`** 后再执行 **`scripts/pack-release.mjs`**，将 **`dist/`** 复制到 **`release/<fmzReleaseLabel>/`**，并生成 **`BUILD_INFO.txt`**（时间戳与版本元数据）。
+等价于 **`vite build`** 后再执行 **`scripts/pack-release.mjs`**，将 **`dist/`** 复制到 **`release/<fmzReleaseLabel>/`**，并生成 **`BUILD_INFO.txt`**（时间戳与版本元数据）。同一归档内还会按**实际发布**的模块，把本机 **`server/data/`** 的对应子路径复制到 **`release/<fmzReleaseLabel>/server/data/`**（如歌曲库 → `audio/`，赞踩相关 → `reactions.db`；**不含** `defense_tower.db`，该库由服务在线拉取/生成，不随包分发）；若本地无该路径则提示跳过。可选： **`--skip-data`** 只打前端不打数据；**`--exclude-audio-source`** 归档 `audio` 时排除各 BV 下的 `source.*` 大文件（与 §11.3.2 的增量策略一致）。**`BUILD_INFO.txt`** 中 **`archivedServerData`** 会列出本次纳入的相对路径。
 
 ### 2.1 发布模块强制确认（⚠️ 强制规则）
 

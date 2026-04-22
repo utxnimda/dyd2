@@ -27,12 +27,13 @@ export const ALL_PLUGINS: PluginDescriptor[] = [
     label: "音频提取",
     icon: "🎵",
     description: "从视频中提取唱歌音频，自动识别并分割歌曲",
-    component: __FEATURE_AUDIO__
-      ? defineAsyncComponent(
-          () => import("../features/audio/AudioExtractorPanel.vue"),
-        )
-      : null,
-    enabled: __FEATURE_AUDIO__,
+    component:
+      __FEATURE_AUDIO__ && __FEATURE_AUDIO_PLUGIN__
+        ? defineAsyncComponent(
+            () => import("../features/audio/AudioExtractorPanel.vue"),
+          )
+        : null,
+    enabled: __FEATURE_AUDIO__ && __FEATURE_AUDIO_PLUGIN__,
   },
 ];
 

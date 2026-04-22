@@ -7,6 +7,8 @@ declare const __FMZ_APP_VERSION__: string;
 declare const __FEATURE_SANGUO__: boolean;
 declare const __FEATURE_BAOBAO__: boolean;
 declare const __FEATURE_AUDIO__: boolean;
+/** 仅本地：浮窗「音频提取」插件；`fmzFeatures.audioPlugin: "local"` 时发布构建不含 */
+declare const __FEATURE_AUDIO_PLUGIN__: boolean;
 declare const __FEATURE_BATTLE__: boolean;
 declare const __FEATURE_TREASURY__: boolean;
 declare const __FEATURE_PRELIMINARY__: boolean;

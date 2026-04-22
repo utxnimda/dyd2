@@ -1,9 +1,10 @@
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch, reactive } from "vue";
-import { requestPluginOpen, onPluginOpen } from "../../shared/plugins";
+import { ref, computed, onMounted, reactive } from "vue";
+import { requestPluginOpen } from "../../shared/plugins";
 
 const F_AUDIO = __FEATURE_AUDIO__;
+const F_AUDIO_PLUGIN = __FEATURE_AUDIO_PLUGIN__;
 
 interface BiliVideo {
   aid: number;
@@ -294,6 +295,7 @@ function getThumb(v: BiliVideo): string {
 
 /** Open the audio extractor plugin with this video's URL pre-filled (including page) */
 function extractAudio(bvid: string) {
+  if (!F_AUDIO_PLUGIN) return;
   const selPage = selectedPages[bvid] || 1;
   let url = `https://www.bilibili.com/video/${bvid}`;
   if (selPage > 1) url += `?p=${selPage}`;
@@ -315,6 +317,8 @@ interface AudioStatus {
 
 const audioStatuses = reactive<Record<string, AudioStatus>>({});
 const expandedAudio = ref<string | null>(null);
+/** 用户点开「音频」下拉时才会按 BV 查询，不再对整页自动拉取 */
+const audioStatusLoading = reactive<Record<string, boolean>>({});
 
 const AUDIO_API = "/__fmz_audio";
 
@@ -330,13 +334,37 @@ async function fetchAudioStatus(bvid: string) {
           sourceFile: data.sourceFile || null,
           musicFiles: data.musicFiles || [],
         };
+        return;
       }
     }
-  } catch { /* ignore */ }
+    audioStatuses[bvid] = {
+      extracted: false,
+      hasMusic: false,
+      sourceFile: null,
+      musicFiles: [],
+    };
+  } catch {
+    audioStatuses[bvid] = {
+      extracted: false,
+      hasMusic: false,
+      sourceFile: null,
+      musicFiles: [],
+    };
+  }
 }
 
-function toggleAudioDropdown(bvid: string) {
-  expandedAudio.value = expandedAudio.value === bvid ? null : bvid;
+async function toggleAudioDropdown(bvid: string) {
+  if (expandedAudio.value === bvid) {
+    expandedAudio.value = null;
+    return;
+  }
+  expandedAudio.value = bvid;
+  audioStatusLoading[bvid] = true;
+  try {
+    await fetchAudioStatus(bvid);
+  } finally {
+    audioStatusLoading[bvid] = false;
+  }
 }
 
 function formatFileSize(bytes: number): string {
@@ -350,33 +378,6 @@ function playAudioFile(bvid: string, filename: string) {
   window.open(url, "_blank");
 }
 
-/** Refresh audio statuses when plugin is opened or videos change */
-function refreshAllAudioStatuses() {
-  if (!F_AUDIO) return;
-  for (const v of videos.value) {
-    fetchAudioStatus(v.bvid);
-  }
-}
-
-// Watch for video list changes to refresh statuses
-watch(videos, () => {
-  refreshAllAudioStatuses();
-});
-
-// Listen for plugin open events to refresh statuses (user may have just extracted)
-let unsubPlugin: (() => void) | null = null;
-onMounted(() => {
-  if (F_AUDIO) {
-    unsubPlugin = onPluginOpen(() => {
-      // Refresh statuses when audio plugin is toggled
-      setTimeout(refreshAllAudioStatuses, 500);
-    });
-  }
-});
-
-onUnmounted(() => {
-  unsubPlugin?.();
-});
 </script>
 
 <template>
@@ -479,7 +480,7 @@ onUnmounted(() => {
           </span>
           <!-- Audio extract button overlay — always visible on hover -->
           <button
-            v-if="F_AUDIO"
+            v-if="F_AUDIO && F_AUDIO_PLUGIN"
             type="button"
             class="extract-overlay-btn"
             :class="{ 'always-show': playingBvid === v.bvid }"
@@ -509,38 +510,44 @@ onUnmounted(() => {
         <!-- Info -->
         <div class="card-info">
           <h3 class="card-title" :title="v.title" @click="openVideo(v.bvid)">{{ v.title }}</h3>
-          <!-- Audio status indicator -->
-          <div v-if="F_AUDIO && audioStatuses[v.bvid]?.extracted" class="audio-status-row">
-            <span class="audio-badge extracted" title="已提取音频">🎵 已提取</span>
+          <!-- 音频：仅点击展开时按 BV 查询本机状态，不自动批量拉取 -->
+          <div v-if="F_AUDIO" class="audio-status-row">
+            <span v-if="audioStatuses[v.bvid]?.extracted" class="audio-badge extracted" title="已提取音频">🎵 已提取</span>
             <span v-if="audioStatuses[v.bvid]?.hasMusic" class="audio-badge music" title="已分割歌曲">
               🎶 {{ audioStatuses[v.bvid].musicFiles.length }} 首歌曲
             </span>
             <button
+              type="button"
               class="audio-dropdown-btn"
               :class="{ open: expandedAudio === v.bvid }"
-              title="查看音频文件"
+              title="查看本机是否已提取（点击后才会查询）"
               @click.stop="toggleAudioDropdown(v.bvid)"
             >
-              ▾
+              {{ audioStatusLoading[v.bvid] ? "⏳" : "🎵" }} ▾
             </button>
           </div>
-          <!-- Audio files dropdown -->
-          <div v-if="F_AUDIO && expandedAudio === v.bvid && audioStatuses[v.bvid]?.extracted" class="audio-dropdown">
-            <div v-if="audioStatuses[v.bvid]?.sourceFile" class="audio-file-item">
-              <span class="audio-file-icon">📄</span>
-              <span class="audio-file-name">{{ audioStatuses[v.bvid].sourceFile }}</span>
-              <button class="audio-play-btn" title="播放" @click.stop="playAudioFile(v.bvid, audioStatuses[v.bvid].sourceFile!)">▶</button>
-            </div>
-            <template v-if="audioStatuses[v.bvid]?.musicFiles?.length">
-              <div class="audio-file-divider">🎶 歌曲</div>
-              <div v-for="mf in audioStatuses[v.bvid].musicFiles" :key="mf.name" class="audio-file-item">
-                <span class="audio-file-icon">🎵</span>
-                <span class="audio-file-name">{{ mf.name }}</span>
-                <span class="audio-file-size">{{ formatFileSize(mf.size) }}</span>
-                <button class="audio-play-btn" title="播放" @click.stop="playAudioFile(v.bvid, 'music/' + mf.name)">▶</button>
-              </div>
+          <div v-if="F_AUDIO && expandedAudio === v.bvid" class="audio-dropdown">
+            <div v-if="audioStatusLoading[v.bvid]" class="audio-file-empty">查询本机状态中…</div>
+            <template v-else-if="!audioStatuses[v.bvid]?.extracted">
+              <div class="audio-file-empty">本机尚未提取该视频音频</div>
             </template>
-            <div v-else class="audio-file-empty">暂无分割歌曲</div>
+            <template v-else>
+              <div v-if="audioStatuses[v.bvid]?.sourceFile" class="audio-file-item">
+                <span class="audio-file-icon">📄</span>
+                <span class="audio-file-name">{{ audioStatuses[v.bvid].sourceFile }}</span>
+                <button class="audio-play-btn" title="播放" @click.stop="playAudioFile(v.bvid, audioStatuses[v.bvid].sourceFile!)">▶</button>
+              </div>
+              <template v-if="audioStatuses[v.bvid]?.musicFiles?.length">
+                <div class="audio-file-divider">🎶 歌曲</div>
+                <div v-for="mf in audioStatuses[v.bvid].musicFiles" :key="mf.name" class="audio-file-item">
+                  <span class="audio-file-icon">🎵</span>
+                  <span class="audio-file-name">{{ mf.name }}</span>
+                  <span class="audio-file-size">{{ formatFileSize(mf.size) }}</span>
+                  <button class="audio-play-btn" title="播放" @click.stop="playAudioFile(v.bvid, 'music/' + mf.name)">▶</button>
+                </div>
+              </template>
+              <div v-else class="audio-file-empty">暂无分割歌曲</div>
+            </template>
           </div>
           <div class="card-bottom">
             <div class="card-author">

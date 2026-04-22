@@ -5,8 +5,12 @@
  * ★ 强制确认机制：打包前会列出所有模块的发布状态，
  *   用户必须手动输入 "yes" 确认后才会执行归档。
  *   可通过 --yes 或 -y 跳过确认（仅限 CI 场景）。
+ *
+ * 数据归档：按「发布」的模块，将 server/data/ 中对应子路径复制到
+ *   release/<label>/server/data/，便于与静态资源一并备份或上传节点。
+ *   不含 defense_tower.db（由服务在线生成）。--skip-data 禁用；--exclude-audio-source 排除 source.* 大文件。
  */
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,7 +28,8 @@ const metaPath = join(target, "BUILD_INFO.txt");
 const FEATURE_LABELS = {
   sanguo:      "三国守塔",
   baobao:      "百宝箱（B站搜索）",
-  audio:       "🎶 歌曲库 / 音频提取",
+  audio:        "🎶 忽闻宝声 / 曲库与播放",
+  audioPlugin:  "音频提取插件（仅本地）",
   battle:      "战斗爽",
   treasury:    "团员金库",
   preliminary: "预赛数据",
@@ -115,6 +120,58 @@ if (!confirmed) {
   process.exit(1);
 }
 
+const skipData = process.argv.includes("--skip-data");
+const excludeAudioSource = process.argv.includes("--exclude-audio-source");
+
+/* ------------------------------------------------------------------ */
+/*  server/data/ → release/<label>/server/data/ (按发布模块)           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 根据启用的 feature（值为 true 视为会发布到线上）决定需要进包的数据路径。
+ * reactions.db 与多个模块共享，用 Set 去重。
+ */
+function dataRelPathsToArchive(f) {
+  const set = new Set();
+  // defense_tower.db 由服务在线拉取/生成，不纳入发布包体归档
+  if (f.audio === true) set.add("audio");
+  for (const k of ["battle", "treasury", "preliminary", "users"]) {
+    if (f[k] === true) {
+      set.add("reactions.db");
+      break;
+    }
+  }
+  return [...set];
+}
+
+/**
+ * 复制单文件或整目录到 release 镜像路径。
+ */
+function copyDataPath(rel, destRoot) {
+  const src = join(root, "server", "data", rel);
+  if (!existsSync(src)) {
+    return { rel, ok: false, reason: "missing" };
+  }
+  const dest = join(destRoot, rel);
+  mkdirSync(dirname(dest), { recursive: true });
+  if (rel === "audio" && statSync(src).isDirectory()) {
+    const opts = { recursive: true };
+    if (excludeAudioSource) {
+      Object.assign(opts, {
+        filter: (p) => {
+          const fn = p.split(/[/\\]/).pop() || "";
+          if (fn.startsWith("source.")) return false;
+          return true;
+        },
+      });
+    }
+    cpSync(src, dest, opts);
+  } else {
+    cpSync(src, dest, { recursive: true });
+  }
+  return { rel, ok: true, reason: "" };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Archive dist/ → release/<label>/                                  */
 /* ------------------------------------------------------------------ */
@@ -123,14 +180,43 @@ mkdirSync(join(root, "release"), { recursive: true });
 rmSync(target, { recursive: true, force: true });
 cpSync(dist, target, { recursive: true });
 
+const archivedData = [];
+if (!skipData) {
+  const rels = dataRelPathsToArchive(features);
+  const outDataRoot = join(target, "server", "data");
+  if (rels.length) {
+    if (!existsSync(join(root, "server", "data"))) {
+      console.log("\n⚠️  未找到 server/data/，跳过数据归档（本地尚无运行时数据时正常）。");
+    } else {
+      for (const rel of rels) {
+        const r = copyDataPath(rel, outDataRoot);
+        if (r.ok) {
+          archivedData.push(rel);
+          console.log(`  [data] 已复制: server/data/${rel}`);
+        } else {
+          console.log(`  [data] 跳过（无）: server/data/${rel}`);
+        }
+      }
+      if (excludeAudioSource && rels.includes("audio")) {
+        console.log("  [data] 已使用 --exclude-audio-source 排除各 BV 下的 source.*");
+      }
+    }
+  } else {
+    console.log("\n  [data] 当前无需要归档的数据子路径（所发布模块不依赖 server/data 文件）。");
+  }
+} else {
+  console.log("\n  [data] 已使用 --skip-data，跳过。");
+}
+
 const meta = [
   `release: ${label}`,
   `package.version: ${pkg.version}`,
   `packedAt: ${new Date().toISOString()}`,
   `enabledFeatures: ${enabledModules.join(", ") || "(none)"}`,
   `disabledFeatures: ${disabledModules.join(", ") || "(none)"}`,
+  `archivedServerData: ${archivedData.length ? archivedData.join(", ") : "(none)"}`,
   "",
 ].join("\n");
 writeFileSync(metaPath, meta, "utf-8");
 
-console.log(`\n✅ 已打包到 release/${label}/（含 BUILD_INFO.txt）`);
+console.log(`\n✅ 已打包到 release/${label}/（含 BUILD_INFO.txt${archivedData.length ? "、server/data" : ""}）`);

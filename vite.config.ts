@@ -148,6 +148,7 @@ export default defineConfig({
     __FEATURE_SANGUO__: JSON.stringify(!!features.sanguo),
     __FEATURE_BAOBAO__: JSON.stringify(!!features.baobao),
     __FEATURE_AUDIO__: JSON.stringify(!!features.audio),
+    __FEATURE_AUDIO_PLUGIN__: JSON.stringify(!!features.audioPlugin),
     __FEATURE_BATTLE__: JSON.stringify(!!features.battle),
     __FEATURE_TREASURY__: JSON.stringify(!!features.treasury),
     __FEATURE_PRELIMINARY__: JSON.stringify(!!features.preliminary),

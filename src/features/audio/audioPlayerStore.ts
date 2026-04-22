@@ -75,7 +75,7 @@ export function stopPlayback() {
   playerVisible.value = false;
 }
 
-/** Replace the entire playlist (e.g. when library loads) */
+/** Replace the entire playlist（如从「宝宝no声」点歌时按 BV 顺序整表同步） */
 export function setPlaylist(tracks: PlayableTrack[]) {
   playlist.value = tracks;
 }
