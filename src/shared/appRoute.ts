@@ -1,6 +1,6 @@
 /** Hash-based routing (no vue-router — works with static deploy & OBS deep links) */
 
-export type MainTab = "pre" | "users" | "battle" | "treasury" | "sanguo" | "baobao" | "quota";
+export type MainTab = "pre" | "users" | "battle" | "treasury" | "sanguo" | "baobao" | "quota" | "songs";
 
 export type PrePanelTab = "total" | "nogf" | "perround" | "gf" | "logging";
 
@@ -38,6 +38,9 @@ const TAB_ALIASES: Record<string, MainTab> = {
   quota: "quota",
   usage: "quota",
   dashboard: "quota",
+  songs: "songs",
+  "song-library": "songs",
+  library: "songs",
   audio: "sanguo",
   "audio-extractor": "sanguo",
 };

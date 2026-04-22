@@ -4,6 +4,7 @@ import {
   getEnabledPlugins,
   onPluginOpen,
   pluginPayloads,
+  pluginPayloadVersion,
   type PluginDescriptor,
 } from "../shared/plugins";
 
@@ -26,10 +27,10 @@ const positions = reactive<Record<string, { x: number; y: number }>>({});
 const sizes = reactive<Record<string, { w: number; h: number }>>({});
 
 function defaultPos(idx: number) {
-  // Centre the panel in the viewport
-  const w = Math.min(680, window.innerWidth - 40);
+  // Position the panel on the right side so it doesn't cover the main content
+  const panelW = Math.min(480, window.innerWidth - 40);
   return {
-    x: Math.max(20, Math.round((window.innerWidth - w) / 2)),
+    x: Math.max(20, window.innerWidth - panelW - 20),
     y: Math.max(40, 60 + idx * 30),
   };
 }
@@ -108,7 +109,8 @@ onMounted(() => {
     if (idx < 0) return;
     // Store payload so the plugin component can read it
     if (evt.payload) {
-      pluginPayloads.value = { ...pluginPayloads.value, [evt.pluginId]: evt.payload };
+      pluginPayloads.value = { ...pluginPayloads.value, [evt.pluginId]: { ...evt.payload, _ts: Date.now() } };
+      pluginPayloadVersion.value++;
     }
     // Activate the plugin if not already active
     if (!activePlugins.has(evt.pluginId)) {
@@ -200,7 +202,7 @@ const activeList = computed(() =>
         :style="{
           left: (positions[p.id]?.x ?? 100) + 'px',
           top: (positions[p.id]?.y ?? 80) + 'px',
-          width: (sizes[p.id]?.w ?? 680) + 'px',
+      width: (sizes[p.id]?.w ?? 480) + 'px',
         }"
       >
         <div class="plugin-float-header" @mousedown="onDragStart($event, p.id)">
@@ -339,7 +341,7 @@ const activeList = computed(() =>
 .plugin-float {
   position: fixed;
   z-index: 9000;
-  width: 680px;
+  width: 480px;
   max-width: calc(100vw - 32px);
   max-height: 85vh;
   display: flex;

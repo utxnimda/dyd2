@@ -3,6 +3,10 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
+const { exec } = require('child_process');
+
+// ===== CLI flags =====
+const AUTO_OPEN_BROWSER = process.argv.includes('--open');
 
 // ===== Load .env file =====
 function loadEnv() {
@@ -1565,6 +1569,17 @@ function startServer(port) {
       console.log(`  ⚠️  Port ${DEFAULT_PORT} was in use, using ${port} instead`);
     }
     console.log('');
+
+    // Auto-open browser if --open flag is set
+    if (AUTO_OPEN_BROWSER) {
+      const url = `http://localhost:${port}`;
+      const cmd = process.platform === 'win32' ? `start "" "${url}"`
+        : process.platform === 'darwin' ? `open "${url}"`
+        : `xdg-open "${url}"`;
+      exec(cmd, (err) => {
+        if (err) console.log('  ⚠️  Could not auto-open browser:', err.message);
+      });
+    }
   });
 }
 

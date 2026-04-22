@@ -62,6 +62,12 @@ const BilibiliSearchPanel = __FEATURE_BAOBAO__
 const QuotaDashboardPanel = __FEATURE_QUOTA__
   ? defineAsyncComponent(() => import("./features/quota/QuotaDashboardPanel.vue"))
   : null;
+const SongLibraryPanel = __FEATURE_AUDIO__
+  ? defineAsyncComponent(() => import("./features/audio/SongLibraryPanel.vue"))
+  : null;
+const GlobalAudioPlayer = __FEATURE_AUDIO__
+  ? defineAsyncComponent(() => import("./features/audio/GlobalAudioPlayer.vue"))
+  : null;
 
 // Feature flags exposed to template (Vite replaces these at build time)
 const F_SANGUO = __FEATURE_SANGUO__;
@@ -71,6 +77,7 @@ const F_TREASURY = __FEATURE_TREASURY__;
 const F_PRELIMINARY = __FEATURE_PRELIMINARY__;
 const F_USERS = __FEATURE_USERS__;
 const F_QUOTA = __FEATURE_QUOTA__;
+const F_AUDIO = __FEATURE_AUDIO__;
 
 // Battle show route — tree-shaken when __FEATURE_BATTLE__ is false
 const formatBattleShowPath = __FEATURE_BATTLE__ ? _fmtBSP : (_?: any) => "";
@@ -180,6 +187,7 @@ const battleRef = ref<any>(null);
 const treRef = ref<any>(null);
 const sanguoRef = ref<any>(null);
 const quotaRef = ref<any>(null);
+const songsRef = ref<any>(null);
 
 /** Reload the currently active panel (shared by onApply / loadActivePanel / tab-switch). */
 function reloadPanel(t: MainTab) {
@@ -189,6 +197,7 @@ function reloadPanel(t: MainTab) {
   if (__FEATURE_TREASURY__ && t === "treasury") treRef.value?.reload();
   if (__FEATURE_SANGUO__ && t === "sanguo") sanguoRef.value?.reload();
   if (__FEATURE_QUOTA__ && t === "quota") quotaRef.value?.reload();
+  if (__FEATURE_AUDIO__ && t === "songs") songsRef.value?.reload();
 }
 
 async function openTreasuryDetailFromAvatar(memberId: string | number | null | undefined) {
@@ -304,6 +313,7 @@ watch(showBaobao, (visible) => {
     <button v-if="F_SANGUO" :class="{ on: tab === 'sanguo' }" type="button" @click="selectTab('sanguo')">夜观星象</button>
     <button v-if="showBaobao" :class="{ on: tab === 'baobao' }" type="button" @click="selectTab('baobao')">宝宝魅力时刻</button>
     <button v-if="F_QUOTA" :class="{ on: tab === 'quota' }" type="button" @click="selectTab('quota')">用量看板</button>
+    <button v-if="F_AUDIO" :class="{ on: tab === 'songs' }" type="button" @click="selectTab('songs')">🎶 歌曲库</button>
   </nav>
   <main>
     <PreliminaryPanel
@@ -343,7 +353,13 @@ watch(showBaobao, (visible) => {
       v-if="F_QUOTA && QuotaDashboardPanel && tab === 'quota'"
       ref="quotaRef"
     />
+    <SongLibraryPanel
+      v-if="F_AUDIO && SongLibraryPanel && tab === 'songs'"
+      ref="songsRef"
+    />
   </main>
+  <!-- Global floating audio player (always available when audio feature is on) -->
+  <GlobalAudioPlayer v-if="F_AUDIO && GlobalAudioPlayer" />
   </template>
 </template>
 

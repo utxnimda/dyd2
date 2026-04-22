@@ -21,6 +21,7 @@ const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "data", "audio");
 const PORT = parseInt(process.env.AUDIO_PORT || "8789", 10);
+const MUSIC_DETECTOR_PY = path.join(__dirname, "music_detector.py");
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -61,16 +62,33 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-/** Get video directory (each video gets its own folder) */
-function videoDir(videoId) {
-  const dir = path.join(DATA_DIR, videoId);
+/** Get video directory (each video gets its own folder, with optional page subdir) */
+function videoDir(videoId, page) {
+  const p = parseInt(page, 10);
+  const dir = (p > 1)
+    ? path.join(DATA_DIR, videoId, `p${p}`)
+    : path.join(DATA_DIR, videoId);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+/** Parse page number from a bilibili URL like ?p=3 */
+function parsePageFromUrl(url) {
+  const m = String(url).match(/[?&]p=(\d+)/);
+  return m ? parseInt(m[1], 10) : 1;
 }
 
 /** Sanitize filename */
 function sanitize(name) {
   return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 100);
+}
+
+/** Format seconds to HH:MM:SS for song labels */
+function fmtTime(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -81,14 +99,14 @@ function sanitize(name) {
  * Extract audio from a Bilibili video URL using yt-dlp.
  * Returns the path to the extracted audio file.
  */
-async function extractAudio(url, videoId) {
-  const dir = videoDir(videoId);
+async function extractAudio(url, videoId, page) {
+  const dir = videoDir(videoId, page);
   const outputTemplate = path.join(dir, "source.%(ext)s");
 
   // Check if already extracted
   const existing = fs.readdirSync(dir).find((f) => f.startsWith("source."));
   if (existing) {
-    return { file: path.join(dir, existing), cached: true };
+    return { file: path.join(dir, existing), cached: true, dir };
   }
 
   const args = [
@@ -115,11 +133,64 @@ async function extractAudio(url, videoId) {
   // Find the output file
   const files = fs.readdirSync(dir).filter((f) => f.startsWith("source."));
   if (files.length === 0) throw new Error("yt-dlp produced no output file");
-  return { file: path.join(dir, files[0]), cached: false };
+  return { file: path.join(dir, files[0]), cached: false, dir };
 }
 
 /* ------------------------------------------------------------------ */
-/*  Core: Detect song segments via silence detection                  */
+/*  Core: Detect music segments via Python librosa (music vs speech)  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Use Python music_detector.py (librosa-based) to classify audio segments
+ * as music or speech. Returns only music segments.
+ */
+async function detectMusicSegments(audioPath, opts = {}) {
+  const {
+    minDuration = 15,
+    hop = 1.0,
+    window = 3.0,
+  } = opts;
+
+  return new Promise((resolve, reject) => {
+    const args = [
+      MUSIC_DETECTOR_PY,
+      audioPath,
+      "--min-duration", String(minDuration),
+      "--hop", String(hop),
+      "--window", String(window),
+    ];
+
+    console.log(`[detect-music] Running: python ${args.join(" ")}`);
+    const proc = spawn("python", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => (stdout += d.toString()));
+    proc.stderr.on("data", (d) => {
+      const line = d.toString();
+      stderr += line;
+      // Forward progress lines to console
+      for (const l of line.split("\n").filter(Boolean)) {
+        console.log(`  ${l}`);
+      }
+    });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        return reject(new Error(`music_detector.py exited with code ${code}: ${stderr}`));
+      }
+      try {
+        const result = JSON.parse(stdout);
+        if (result.error) return reject(new Error(result.error));
+        resolve(result);
+      } catch (e) {
+        reject(new Error(`Failed to parse music_detector output: ${stdout.slice(0, 200)}`));
+      }
+    });
+    proc.on("error", (err) => reject(new Error(`Python not found or failed: ${err.message}`)));
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Core: Detect song segments via silence detection (legacy)         */
 /* ------------------------------------------------------------------ */
 
 /**
@@ -223,14 +294,17 @@ async function detectSegments(audioPath, opts = {}) {
  * @param {Array<{start: number, end: number, label?: string}>} segments
  * @returns {Array<{file: string, label: string, start: number, end: number}>}
  */
-async function splitAudio(audioPath, segments, videoId) {
-  const dir = videoDir(videoId);
+async function splitAudio(audioPath, segments, videoId, page) {
+  const dir = videoDir(videoId, page);
+  // Songs go into a "music" subdirectory
+  const musicDir = path.join(dir, "music");
+  if (!fs.existsSync(musicDir)) fs.mkdirSync(musicDir, { recursive: true });
   const results = [];
 
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     const label = seg.label || `segment_${String(i + 1).padStart(2, "0")}`;
-    const outFile = path.join(dir, `${sanitize(label)}.mp3`);
+    const outFile = path.join(musicDir, `${sanitize(label)}.mp3`);
 
     const args = [
       "-y",
@@ -245,18 +319,103 @@ async function splitAudio(audioPath, segments, videoId) {
     try {
       await execFileAsync("ffmpeg", args, { timeout: 120_000 });
       results.push({
-        file: path.basename(outFile),
+        file: `music/${path.basename(outFile)}`,
         label,
         start: seg.start,
         end: seg.end,
         duration: Math.round((seg.end - seg.start) * 100) / 100,
+        index: seg.index ?? (i + 1),
       });
     } catch (err) {
       console.error(`[split] Failed segment ${i}:`, err.message);
     }
   }
 
+  // Save metadata with full traceability info (index, page, originalName)
+  saveMusicMetadata(musicDir, results, page);
+
   return results;
+}
+
+/**
+ * Save / load music metadata (start, end, duration, index, page, originalName per song file).
+ * Stored as music/metadata.json inside the video page directory.
+ * This metadata is the authoritative source for the song library,
+ * allowing it to work independently from the extraction tool.
+ */
+function saveMusicMetadata(musicDir, songs, page) {
+  const metaPath = path.join(musicDir, "metadata.json");
+  // Merge with existing metadata to preserve user renames
+  let existing = {};
+  if (fs.existsSync(metaPath)) {
+    try { existing = JSON.parse(fs.readFileSync(metaPath, "utf-8")); } catch {}
+  }
+  const meta = { ...existing };
+  for (const s of songs) {
+    const fname = s.file.replace(/^music\//, "");
+    meta[fname] = {
+      start: s.start,
+      end: s.end,
+      duration: s.duration,
+      index: s.index ?? 0,
+      page: page ?? 1,
+      originalName: fname,
+      label: s.label,
+    };
+  }
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf-8");
+}
+
+function loadMusicMetadata(musicDir) {
+  const metaPath = path.join(musicDir, "metadata.json");
+  if (!fs.existsSync(metaPath)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+  } catch { return {}; }
+}
+
+function updateMusicMetadataLabel(musicDir, fileName, newLabel) {
+  const meta = loadMusicMetadata(musicDir);
+  if (meta[fileName]) {
+    meta[fileName] = {
+      ...meta[fileName],
+      label: newLabel,
+      renamedAt: new Date().toISOString(),
+    };
+    const metaPath = path.join(musicDir, "metadata.json");
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf-8");
+  }
+}
+
+function updateMusicMetadataDelete(musicDir, fileName) {
+  const meta = loadMusicMetadata(musicDir);
+  const fname = fileName.replace(/^music\//, "");
+  if (meta[fname]) {
+    delete meta[fname];
+    const metaPath = path.join(musicDir, "metadata.json");
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf-8");
+  }
+}
+
+/**
+ * Save video-level info (BV, URL, page, extract time) alongside the audio.
+ * Stored as video_info.json in the video page directory.
+ */
+function saveVideoInfo(dir, info) {
+  const infoPath = path.join(dir, "video_info.json");
+  // Merge with existing info (don't overwrite fields already set)
+  let existing = {};
+  if (fs.existsSync(infoPath)) {
+    try { existing = JSON.parse(fs.readFileSync(infoPath, "utf-8")); } catch {}
+  }
+  const merged = { ...existing, ...info, updatedAt: new Date().toISOString() };
+  fs.writeFileSync(infoPath, JSON.stringify(merged, null, 2), "utf-8");
+}
+
+function loadVideoInfo(dir) {
+  const infoPath = path.join(dir, "video_info.json");
+  if (!fs.existsSync(infoPath)) return null;
+  try { return JSON.parse(fs.readFileSync(infoPath, "utf-8")); } catch { return null; }
 }
 
 /* ------------------------------------------------------------------ */
@@ -265,20 +424,15 @@ async function splitAudio(audioPath, segments, videoId) {
 
 async function getAudioDuration(audioPath) {
   try {
-    const { stdout } = await execFileAsync("ffmpeg", [
-      "-i", audioPath,
-      "-f", "null", "-",
-    ], { timeout: 30_000 }).catch(() => ({ stdout: "" }));
-
-    // ffprobe approach
     const { stdout: probeOut } = await execFileAsync("ffprobe", [
       "-v", "error",
       "-show_entries", "format=duration",
       "-of", "default=noprint_wrappers=1:nokey=1",
       audioPath,
-    ], { timeout: 30_000 }).catch(() => ({ stdout: "0" }));
+    ], { timeout: 10_000 });
 
-    return parseFloat(probeOut) || 0;
+    const val = parseFloat(probeOut);
+    return isNaN(val) ? 0 : Math.round(val * 100) / 100;
   } catch {
     return 0;
   }
@@ -308,23 +462,34 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const videoUrl = body.url;
       const videoId = body.videoId || uid();
+      const page = body.page || parsePageFromUrl(videoUrl);
 
       if (!videoUrl) return json(res, 400, { error: "Missing url" });
 
-      console.log(`[extract] Starting: ${videoUrl} (id=${videoId})`);
-      const { file, cached } = await extractAudio(videoUrl, videoId);
+      console.log(`[extract] Starting: ${videoUrl} (id=${videoId}, page=${page})`);
+      const { file, cached } = await extractAudio(videoUrl, videoId, page);
       const duration = await getAudioDuration(file);
+
+      // Save video info for the library
+      const extractDir = videoDir(videoId, page);
+      saveVideoInfo(extractDir, {
+        bvid: videoId,
+        url: videoUrl,
+        page,
+        extractedAt: new Date().toISOString(),
+      });
 
       return json(res, 200, {
         ok: true,
         videoId,
+        page,
         audioFile: path.basename(file),
         cached,
         duration,
       });
     }
 
-    /* ---- POST /detect — Detect song segments ---- */
+    /* ---- POST /detect — Detect song segments (legacy silence-based) ---- */
     if (req.method === "POST" && pathname === "/detect") {
       const body = await readBody(req);
       const { videoId, silenceThresh, silenceDuration, minSegment } = body;
@@ -342,6 +507,29 @@ const server = http.createServer(async (req, res) => {
         silenceThresh: silenceThresh ?? -35,
         silenceDuration: silenceDuration ?? 3,
         minSegment: minSegment ?? 15,
+      });
+
+      return json(res, 200, { ok: true, ...result });
+    }
+
+    /* ---- POST /detect-music — Smart music detection via librosa ---- */
+    if (req.method === "POST" && pathname === "/detect-music") {
+      const body = await readBody(req);
+      const { videoId, minDuration, hop, window: windowSec } = body;
+
+      if (!videoId) return json(res, 400, { error: "Missing videoId" });
+
+      const dir = videoDir(videoId);
+      const sourceFile = fs.readdirSync(dir).find((f) => f.startsWith("source."));
+      if (!sourceFile) return json(res, 404, { error: "Audio not extracted yet" });
+
+      const audioPath = path.join(dir, sourceFile);
+      console.log(`[detect-music] Analyzing: ${audioPath}`);
+
+      const result = await detectMusicSegments(audioPath, {
+        minDuration: minDuration ?? 15,
+        hop: hop ?? 1.0,
+        window: windowSec ?? 3.0,
       });
 
       return json(res, 200, { ok: true, ...result });
@@ -374,34 +562,396 @@ const server = http.createServer(async (req, res) => {
       if (!fs.existsSync(dir)) return json(res, 404, { error: "Not found" });
 
       const files = fs.readdirSync(dir).map((f) => {
-        const stat = fs.statSync(path.join(dir, f));
+        const full = path.join(dir, f);
+        const stat = fs.statSync(full);
+        if (stat.isDirectory()) return null;
         return { name: f, size: stat.size, mtime: stat.mtime.toISOString() };
-      });
+      }).filter(Boolean);
+
+      // Also list music subdirectory
+      const musicDir = path.join(dir, "music");
+      if (fs.existsSync(musicDir)) {
+        for (const f of fs.readdirSync(musicDir)) {
+          const stat = fs.statSync(path.join(musicDir, f));
+          if (!stat.isDirectory()) {
+            files.push({ name: `music/${f}`, size: stat.size, mtime: stat.mtime.toISOString() });
+          }
+        }
+      }
 
       return json(res, 200, { ok: true, files });
     }
 
-    /* ---- GET /download/:videoId/:filename — Download/stream audio file ---- */
+    /* ---- GET /status/:videoId — Check extraction status for a video (supports ?p=N) ---- */
+    if (req.method === "GET" && pathname.startsWith("/status/")) {
+      const videoId = pathname.replace("/status/", "");
+      const qPage = parseInt(url.searchParams.get("p") || "1", 10);
+      const dir = (qPage > 1)
+        ? path.join(DATA_DIR, videoId, `p${qPage}`)
+        : path.join(DATA_DIR, videoId);
+
+      if (!fs.existsSync(dir)) {
+        return json(res, 200, { ok: true, extracted: false, hasMusic: false, page: qPage, files: [] });
+      }
+
+      const sourceFile = fs.readdirSync(dir).find((f) => f.startsWith("source."));
+      const musicDir = path.join(dir, "music");
+      const musicFiles = fs.existsSync(musicDir)
+        ? fs.readdirSync(musicDir).filter((f) => !fs.statSync(path.join(musicDir, f)).isDirectory() && f !== "metadata.json")
+        : [];
+
+      // Get duration if source exists
+      let duration = 0;
+      if (sourceFile) {
+        duration = await getAudioDuration(path.join(dir, sourceFile));
+      }
+
+      // Load metadata for start/end times
+      const meta = loadMusicMetadata(musicDir);
+
+      return json(res, 200, {
+        ok: true,
+        page: qPage,
+        extracted: !!sourceFile,
+        hasMusic: musicFiles.length > 0,
+        sourceFile: sourceFile || null,
+        duration,
+        musicFiles: musicFiles.map((f) => {
+          const stat = fs.statSync(path.join(musicDir, f));
+          const m = meta[f] || {};
+          return {
+            name: f,
+            size: stat.size,
+            start: m.start ?? 0,
+            end: m.end ?? 0,
+            duration: m.duration ?? 0,
+            label: m.label,
+            index: m.index ?? 0,
+            page: m.page ?? qPage,
+            originalName: m.originalName || f,
+            renamedAt: m.renamedAt || null,
+          };
+        }),
+      });
+    }
+
+    /* ---- POST /smart-extract — One-click: extract audio + detect music + split songs ---- */
+    if (req.method === "POST" && pathname === "/smart-extract") {
+      const body = await readBody(req);
+      const videoUrl = body.url;
+      const videoId = body.videoId || uid();
+      const useLibrosa = body.useLibrosa !== false; // default to librosa
+
+      if (!videoUrl) return json(res, 400, { error: "Missing url" });
+
+      const page = body.page || parsePageFromUrl(videoUrl);
+      console.log(`[smart-extract] Starting: ${videoUrl} (id=${videoId}, page=${page}, method=${useLibrosa ? "librosa" : "silence"})`);
+
+      // Step 1: Extract audio
+      const { file: audioFile, cached } = await extractAudio(videoUrl, videoId, page);
+      const duration = await getAudioDuration(audioFile);
+      console.log(`[smart-extract] Audio extracted (cached=${cached}, duration=${duration}s)`);
+
+      // Step 2: Detect segments — use librosa music detection by default
+      let detectResult;
+      if (useLibrosa) {
+        detectResult = await detectMusicSegments(audioFile, {
+          minDuration: body.minDuration ?? body.minSegment ?? 15,
+          hop: body.hop ?? 1.0,
+          window: body.window ?? 3.0,
+        });
+      } else {
+        detectResult = await detectSegments(audioFile, {
+          silenceThresh: body.silenceThresh ?? -35,
+          silenceDuration: body.silenceDuration ?? 3,
+          minSegment: body.minSegment ?? 15,
+        });
+      }
+      console.log(`[smart-extract] Detected ${detectResult.segments.length} segments`);
+
+      if (detectResult.segments.length === 0) {
+        return json(res, 200, {
+          ok: true,
+          videoId,
+          audioFile: path.basename(audioFile),
+          duration,
+          cached,
+          segments: [],
+          message: "No song segments detected",
+        });
+      }
+
+      // Filter out low-confidence segments (not real songs)
+      const confidentSegments = detectResult.segments.filter(s => {
+        // If confidence info is available, filter low-confidence ones
+        if (typeof s.confidence === "number" && s.confidence < 0.12) {
+          console.log(`[smart-extract] Skipping low-confidence segment (${s.start}-${s.end}, conf=${s.confidence})`);
+          return false;
+        }
+        return true;
+      });
+      console.log(`[smart-extract] ${confidentSegments.length} confident segments (from ${detectResult.segments.length} detected)`);
+
+      if (confidentSegments.length === 0) {
+        return json(res, 200, {
+          ok: true,
+          videoId,
+          audioFile: path.basename(audioFile),
+          duration,
+          cached,
+          segments: [],
+          message: "No confident song segments detected",
+        });
+      }
+
+      // Step 3: Split into songs — name format: [start-end] 序号
+      const labeledSegments = confidentSegments.map((s, i) => ({
+        ...s,
+        label: `[${fmtTime(s.start)}-${fmtTime(s.end)}] ${String(i + 1).padStart(2, "0")}`,
+        index: i + 1,
+      }));
+      const splitResults = await splitAudio(audioFile, labeledSegments, videoId, page);
+      console.log(`[smart-extract] Split into ${splitResults.length} songs`);
+
+      // Save video info for the library
+      const extractDir = videoDir(videoId, page);
+      saveVideoInfo(extractDir, {
+        bvid: videoId,
+        url: videoUrl,
+        page,
+        extractedAt: new Date().toISOString(),
+      });
+
+      return json(res, 200, {
+        ok: true,
+        videoId,
+        page,
+        audioFile: path.basename(audioFile),
+        duration,
+        cached,
+        totalDuration: detectResult.totalDuration,
+        segments: splitResults,
+        method: useLibrosa ? "librosa" : "silence",
+        musicFrames: detectResult.musicFrames,
+        speechFrames: detectResult.speechFrames,
+      });
+    }
+
+    /* ---- POST /rename-song — Update song label (file stays unchanged) ---- */
+    if (req.method === "POST" && pathname === "/rename-song") {
+      const body = await readBody(req);
+      const { videoId: vid, fileName, newLabel, page: pg } = body;
+
+      if (!vid || !fileName || !newLabel)
+        return json(res, 400, { error: "Missing videoId, fileName, or newLabel" });
+
+      const p = parseInt(pg, 10);
+      const baseDir = (p > 1) ? path.join(DATA_DIR, vid, `p${p}`) : path.join(DATA_DIR, vid);
+      const musicDir = path.join(baseDir, "music");
+      if (!fs.existsSync(musicDir))
+        return json(res, 404, { error: "Music directory not found" });
+
+      const fname = fileName.replace(/^music\//, "");
+      const filePath = path.join(musicDir, fname);
+      if (!fs.existsSync(filePath))
+        return json(res, 404, { error: "Song file not found" });
+
+      try {
+        updateMusicMetadataLabel(musicDir, fname, newLabel.trim());
+        console.log(`[rename-song] ${vid}/${fname} label -> "${newLabel.trim()}"`);
+        return json(res, 200, { ok: true, label: newLabel.trim() });
+      } catch (err) {
+        return json(res, 500, { error: `Rename failed: ${err.message}` });
+      }
+    }
+
+    /* ---- POST /delete-song — Delete a song file ---- */
+    if (req.method === "POST" && pathname === "/delete-song") {
+      const body = await readBody(req);
+      const { videoId: vid, fileName, page: pg } = body;
+
+      if (!vid || !fileName)
+        return json(res, 400, { error: "Missing videoId or fileName" });
+
+      const p = parseInt(pg, 10);
+      const baseDir = (p > 1) ? path.join(DATA_DIR, vid, `p${p}`) : path.join(DATA_DIR, vid);
+      // fileName can be "music/xxx.mp3" or just "xxx.mp3"
+      const filePath = path.join(baseDir, fileName);
+
+      if (!fs.existsSync(filePath))
+        return json(res, 404, { error: "File not found" });
+
+      try {
+        await fsp.unlink(filePath);
+        // Update metadata
+        const mDir = path.join(baseDir, "music");
+        updateMusicMetadataDelete(mDir, fileName);
+        console.log(`[delete-song] Deleted: ${vid}/${fileName}`);
+        return json(res, 200, { ok: true });
+      } catch (err) {
+        return json(res, 500, { error: `Delete failed: ${err.message}` });
+      }
+    }
+
+    /* ---- GET /library — List all extracted videos and their songs ---- */
+    if (req.method === "GET" && pathname === "/library") {
+      const library = [];
+
+      if (!fs.existsSync(DATA_DIR)) return json(res, 200, { ok: true, videos: [] });
+
+      for (const videoId of fs.readdirSync(DATA_DIR)) {
+        const videoBase = path.join(DATA_DIR, videoId);
+        if (!fs.statSync(videoBase).isDirectory()) continue;
+
+        // Collect page directories: root (p1) + p2, p3, ...
+        const pageDirs = [];
+        // Check if root has source file (p1)
+        const rootSource = fs.readdirSync(videoBase).find(f => f.startsWith("source."));
+        if (rootSource) pageDirs.push({ page: 1, dir: videoBase });
+        // Check pN subdirectories
+        for (const sub of fs.readdirSync(videoBase)) {
+          const m = sub.match(/^p(\d+)$/);
+          if (m) {
+            const subDir = path.join(videoBase, sub);
+            if (fs.statSync(subDir).isDirectory()) {
+              const subSource = fs.readdirSync(subDir).find(f => f.startsWith("source."));
+              if (subSource) pageDirs.push({ page: parseInt(m[1], 10), dir: subDir });
+            }
+          }
+        }
+
+        for (const { page, dir } of pageDirs) {
+          const musicDir = path.join(dir, "music");
+          if (!fs.existsSync(musicDir)) continue;
+          const musicFiles = fs.readdirSync(musicDir).filter(f =>
+            !fs.statSync(path.join(musicDir, f)).isDirectory() && f !== "metadata.json"
+          );
+          if (musicFiles.length === 0) continue;
+
+          const meta = loadMusicMetadata(musicDir);
+          const info = loadVideoInfo(dir) || {};
+
+          // Fallback extractedAt: use the earliest music file mtime if no video_info
+          let fallbackTime = null;
+          if (!info.extractedAt) {
+            for (const f of musicFiles) {
+              const st = fs.statSync(path.join(musicDir, f));
+              const t = st.mtime.toISOString();
+              if (!fallbackTime || t < fallbackTime) fallbackTime = t;
+            }
+          }
+
+          const songs = [];
+          for (const f of musicFiles) {
+            const m = meta[f] || {};
+            let start = m.start ?? 0;
+            let end = m.end ?? 0;
+            let duration = m.duration ?? 0;
+
+            // Try to parse time from filename like [00:01:30-00:04:15] or [00_01_30-00_04_15]
+            if (start === 0 && end === 0) {
+              const timeMatch = f.match(/\[(\d{2})[_:](\d{2})[_:](\d{2})-(\d{2})[_:](\d{2})[_:](\d{2})\]/);
+              if (timeMatch) {
+                start = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
+                end = parseInt(timeMatch[4]) * 3600 + parseInt(timeMatch[5]) * 60 + parseInt(timeMatch[6]);
+                duration = Math.round((end - start) * 100) / 100;
+              }
+            }
+
+            // Fallback: get actual duration from the audio file via ffprobe
+            if (duration === 0) {
+              duration = await getAudioDuration(path.join(musicDir, f));
+            }
+
+            songs.push({
+              file: f,
+              label: m.label || f.replace(/\.[^.]+$/, ""),
+              start,
+              end,
+              duration,
+              index: m.index ?? 0,
+              page: m.page ?? page,
+              originalName: m.originalName || f,
+              renamedAt: m.renamedAt || null,
+            });
+          }
+
+          library.push({
+            bvid: videoId,
+            page,
+            url: info.url || `https://www.bilibili.com/video/${videoId}${page > 1 ? "?p=" + page : ""}`,
+            extractedAt: info.extractedAt || fallbackTime,
+            songs,
+          });
+        }
+      }
+
+      // Sort by extractedAt descending (newest first)
+      library.sort((a, b) => {
+        if (!a.extractedAt) return 1;
+        if (!b.extractedAt) return -1;
+        return b.extractedAt.localeCompare(a.extractedAt);
+      });
+
+      return json(res, 200, { ok: true, videos: library });
+    }
+
+    /* ---- GET /download/:videoId/... — Download/stream audio file (supports music/ subdir) ---- */
+    /* Supports HTTP Range requests so the browser <audio> element can seek. */
     if (req.method === "GET" && pathname.startsWith("/download/")) {
       const parts = pathname.replace("/download/", "").split("/");
       const videoId = parts[0];
       const filename = decodeURIComponent(parts.slice(1).join("/"));
-      const filePath = path.join(videoDir(videoId), filename);
+      const filePath = path.join(DATA_DIR, videoId, filename);
 
       if (!fs.existsSync(filePath)) return json(res, 404, { error: "File not found" });
 
       const stat = fs.statSync(filePath);
+      const fileSize = stat.size;
       const ext = path.extname(filePath).toLowerCase();
       const mimeMap = { ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".ogg": "audio/ogg" };
       const mime = mimeMap[ext] || "application/octet-stream";
 
-      res.writeHead(200, {
-        "Content-Type": mime,
-        "Content-Length": stat.size,
-        "Content-Disposition": `inline; filename="${encodeURIComponent(filename)}"`,
-        "Access-Control-Allow-Origin": "*",
-      });
-      fs.createReadStream(filePath).pipe(res);
+      const rangeHeader = req.headers.range;
+      if (rangeHeader) {
+        // Parse Range header, e.g. "bytes=32324-"
+        const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+        if (match) {
+          const start = parseInt(match[1], 10);
+          const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+          const chunkSize = end - start + 1;
+
+          res.writeHead(206, {
+            "Content-Type": mime,
+            "Content-Length": chunkSize,
+            "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": `inline; filename="${encodeURIComponent(filename)}"`,
+            "Access-Control-Allow-Origin": "*",
+          });
+          fs.createReadStream(filePath, { start, end }).pipe(res);
+        } else {
+          // Malformed Range header — send full file
+          res.writeHead(200, {
+            "Content-Type": mime,
+            "Content-Length": fileSize,
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": `inline; filename="${encodeURIComponent(filename)}"`,
+            "Access-Control-Allow-Origin": "*",
+          });
+          fs.createReadStream(filePath).pipe(res);
+        }
+      } else {
+        // No Range header — send full file
+        res.writeHead(200, {
+          "Content-Type": mime,
+          "Content-Length": fileSize,
+          "Accept-Ranges": "bytes",
+          "Content-Disposition": `inline; filename="${encodeURIComponent(filename)}"`,
+          "Access-Control-Allow-Origin": "*",
+        });
+        fs.createReadStream(filePath).pipe(res);
+      }
       return;
     }
 
@@ -409,6 +959,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && (pathname === "/check" || pathname === "/")) {
       let ytdlpOk = false;
       let ffmpegOk = false;
+      let pythonOk = false;
+      let librosaOk = false;
 
       try {
         await execFileAsync("yt-dlp", ["--version"], { timeout: 5000 });
@@ -420,12 +972,28 @@ const server = http.createServer(async (req, res) => {
         ffmpegOk = true;
       } catch {}
 
+      try {
+        await execFileAsync("python", ["-c", "import librosa; print('ok')"], { timeout: 15000 });
+        pythonOk = true;
+        librosaOk = true;
+      } catch {
+        try {
+          await execFileAsync("python", ["--version"], { timeout: 5000 });
+          pythonOk = true;
+        } catch {}
+      }
+
+      const allOk = ytdlpOk && ffmpegOk;
       return json(res, 200, {
-        ok: ytdlpOk && ffmpegOk,
+        ok: allOk,
         ytdlp: ytdlpOk,
         ffmpeg: ffmpegOk,
-        message: ytdlpOk && ffmpegOk
-          ? "All dependencies ready"
+        python: pythonOk,
+        librosa: librosaOk,
+        message: allOk
+          ? (librosaOk
+            ? "All dependencies ready (smart music detection enabled)"
+            : "Core dependencies ready (smart music detection unavailable — install librosa)")
           : `Missing: ${[!ytdlpOk && "yt-dlp", !ffmpegOk && "ffmpeg"].filter(Boolean).join(", ")}`,
       });
     }
@@ -462,6 +1030,10 @@ server.listen(PORT, () => {
     execFileAsync("ffmpeg", ["-version"], { timeout: 5000 }).then(
       (r) => console.log(`   ✅ ffmpeg ${r.stdout.split("\n")[0]}`),
       () => console.warn("   ❌ ffmpeg not found! Install: winget install ffmpeg"),
+    ),
+    execFileAsync("python", ["-c", "import librosa; print(librosa.__version__)"], { timeout: 15000 }).then(
+      (r) => console.log(`   ✅ python + librosa ${r.stdout.trim()} (smart music detection enabled)`),
+      () => console.warn("   ⚠️  python/librosa not available — smart music detection disabled\n       Install: pip install librosa soundfile"),
     ),
   ]);
 });

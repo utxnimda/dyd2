@@ -1,7 +1,7 @@
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
-import { requestPluginOpen } from "../../shared/plugins";
+import { ref, computed, onMounted, onUnmounted, watch, reactive } from "vue";
+import { requestPluginOpen, onPluginOpen } from "../../shared/plugins";
 
 const F_AUDIO = __FEATURE_AUDIO__;
 
@@ -50,6 +50,58 @@ const pageSize = 20;
 
 /** Currently playing video bvid (inline player) */
 const playingBvid = ref<string | null>(null);
+/** Currently selected page index (1-based) for multi-part videos */
+const playingPage = ref(1);
+
+/* ------------------------------------------------------------------ */
+/*  Multi-part (分P) video support                                     */
+/* ------------------------------------------------------------------ */
+
+interface BiliPage {
+  page: number;   // 1-based page index
+  part: string;   // page title
+  duration: number; // seconds
+  firstFrame?: string; // first frame thumbnail URL for this page
+}
+
+/** Cached pages per bvid */
+const videoPages = reactive<Record<string, BiliPage[]>>({});
+/** Loading state for fetching pages */
+const loadingPages = ref<string | null>(null);
+
+/** Format seconds to MM:SS */
+function formatSeconds(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/** Fetch video pages info from bilibili API */
+async function fetchVideoPages(bvid: string): Promise<BiliPage[]> {
+  if (videoPages[bvid]) return videoPages[bvid];
+  try {
+    loadingPages.value = bvid;
+    const buvid3 = await ensureBuvid3();
+    const headers: Record<string, string> = {};
+    if (buvid3) headers["x-bili-buvid3"] = buvid3;
+    const resp = await fetch(`/__bili_api/x/web-interface/view?bvid=${bvid}`, { headers });
+    if (!resp.ok) return [];
+    const json = await resp.json();
+    if (json.code !== 0) return [];
+    const pages: BiliPage[] = (json.data?.pages || []).map((p: any) => ({
+      page: p.page,
+      part: p.part || `P${p.page}`,
+      duration: p.duration || 0,
+      firstFrame: p.first_frame || "",
+    }));
+    videoPages[bvid] = pages;
+    return pages;
+  } catch {
+    return [];
+  } finally {
+    loadingPages.value = null;
+  }
+}
 
 /** Cached buvid3 fingerprint token required by bilibili API to avoid 412 */
 let cachedBuvid3 = "";
@@ -69,6 +121,12 @@ async function ensureBuvid3(): Promise<string> {
 onMounted(() => {
   search(1);
 });
+
+/** Fetch pages for all videos in current list */
+async function fetchAllVideoPages() {
+  const promises = videos.value.map((v) => fetchVideoPages(v.bvid));
+  await Promise.allSettled(promises);
+}
 
 /** Strip HTML highlight tags from bilibili search results */
 function stripHtml(html: string): string {
@@ -149,6 +207,8 @@ async function search(p = 1) {
     videos.value = list;
     page.value = p;
     totalPages.value = Math.ceil((data.numResults || data.numPages * pageSize || 0) / pageSize);
+    // Pre-fetch pages info for all videos
+    fetchAllVideoPages();
   } catch (e: any) {
     errorMsg.value = e.message || "搜索失败";
     videos.value = [];
@@ -196,17 +256,127 @@ function openVideo(bvid: string) {
   window.open(`https://www.bilibili.com/video/${bvid}`, "_blank");
 }
 
-function togglePlay(bvid: string) {
-  playingBvid.value = playingBvid.value === bvid ? null : bvid;
+/** Track selected page per video (so each card remembers its selection) */
+const selectedPages = reactive<Record<string, number>>({});
+
+async function togglePlay(bvid: string) {
+  if (playingBvid.value === bvid) {
+    // Stop playing
+    playingBvid.value = null;
+    playingPage.value = 1;
+    return;
+  }
+  // Fetch pages info if not already cached
+  await fetchVideoPages(bvid);
+  playingBvid.value = bvid;
+  playingPage.value = selectedPages[bvid] || 1;
 }
 
-/** Open the audio extractor plugin with this video's URL pre-filled */
+/** Switch to a specific page of a video */
+function selectPage(bvid: string, p: number) {
+  selectedPages[bvid] = p;
+  // If this video is currently playing, also update the player
+  if (playingBvid.value === bvid) {
+    playingPage.value = p;
+  }
+}
+
+/** Get the thumbnail for a video, considering selected page */
+function getThumb(v: BiliVideo): string {
+  const pages = videoPages[v.bvid];
+  const selPage = selectedPages[v.bvid] || 1;
+  if (pages && pages.length > 1 && selPage > 1) {
+    const pg = pages.find((p) => p.page === selPage);
+    if (pg?.firstFrame) return pg.firstFrame;
+  }
+  return v.pic;
+}
+
+/** Open the audio extractor plugin with this video's URL pre-filled (including page) */
 function extractAudio(bvid: string) {
-  const url = `https://www.bilibili.com/video/${bvid}`;
+  const selPage = selectedPages[bvid] || 1;
+  let url = `https://www.bilibili.com/video/${bvid}`;
+  if (selPage > 1) url += `?p=${selPage}`;
   requestPluginOpen("audio", { url });
 }
 
 const hasResults = computed(() => videos.value.length > 0);
+
+/* ------------------------------------------------------------------ */
+/*  Audio extraction status per video                                  */
+/* ------------------------------------------------------------------ */
+
+interface AudioStatus {
+  extracted: boolean;
+  hasMusic: boolean;
+  sourceFile: string | null;
+  musicFiles: { name: string; size: number }[];
+}
+
+const audioStatuses = reactive<Record<string, AudioStatus>>({});
+const expandedAudio = ref<string | null>(null);
+
+const AUDIO_API = "/__fmz_audio";
+
+async function fetchAudioStatus(bvid: string) {
+  try {
+    const resp = await fetch(`${AUDIO_API}/status/${bvid}`);
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.ok) {
+        audioStatuses[bvid] = {
+          extracted: data.extracted,
+          hasMusic: data.hasMusic,
+          sourceFile: data.sourceFile || null,
+          musicFiles: data.musicFiles || [],
+        };
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+function toggleAudioDropdown(bvid: string) {
+  expandedAudio.value = expandedAudio.value === bvid ? null : bvid;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  if (bytes >= 1024) return (bytes / 1024).toFixed(0) + " KB";
+  return bytes + " B";
+}
+
+function playAudioFile(bvid: string, filename: string) {
+  const url = `${AUDIO_API}/download/${bvid}/${encodeURIComponent(filename)}`;
+  window.open(url, "_blank");
+}
+
+/** Refresh audio statuses when plugin is opened or videos change */
+function refreshAllAudioStatuses() {
+  if (!F_AUDIO) return;
+  for (const v of videos.value) {
+    fetchAudioStatus(v.bvid);
+  }
+}
+
+// Watch for video list changes to refresh statuses
+watch(videos, () => {
+  refreshAllAudioStatuses();
+});
+
+// Listen for plugin open events to refresh statuses (user may have just extracted)
+let unsubPlugin: (() => void) | null = null;
+onMounted(() => {
+  if (F_AUDIO) {
+    unsubPlugin = onPluginOpen(() => {
+      // Refresh statuses when audio plugin is toggled
+      setTimeout(refreshAllAudioStatuses, 500);
+    });
+  }
+});
+
+onUnmounted(() => {
+  unsubPlugin?.();
+});
 </script>
 
 <template>
@@ -282,11 +452,11 @@ const hasResults = computed(() => videos.value.length > 0);
     <!-- Video grid -->
     <div v-if="hasResults" class="video-grid">
       <div v-for="v in videos" :key="v.bvid" class="video-card">
-        <!-- Thumbnail -->
+        <!-- Thumbnail / Player -->
         <div class="thumb-wrap" @click="togglePlay(v.bvid)">
           <img
             v-if="playingBvid !== v.bvid"
-            :src="v.pic"
+            :src="getThumb(v)"
             :alt="v.title"
             class="thumb"
             loading="lazy"
@@ -294,28 +464,84 @@ const hasResults = computed(() => videos.value.length > 0);
           />
           <iframe
             v-else
-            :src="`https://player.bilibili.com/player.html?bvid=${v.bvid}&autoplay=1&high_quality=1`"
+            :src="`https://player.bilibili.com/player.html?bvid=${v.bvid}&p=${playingPage}&autoplay=1&high_quality=1`"
             class="player-iframe"
             allowfullscreen
             frameborder="0"
             scrolling="no"
           ></iframe>
-          <span v-if="playingBvid !== v.bvid" class="play-icon">▶</span>
-          <span v-if="playingBvid !== v.bvid" class="duration-badge">{{ formatDuration(v.duration) }}</span>
-          <!-- Audio extract button overlay -->
+          <!-- Loading indicator while fetching pages -->
+          <span v-if="loadingPages === v.bvid" class="play-icon loading-pages">⏳</span>
+          <span v-else-if="playingBvid !== v.bvid" class="play-icon">▶</span>
+          <span v-if="playingBvid !== v.bvid" class="duration-badge">
+            {{ formatDuration(v.duration) }}
+            <span v-if="videoPages[v.bvid]?.length > 1" class="pages-hint">{{ videoPages[v.bvid].length }}P</span>
+          </span>
+          <!-- Audio extract button overlay — always visible on hover -->
           <button
-            v-if="F_AUDIO && playingBvid !== v.bvid"
+            v-if="F_AUDIO"
             type="button"
             class="extract-overlay-btn"
+            :class="{ 'always-show': playingBvid === v.bvid }"
             title="提取音频"
             @click.stop="extractAudio(v.bvid)"
           >
             🎵
           </button>
         </div>
+        <!-- Multi-part page dropdown (always visible if multi-page) -->
+        <div v-if="videoPages[v.bvid]?.length > 1" class="page-dropdown-wrap">
+          <select
+            class="page-dropdown"
+            :value="selectedPages[v.bvid] || 1"
+            @change="selectPage(v.bvid, Number(($event.target as HTMLSelectElement).value))"
+          >
+            <option
+              v-for="pg in videoPages[v.bvid]"
+              :key="pg.page"
+              :value="pg.page"
+            >
+              P{{ pg.page }} · {{ pg.part }} ({{ formatSeconds(pg.duration) }})
+            </option>
+          </select>
+          <span class="page-dropdown-count">{{ videoPages[v.bvid].length }}P</span>
+        </div>
         <!-- Info -->
         <div class="card-info">
           <h3 class="card-title" :title="v.title" @click="openVideo(v.bvid)">{{ v.title }}</h3>
+          <!-- Audio status indicator -->
+          <div v-if="F_AUDIO && audioStatuses[v.bvid]?.extracted" class="audio-status-row">
+            <span class="audio-badge extracted" title="已提取音频">🎵 已提取</span>
+            <span v-if="audioStatuses[v.bvid]?.hasMusic" class="audio-badge music" title="已分割歌曲">
+              🎶 {{ audioStatuses[v.bvid].musicFiles.length }} 首歌曲
+            </span>
+            <button
+              class="audio-dropdown-btn"
+              :class="{ open: expandedAudio === v.bvid }"
+              title="查看音频文件"
+              @click.stop="toggleAudioDropdown(v.bvid)"
+            >
+              ▾
+            </button>
+          </div>
+          <!-- Audio files dropdown -->
+          <div v-if="F_AUDIO && expandedAudio === v.bvid && audioStatuses[v.bvid]?.extracted" class="audio-dropdown">
+            <div v-if="audioStatuses[v.bvid]?.sourceFile" class="audio-file-item">
+              <span class="audio-file-icon">📄</span>
+              <span class="audio-file-name">{{ audioStatuses[v.bvid].sourceFile }}</span>
+              <button class="audio-play-btn" title="播放" @click.stop="playAudioFile(v.bvid, audioStatuses[v.bvid].sourceFile!)">▶</button>
+            </div>
+            <template v-if="audioStatuses[v.bvid]?.musicFiles?.length">
+              <div class="audio-file-divider">🎶 歌曲</div>
+              <div v-for="mf in audioStatuses[v.bvid].musicFiles" :key="mf.name" class="audio-file-item">
+                <span class="audio-file-icon">🎵</span>
+                <span class="audio-file-name">{{ mf.name }}</span>
+                <span class="audio-file-size">{{ formatFileSize(mf.size) }}</span>
+                <button class="audio-play-btn" title="播放" @click.stop="playAudioFile(v.bvid, 'music/' + mf.name)">▶</button>
+              </div>
+            </template>
+            <div v-else class="audio-file-empty">暂无分割歌曲</div>
+          </div>
           <div class="card-bottom">
             <div class="card-author">
               <span class="author-name">{{ v.author }}</span>
@@ -578,7 +804,7 @@ const hasResults = computed(() => videos.value.length > 0);
   pointer-events: none;
   font-variant-numeric: tabular-nums;
 }
-/* ---- Audio extract overlay button (bottom-right of thumbnail) ---- */
+/* ---- Audio extract overlay button ---- */
 .extract-overlay-btn {
   position: absolute;
   bottom: 6px;
@@ -599,7 +825,8 @@ const hasResults = computed(() => videos.value.length > 0);
   z-index: 2;
   backdrop-filter: blur(4px);
 }
-.thumb-wrap:hover .extract-overlay-btn {
+.thumb-wrap:hover .extract-overlay-btn,
+.extract-overlay-btn.always-show {
   opacity: 1;
 }
 .extract-overlay-btn:hover {
@@ -705,6 +932,186 @@ const hasResults = computed(() => videos.value.length > 0);
 .page-info {
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+/* ---- Audio status indicators ---- */
+.audio-status-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.2rem;
+  flex-wrap: wrap;
+}
+.audio-badge {
+  font-size: 0.68rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.audio-badge.extracted {
+  background: rgba(76, 175, 80, 0.15);
+  color: #4caf50;
+  border: 1px solid rgba(76, 175, 80, 0.3);
+}
+.audio-badge.music {
+  background: rgba(100, 181, 246, 0.15);
+  color: #64b5f6;
+  border: 1px solid rgba(100, 181, 246, 0.3);
+}
+.audio-dropdown-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.7rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s, color 0.15s;
+}
+.audio-dropdown-btn.open {
+  transform: rotate(180deg);
+  color: var(--primary);
+}
+.audio-dropdown-btn:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+.audio-dropdown {
+  margin-top: 0.3rem;
+  padding: 0.35rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.audio-file-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.3rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  transition: background 0.12s;
+}
+.audio-file-item:hover {
+  background: var(--bg);
+}
+.audio-file-icon {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+}
+.audio-file-name {
+  flex: 1;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.audio-file-size {
+  color: var(--muted);
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+.audio-play-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.65rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color 0.12s, border-color 0.12s;
+}
+.audio-play-btn:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+.audio-file-divider {
+  font-size: 0.68rem;
+  color: var(--muted);
+  padding: 0.2rem 0.3rem;
+  font-weight: 600;
+  border-top: 1px solid var(--border);
+  margin-top: 0.2rem;
+}
+.audio-file-empty {
+  font-size: 0.7rem;
+  color: var(--muted);
+  padding: 0.3rem;
+  text-align: center;
+}
+
+/* ---- Multi-part page dropdown ---- */
+.page-dropdown-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+.page-dropdown {
+  flex: 1;
+  padding: 0.3rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.78rem;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  min-width: 0;
+  max-width: 100%;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.5rem center;
+  padding-right: 1.5rem;
+}
+.page-dropdown:focus {
+  border-color: var(--primary);
+}
+.page-dropdown option {
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.3rem;
+}
+.page-dropdown-count {
+  font-size: 0.68rem;
+  color: var(--muted);
+  background: var(--bg);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.pages-hint {
+  margin-left: 3px;
+  font-size: 0.65rem;
+  opacity: 0.8;
+  background: rgba(255,255,255,0.15);
+  padding: 0 3px;
+  border-radius: 2px;
+}
+.loading-pages {
+  opacity: 1 !important;
+  animation: pulse 1s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 /* ---- Mobile responsive ---- */

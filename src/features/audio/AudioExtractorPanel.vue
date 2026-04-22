@@ -1,17 +1,24 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from "vue";
-import { pluginPayloads } from "../../shared/plugins";
+import { pluginPayloads, pluginPayloadVersion } from "../../shared/plugins";
+import {
+  playTrack,
+  currentTrack,
+  stopPlayback,
+  appendToPlaylist,
+  type PlayableTrack,
+} from "./audioPlayerStore";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                             */
 /* ------------------------------------------------------------------ */
 
-interface Segment {
+interface Song {
   start: number;
   end: number;
   duration: number;
   label: string;
-  file?: string; // populated after split
+  file?: string;
 }
 
 interface DepsStatus {
@@ -28,37 +35,31 @@ interface DepsStatus {
 const depsStatus = ref<DepsStatus | null>(null);
 const depsLoading = ref(false);
 
-// Step 1: Input
+// Input
 const videoUrl = ref("");
 const videoId = ref("");
+const videoPage = ref(1);
 
-// Step 2: Extract
+// Extract
 const extracting = ref(false);
 const extractDone = ref(false);
 const extractError = ref("");
 const audioDuration = ref(0);
 const audioFile = ref("");
 
-// Step 3: Detect segments
-const detecting = ref(false);
-const detectDone = ref(false);
-const detectError = ref("");
-const segments = ref<Segment[]>([]);
-const totalDuration = ref(0);
+// Smart extract (one-click: extract + detect + split)
+const smartExtracting = ref(false);
+const smartDone = ref(false);
+const smartError = ref("");
+const songs = ref<Song[]>([]);
 
-// Detection params
-const silenceThresh = ref(-35);
-const silenceDuration = ref(3);
-const minSegment = ref(15);
+// Playback (now uses global store)
 
-// Step 4: Split
-const splitting = ref(false);
-const splitDone = ref(false);
-const splitError = ref("");
-
-// Playback
-const playingUrl = ref<string | null>(null);
-const playingLabel = ref("");
+// Inline editing
+const editingIndex = ref<number | null>(null);
+const editingName = ref("");
+const renaming = ref(false);
+const deleting = ref<number | null>(null);
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -67,24 +68,29 @@ const playingLabel = ref("");
 const API_BASE = "/__fmz_audio";
 
 function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
-  return `${m}:${String(s).padStart(2, "0")}`;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
 function formatDurationLong(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
-  if (h > 0) return `${h}小时${m}分${s}秒`;
-  if (m > 0) return `${m}分${s}秒`;
-  return `${s}秒`;
+  if (h > 0) return `${h}h${m}m${s}s`;
+  if (m > 0) return `${m}m${s}s`;
+  return `${s}s`;
 }
 
-/** Extract bvid from various Bilibili URL formats */
 function parseBvid(url: string): string | null {
   const m = url.match(/BV[\w]+/i);
   return m ? m[0] : null;
+}
+
+function parsePageFromUrl(url: string): number {
+  const m = url.match(/[?&]p=(\d+)/);
+  return m ? parseInt(m[1], 10) : 1;
 }
 
 const canExtract = computed(() => {
@@ -103,12 +109,10 @@ async function checkDeps() {
   try {
     const resp = await fetch(`${API_BASE}/check`);
     depsStatus.value = await resp.json();
-  } catch (e: any) {
+  } catch {
     depsStatus.value = {
-      ok: false,
-      ytdlp: false,
-      ffmpeg: false,
-      message: "无法连接到音频提取服务，请确保已启动 audio-extractor-server",
+      ok: false, ytdlp: false, ffmpeg: false,
+      message: "无法连接到音频提取服务",
     };
   } finally {
     depsLoading.value = false;
@@ -118,32 +122,29 @@ async function checkDeps() {
 async function doExtract() {
   let url = videoUrl.value.trim();
   if (!url) return;
-
-  // If user just pasted a bvid, wrap it
   if (url.startsWith("BV") && !url.includes("http")) {
     url = `https://www.bilibili.com/video/${url}`;
   }
-
   const bvid = parseBvid(url);
   const vid = bvid || Date.now().toString(36);
+  const page = parsePageFromUrl(url);
 
   extracting.value = true;
   extractError.value = "";
   extractDone.value = false;
-  detectDone.value = false;
-  splitDone.value = false;
-  segments.value = [];
+  smartDone.value = false;
+  songs.value = [];
 
   try {
     const resp = await fetch(`${API_BASE}/extract`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, videoId: vid }),
+      body: JSON.stringify({ url, videoId: vid, page }),
     });
     const data = await resp.json();
     if (!resp.ok || !data.ok) throw new Error(data.error || "提取失败");
-
     videoId.value = data.videoId;
+    videoPage.value = data.page || page;
     audioFile.value = data.audioFile;
     audioDuration.value = data.duration || 0;
     extractDone.value = true;
@@ -154,734 +155,614 @@ async function doExtract() {
   }
 }
 
-async function doDetect() {
-  if (!videoId.value) return;
-
-  detecting.value = true;
-  detectError.value = "";
-  detectDone.value = false;
-  splitDone.value = false;
-
-  try {
-    const resp = await fetch(`${API_BASE}/detect`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        videoId: videoId.value,
-        silenceThresh: silenceThresh.value,
-        silenceDuration: silenceDuration.value,
-        minSegment: minSegment.value,
-      }),
-    });
-    const data = await resp.json();
-    if (!resp.ok || !data.ok) throw new Error(data.error || "检测失败");
-
-    totalDuration.value = data.totalDuration || 0;
-    segments.value = (data.segments || []).map((s: any, i: number) => ({
-      ...s,
-      label: `片段 ${i + 1}`,
-    }));
-    detectDone.value = true;
-  } catch (e: any) {
-    detectError.value = e.message || "检测失败";
-  } finally {
-    detecting.value = false;
+async function doSmartExtract() {
+  let url = videoUrl.value.trim();
+  if (!url) return;
+  if (url.startsWith("BV") && !url.includes("http")) {
+    url = `https://www.bilibili.com/video/${url}`;
   }
-}
+  const bvid = parseBvid(url);
+  const vid = bvid || videoId.value || Date.now().toString(36);
+  const page = videoPage.value || parsePageFromUrl(url);
 
-async function doSplit() {
-  if (!videoId.value || segments.value.length === 0) return;
-
-  splitting.value = true;
-  splitError.value = "";
-  splitDone.value = false;
+  smartExtracting.value = true;
+  smartError.value = "";
+  smartDone.value = false;
 
   try {
-    const resp = await fetch(`${API_BASE}/split`, {
+    const resp = await fetch(`${API_BASE}/smart-extract`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        videoId: videoId.value,
-        segments: segments.value.map((s) => ({
-          start: s.start,
-          end: s.end,
-          label: s.label,
-        })),
-      }),
+      body: JSON.stringify({ url, videoId: vid, page }),
     });
     const data = await resp.json();
-    if (!resp.ok || !data.ok) throw new Error(data.error || "分割失败");
+    if (!resp.ok || !data.ok) throw new Error(data.error || "提取失败");
 
-    // Update segments with file info
-    for (const result of data.segments) {
-      const seg = segments.value.find(
-        (s) => Math.abs(s.start - result.start) < 0.5 && Math.abs(s.end - result.end) < 0.5,
-      );
-      if (seg) seg.file = result.file;
+    videoId.value = data.videoId;
+    videoPage.value = data.page || page;
+    audioFile.value = data.audioFile || "";
+    audioDuration.value = data.duration || 0;
+    extractDone.value = true;
+
+    if (data.segments?.length > 0) {
+      songs.value = data.segments.map((s: any, i: number) => ({
+        start: s.start, end: s.end, duration: s.duration,
+        label: s.label || `[${formatTime(s.start)}-${formatTime(s.end)}] ${String(i + 1).padStart(2, '0')}`, file: s.file,
+      }));
+      smartDone.value = true;
+    } else {
+      smartError.value = "未检测到歌曲片段";
     }
-    splitDone.value = true;
   } catch (e: any) {
-    splitError.value = e.message || "分割失败";
+    smartError.value = e.message || "提取失败";
   } finally {
-    splitting.value = false;
+    smartExtracting.value = false;
   }
 }
 
-function playSegment(seg: Segment) {
-  if (!seg.file) return;
-  const url = `${API_BASE}/download/${videoId.value}/${encodeURIComponent(seg.file)}`;
-  if (playingUrl.value === url) {
-    playingUrl.value = null;
-    playingLabel.value = "";
-  } else {
-    playingUrl.value = url;
-    playingLabel.value = seg.label;
-  }
+function buildSongUrl(song: Song): string {
+  const pageDir = videoPage.value > 1 ? `p${videoPage.value}/` : "";
+  return `${API_BASE}/download/${videoId.value}/${pageDir}${encodeURIComponent(song.file!)}`;
+}
+
+function playSong(song: Song) {
+  if (!song.file) return;
+  const url = buildSongUrl(song);
+  const track: PlayableTrack = {
+    url,
+    label: song.label,
+    bvid: videoId.value,
+    page: videoPage.value,
+    duration: song.duration,
+  };
+  // Also register all songs from this BV into the global playlist
+  registerSongsToPlaylist();
+  playTrack(track);
 }
 
 function playSource() {
   if (!videoId.value || !audioFile.value) return;
-  const url = `${API_BASE}/download/${videoId.value}/${encodeURIComponent(audioFile.value)}`;
-  if (playingUrl.value === url) {
-    playingUrl.value = null;
-    playingLabel.value = "";
-  } else {
-    playingUrl.value = url;
-    playingLabel.value = "完整音频";
-  }
+  const pageDir = videoPage.value > 1 ? `p${videoPage.value}/` : "";
+  const url = `${API_BASE}/download/${videoId.value}/${pageDir}${encodeURIComponent(audioFile.value)}`;
+  const track: PlayableTrack = {
+    url,
+    label: "完整音频",
+    bvid: videoId.value,
+    page: videoPage.value,
+    duration: audioDuration.value,
+  };
+  playTrack(track);
 }
 
-function downloadSegment(seg: Segment) {
-  if (!seg.file) return;
-  const url = `${API_BASE}/download/${videoId.value}/${encodeURIComponent(seg.file)}`;
+/** Register all extracted songs into the global playlist for shuffle/next */
+function registerSongsToPlaylist() {
+  const tracks: PlayableTrack[] = songs.value
+    .filter((s) => s.file)
+    .map((s) => ({
+      url: buildSongUrl(s),
+      label: s.label,
+      bvid: videoId.value,
+      page: videoPage.value,
+      duration: s.duration,
+    }));
+  if (tracks.length > 0) appendToPlaylist(tracks);
+}
+
+function downloadSong(song: Song) {
+  if (!song.file) return;
+  const url = buildSongUrl(song);
   const a = document.createElement("a");
   a.href = url;
-  a.download = seg.file;
+  a.download = song.file;
   a.click();
 }
 
-function removeSegment(index: number) {
-  segments.value.splice(index, 1);
+/* ---- Rename song (label only, file stays unchanged) ---- */
+function startRename(index: number) {
+  const song = songs.value[index];
+  if (!song) return;
+  editingIndex.value = index;
+  editingName.value = song.label;
 }
 
-function updateSegmentLabel(index: number, label: string) {
-  segments.value[index].label = label;
+function cancelRename() {
+  editingIndex.value = null;
+  editingName.value = "";
+}
+
+async function confirmRename(index: number) {
+  const song = songs.value[index];
+  if (!song?.file || !editingName.value.trim()) {
+    cancelRename();
+    return;
+  }
+
+  const newLabel = editingName.value.trim();
+  // If label didn't change, just cancel
+  if (newLabel === song.label) {
+    cancelRename();
+    return;
+  }
+
+  renaming.value = true;
+  try {
+    const resp = await fetch(`${API_BASE}/rename-song`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        videoId: videoId.value,
+        fileName: song.file,
+        newLabel,
+        page: videoPage.value,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.error || "重命名失败");
+
+    // Update local state — file stays the same, only label changes
+    song.label = data.label;
+  } catch (e: any) {
+    alert(`重命名失败: ${e.message}`);
+  } finally {
+    renaming.value = false;
+    cancelRename();
+  }
+}
+
+/* ---- Delete song ---- */
+async function deleteSong(index: number) {
+  const song = songs.value[index];
+  if (!song?.file) return;
+
+  deleting.value = index;
+  try {
+    const resp = await fetch(`${API_BASE}/delete-song`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+      videoId: videoId.value,
+        fileName: song.file,
+        page: videoPage.value,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.error || "删除失败");
+
+    // If currently playing this song, stop
+    if (currentTrack.value?.url?.includes(encodeURIComponent(song.file))) {
+      stopPlayback();
+    }
+    // Remove from list
+    songs.value.splice(index, 1);
+  } catch (e: any) {
+    alert(`删除失败: ${e.message}`);
+  } finally {
+    deleting.value = null;
+  }
 }
 
 function resetAll() {
   videoUrl.value = "";
   videoId.value = "";
+  videoPage.value = 1;
   extractDone.value = false;
   extractError.value = "";
-  detectDone.value = false;
-  detectError.value = "";
-  splitDone.value = false;
-  splitError.value = "";
-  segments.value = [];
-  playingUrl.value = null;
-  playingLabel.value = "";
+  smartDone.value = false;
+  smartError.value = "";
+  smartExtracting.value = false;
+  songs.value = [];
   audioDuration.value = 0;
   audioFile.value = "";
+}
+
+/* ------------------------------------------------------------------ */
+/*  Auto-load existing extraction data when URL is set                 */
+/* ------------------------------------------------------------------ */
+
+async function loadExistingData(url: string) {
+  const bvid = parseBvid(url);
+  if (!bvid) return;
+  const page = parsePageFromUrl(url);
+
+  try {
+    const resp = await fetch(`${API_BASE}/status/${bvid}?p=${page}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data.ok || !data.extracted) return;
+
+    // Populate state with existing data
+    videoId.value = bvid;
+    videoPage.value = page;
+    audioFile.value = data.sourceFile || "";
+    audioDuration.value = data.duration || 0;
+    extractDone.value = true;
+
+    // If there are music files, populate songs list
+    if (data.hasMusic && data.musicFiles?.length > 0) {
+      songs.value = data.musicFiles.map((mf: any, i: number) => ({
+        start: mf.start ?? 0,
+        end: mf.end ?? 0,
+        duration: mf.duration ?? 0,
+        label: mf.label || `[${formatTime(mf.start ?? 0)}-${formatTime(mf.end ?? 0)}] ${String(i + 1).padStart(2, '0')}`,
+        file: `music/${mf.name}`,
+      }));
+      smartDone.value = true;
+    }
+  } catch { /* ignore — server may not be running */ }
 }
 
 /* ------------------------------------------------------------------ */
 /*  Lifecycle                                                         */
 /* ------------------------------------------------------------------ */
 
+/** Process incoming payload (from BilibiliSearchPanel's 🎵 button) */
+function handlePayload() {
+  const payload = pluginPayloads.value["audio"];
+  if (!payload?.url) return;
+  const url = String(payload.url);
+  // Clear the payload so it doesn't re-trigger
+  pluginPayloads.value = { ...pluginPayloads.value, audio: undefined };
+  // Reset state and fill in the URL
+  resetAll();
+  videoUrl.value = url;
+  videoPage.value = parsePageFromUrl(url);
+  // Auto-load existing extraction data
+  loadExistingData(url);
+}
+
 onMounted(() => {
   checkDeps();
+  // Check if there's already a pending payload (async component loaded after payload was set)
+  handlePayload();
+  // Also retry after a tick in case the payload arrives slightly later
+  setTimeout(handlePayload, 50);
 });
 
-/** Watch for external trigger (e.g. from BilibiliSearchPanel's audio extract button) */
-watch(
-  () => pluginPayloads.value["audio"],
-  (payload) => {
-    if (!payload?.url) return;
-    const url = String(payload.url);
-    // Clear the payload so it doesn't re-trigger
-    pluginPayloads.value = { ...pluginPayloads.value, audio: undefined };
-    // Reset state and fill in the URL
-    resetAll();
-    videoUrl.value = url;
-    // Auto-start extraction if deps are ready
-    if (isReady.value) {
-      doExtract();
-    }
-  },
-);
+// Watch the payload version counter — a simple number that increments
+// every time PluginHost writes a new payload. This is far more reliable
+// than watching the payload object itself (avoids Vue reactivity edge-cases).
+watch(pluginPayloadVersion, () => handlePayload());
 </script>
 
 <template>
-  <section class="audio-panel">
-    <h2 class="panel-title">🎵 视频音频提取 & 歌曲分割</h2>
+  <section class="ap">
+    <!-- Deps status (compact) -->
+    <div v-if="depsLoading" class="ap-status loading">
+      <span class="spinner"></span> 检查依赖...
+    </div>
+    <div v-else-if="depsStatus && !depsStatus.ok" class="ap-status error">
+      <span>⚠️ {{ depsStatus.message }}</span>
+      <div class="ap-deps">
+        <span :class="depsStatus.ytdlp ? 'ok' : 'miss'">{{ depsStatus.ytdlp ? '✅' : '❌' }} yt-dlp</span>
+        <span :class="depsStatus.ffmpeg ? 'ok' : 'miss'">{{ depsStatus.ffmpeg ? '✅' : '❌' }} ffmpeg</span>
+      </div>
+      <button class="ap-retry" @click="checkDeps">🔄 重新检查</button>
+    </div>
+    <div v-else-if="depsStatus?.ok" class="ap-status ok">✅ 就绪</div>
 
-    <!-- Dependency check -->
-    <div v-if="depsLoading" class="status-bar loading">
-      <span class="spinner"></span> 正在检查依赖...
-    </div>
-    <div v-else-if="depsStatus && !depsStatus.ok" class="status-bar error">
-      <div class="status-icon">⚠️</div>
-      <div class="status-text">
-        <strong>依赖缺失</strong>
-        <p>{{ depsStatus.message }}</p>
-        <div class="dep-list">
-          <span :class="depsStatus.ytdlp ? 'dep-ok' : 'dep-missing'">
-            {{ depsStatus.ytdlp ? '✅' : '❌' }} yt-dlp
-          </span>
-          <span :class="depsStatus.ffmpeg ? 'dep-ok' : 'dep-missing'">
-            {{ depsStatus.ffmpeg ? '✅' : '❌' }} ffmpeg
-          </span>
-        </div>
-        <p class="install-hint">
-          安装命令：<br />
-          <code>winget install yt-dlp.yt-dlp</code><br />
-          <code>winget install Gyan.FFmpeg</code>
-        </p>
-        <button class="retry-btn" @click="checkDeps">🔄 重新检查</button>
-      </div>
-    </div>
-    <div v-else-if="depsStatus && depsStatus.ok" class="status-bar ok">
-      ✅ 依赖就绪 — yt-dlp & ffmpeg 已安装
-    </div>
-
-    <!-- Step 1: Input URL -->
-    <div class="step-card">
-      <div class="step-header">
-        <span class="step-num">1</span>
-        <span class="step-title">输入B站视频链接</span>
-      </div>
-      <div class="step-body">
-        <div class="url-input-row">
-          <input
-            v-model="videoUrl"
-            type="text"
-            class="url-input"
-            placeholder="粘贴B站视频链接，如 https://www.bilibili.com/video/BVxxxxxx 或直接输入 BV号"
-            :disabled="extracting"
-            @keydown.enter="doExtract"
-          />
-          <button
-            class="action-btn primary"
-            :disabled="!canExtract || !isReady || extracting"
-            @click="doExtract"
-          >
-            <span v-if="extracting" class="spinner"></span>
-            <span v-else>🎧 提取音频</span>
-          </button>
-        </div>
-        <div v-if="extractError" class="error-msg">⚠️ {{ extractError }}</div>
-        <div v-if="extractDone" class="success-msg">
-          ✅ 音频提取完成！
-          <span v-if="audioDuration > 0">时长：{{ formatDurationLong(audioDuration) }}</span>
-          <button class="small-btn" @click="playSource">
-            {{ playingLabel === '完整音频' ? '⏹ 停止' : '▶ 试听完整音频' }}
-          </button>
-          <button class="small-btn reset" @click="resetAll">🔄 重新开始</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Step 2: Detect segments -->
-    <div v-if="extractDone" class="step-card">
-      <div class="step-header">
-        <span class="step-num">2</span>
-        <span class="step-title">检测歌曲片段</span>
-      </div>
-      <div class="step-body">
-        <p class="step-desc">
-          通过静音检测自动识别音频中的歌曲片段。可调整参数获得更好的分割效果。
-        </p>
-        <div class="params-row">
-          <label class="param">
-            <span>静音阈值 (dB)</span>
-            <input v-model.number="silenceThresh" type="number" min="-60" max="0" step="5" />
-          </label>
-          <label class="param">
-            <span>最短静音 (秒)</span>
-            <input v-model.number="silenceDuration" type="number" min="0.5" max="30" step="0.5" />
-          </label>
-          <label class="param">
-            <span>最短片段 (秒)</span>
-            <input v-model.number="minSegment" type="number" min="5" max="300" step="5" />
-          </label>
-        </div>
+    <!-- URL Input + Actions -->
+    <div class="ap-input-card">
+      <input
+        v-model="videoUrl"
+        type="text"
+        class="ap-url"
+        placeholder="粘贴B站视频链接或BV号..."
+        :disabled="extracting || smartExtracting"
+        @keydown.enter="doExtract"
+      />
+      <div class="ap-actions">
         <button
-          class="action-btn primary"
-          :disabled="detecting"
-          @click="doDetect"
+          class="ap-btn secondary"
+          :disabled="!canExtract || !isReady || extracting || smartExtracting"
+          @click="doExtract"
         >
-          <span v-if="detecting" class="spinner"></span>
-          <span v-else>🔍 开始检测</span>
+          <span v-if="extracting" class="spinner"></span>
+          <span v-else>🎧 仅提取音频</span>
         </button>
-        <div v-if="detectError" class="error-msg">⚠️ {{ detectError }}</div>
+        <button
+          class="ap-btn primary"
+          :disabled="!canExtract || !isReady || extracting || smartExtracting"
+          @click="doSmartExtract"
+        >
+          <span v-if="smartExtracting" class="spinner"></span>
+          <span v-else>🎶 提取并分割歌曲</span>
+        </button>
       </div>
     </div>
 
-    <!-- Step 3: Review & edit segments -->
-    <div v-if="detectDone && segments.length > 0" class="step-card">
-      <div class="step-header">
-        <span class="step-num">3</span>
-        <span class="step-title">
-          编辑片段
-          <span class="badge">{{ segments.length }} 个片段</span>
-        </span>
-      </div>
-      <div class="step-body">
-        <p class="step-desc">
-          检测到 {{ segments.length }} 个片段，总时长 {{ formatDurationLong(totalDuration) }}。
-          你可以修改名称、调整时间或删除不需要的片段。
-        </p>
+    <!-- Errors -->
+    <div v-if="extractError" class="ap-msg error">⚠️ {{ extractError }}</div>
+    <div v-if="smartError" class="ap-msg error">⚠️ {{ smartError }}</div>
 
-        <!-- Timeline visualization -->
-        <div class="timeline">
-          <div class="timeline-bar">
-            <div
-              v-for="(seg, i) in segments"
-              :key="i"
-              class="timeline-seg"
-              :style="{
-                left: totalDuration > 0 ? (seg.start / totalDuration * 100) + '%' : '0%',
-                width: totalDuration > 0 ? (seg.duration / totalDuration * 100) + '%' : '0%',
-              }"
-              :title="`${seg.label}: ${formatTime(seg.start)} - ${formatTime(seg.end)}`"
+    <!-- Progress hint -->
+    <div v-if="smartExtracting" class="ap-msg hint">
+      ⏳ 正在提取音频并分析歌曲片段，请稍候...
+    </div>
+
+    <!-- Results -->
+    <div v-if="extractDone" class="ap-results">
+      <div class="ap-results-header">
+        <div class="ap-results-info">
+          <span class="ap-vid">{{ videoId }}</span>
+          <span v-if="videoPage > 1" class="ap-page">P{{ videoPage }}</span>
+          <span v-if="audioDuration > 0" class="ap-dur">{{ formatDurationLong(audioDuration) }}</span>
+        </div>
+        <div class="ap-results-actions">
+          <button class="ap-small-btn" @click="playSource">
+            ▶ 完整音频
+          </button>
+          <button v-if="extractDone && !smartDone" class="ap-small-btn primary" :disabled="smartExtracting" @click="doSmartExtract">
+            <span v-if="smartExtracting" class="spinner"></span>
+            <span v-else>🎶 分割歌曲</span>
+          </button>
+          <button class="ap-small-btn muted" @click="resetAll">🔄</button>
+        </div>
+      </div>
+
+      <!-- Song list -->
+      <div v-if="smartDone && songs.length > 0" class="ap-songs">
+        <div class="ap-songs-title">🎶 提取到 {{ songs.length }} 首歌曲</div>
+        <div v-for="(song, i) in songs" :key="i" class="ap-song">
+          <div class="ap-song-color" :style="{ background: `hsl(${(i * 60 + 200) % 360}, 60%, 55%)` }"></div>
+          <div class="ap-song-info">
+            <!-- Inline rename mode -->
+            <template v-if="editingIndex === i">
+              <div class="ap-rename-row">
+                <input
+                  v-model="editingName"
+                  class="ap-rename-input"
+                  :disabled="renaming"
+                  @keydown.enter="confirmRename(i)"
+                  @keydown.escape="cancelRename"
+                  ref="renameInput"
+                />
+                <button class="ap-icon-btn confirm" title="确认" :disabled="renaming" @click="confirmRename(i)">✓</button>
+                <button class="ap-icon-btn cancel" title="取消" :disabled="renaming" @click="cancelRename">✕</button>
+              </div>
+            </template>
+            <template v-else>
+              <span class="ap-song-label">{{ song.label }}</span>
+            </template>
+            <span class="ap-song-time">{{ formatTime(song.start) }} — {{ formatTime(song.end) }} · {{ formatDurationLong(song.duration) }}</span>
+          </div>
+          <div class="ap-song-btns">
+            <button
+              v-if="song.file"
+              class="ap-icon-btn"
+          :title="currentTrack?.url?.includes(song.file!) ? '停止' : '播放'"
+              @click="playSong(song)"
             >
-              <span class="timeline-label">{{ i + 1 }}</span>
-            </div>
+              {{ currentTrack?.url?.includes(song.file!) ? '⏹' : '▶' }}
+            </button>
+            <button v-if="song.file" class="ap-icon-btn" title="下载" @click="downloadSong(song)">💾</button>
+            <button
+              v-if="song.file && editingIndex !== i"
+              class="ap-icon-btn rename"
+              title="重命名"
+              @click="startRename(i)"
+            >✏️</button>
+            <button
+              v-if="song.file"
+              class="ap-icon-btn delete"
+              :title="deleting === i ? '删除中...' : '删除'"
+              :disabled="deleting === i"
+              @click="deleteSong(i)"
+            >
+              <span v-if="deleting === i" class="spinner"></span>
+              <span v-else>🗑️</span>
+            </button>
           </div>
-          <div class="timeline-ticks">
-            <span>0:00</span>
-            <span>{{ formatTime(totalDuration / 2) }}</span>
-            <span>{{ formatTime(totalDuration) }}</span>
-          </div>
-        </div>
-
-        <!-- Segment list -->
-        <div class="segment-list">
-          <div v-for="(seg, i) in segments" :key="i" class="segment-item">
-            <div class="seg-color" :style="{ background: `hsl(${(i * 47) % 360}, 65%, 55%)` }"></div>
-            <input
-              class="seg-label-input"
-              :value="seg.label"
-              @input="updateSegmentLabel(i, ($event.target as HTMLInputElement).value)"
-            />
-            <span class="seg-time">
-              {{ formatTime(seg.start) }} — {{ formatTime(seg.end) }}
-              <small>({{ formatDurationLong(seg.duration) }})</small>
-            </span>
-            <div class="seg-actions">
-              <button
-                v-if="seg.file"
-                class="icon-btn play"
-                :title="playingUrl?.includes(seg.file!) ? '停止' : '播放'"
-                @click="playSegment(seg)"
-              >
-                {{ playingUrl?.includes(seg.file!) ? '⏹' : '▶' }}
-              </button>
-              <button
-                v-if="seg.file"
-                class="icon-btn download"
-                title="下载"
-                @click="downloadSegment(seg)"
-              >
-                💾
-              </button>
-              <button class="icon-btn delete" title="删除" @click="removeSegment(i)">✕</button>
-            </div>
-          </div>
-        </div>
-
-        <button
-          class="action-btn primary"
-          :disabled="splitting || segments.length === 0"
-          @click="doSplit"
-        >
-          <span v-if="splitting" class="spinner"></span>
-          <span v-else>✂️ 分割并导出</span>
-        </button>
-        <div v-if="splitError" class="error-msg">⚠️ {{ splitError }}</div>
-        <div v-if="splitDone" class="success-msg">
-          ✅ 分割完成！点击每个片段的 ▶ 试听或 💾 下载。
         </div>
       </div>
     </div>
 
-    <div v-if="detectDone && segments.length === 0" class="empty-state">
-      未检测到符合条件的片段，请尝试调整参数后重新检测 🎶
-    </div>
 
-    <!-- Audio player (sticky bottom) -->
-    <div v-if="playingUrl" class="audio-player-bar">
-      <span class="player-label">🎵 {{ playingLabel }}</span>
-      <audio
-        :src="playingUrl"
-        autoplay
-        controls
-        class="player-audio"
-        @ended="playingUrl = null; playingLabel = ''"
-      ></audio>
-      <button class="icon-btn close" @click="playingUrl = null; playingLabel = ''">✕</button>
-    </div>
   </section>
 </template>
 
 <style scoped>
-.audio-panel {
-  padding: 0.85rem 1rem 4.5rem;
-  max-width: 100%;
-  margin: 0 auto;
+.ap {
+  padding: 0.75rem 0.85rem 1rem;
 }
 
-.panel-title {
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: var(--text);
-  margin: 0 0 0.75rem;
-}
-
-/* ---- Status bar ---- */
-.status-bar {
-  padding: 0.75rem 1rem;
-  border-radius: 10px;
-  margin-bottom: 1rem;
-  display: flex;
-  align-items: flex-start;
-  gap: 0.75rem;
-}
-.status-bar.loading {
-  background: var(--surface);
-  color: var(--muted);
-  align-items: center;
-}
-.status-bar.error {
-  background: rgba(255, 107, 107, 0.1);
-  border: 1px solid rgba(255, 107, 107, 0.3);
-  color: var(--text);
-}
-.status-bar.ok {
-  background: rgba(76, 175, 80, 0.1);
-  border: 1px solid rgba(76, 175, 80, 0.3);
-  color: var(--text);
-}
-.status-icon {
-  font-size: 1.5rem;
-  flex-shrink: 0;
-}
-.status-text p {
-  margin: 0.3rem 0;
-  font-size: 0.88rem;
-  color: var(--muted);
-}
-.dep-list {
-  display: flex;
-  gap: 1rem;
-  margin: 0.5rem 0;
-}
-.dep-ok { color: #4caf50; }
-.dep-missing { color: #ff6b6b; }
-.install-hint {
-  font-size: 0.82rem !important;
-}
-.install-hint code {
-  display: inline-block;
-  background: var(--surface);
-  padding: 0.15rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.82rem;
-  margin: 0.15rem 0;
-}
-.retry-btn {
-  margin-top: 0.5rem;
-  padding: 0.4rem 0.8rem;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-  font-size: 0.85rem;
-}
-.retry-btn:hover {
-  border-color: var(--primary);
-}
-
-/* ---- Step cards ---- */
-.step-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  margin-bottom: 1rem;
-  overflow: hidden;
-}
-.step-header {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.02);
-}
-.step-num {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: var(--primary);
-  color: var(--on-primary);
-  font-weight: 700;
-  font-size: 0.85rem;
-  flex-shrink: 0;
-}
-.step-title {
-  font-weight: 600;
-  font-size: 1rem;
-  color: var(--text);
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-.badge {
-  font-size: 0.75rem;
-  padding: 0.15rem 0.5rem;
-  border-radius: 10px;
-  background: var(--primary);
-  color: var(--on-primary);
-  font-weight: 500;
-}
-.step-body {
-  padding: 1rem;
-}
-.step-desc {
-  margin: 0 0 0.75rem;
-  font-size: 0.88rem;
-  color: var(--muted);
-}
-
-/* ---- URL input ---- */
-.url-input-row {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 0.5rem;
-}
-.url-input {
-  flex: 1;
-  padding: 0.65rem 1rem;
+/* ---- Status ---- */
+.ap-status {
+  padding: 0.5rem 0.75rem;
   border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  font-size: 0.95rem;
-  outline: none;
-  transition: border-color 0.2s;
-}
-.url-input:focus {
-  border-color: var(--primary);
-}
-.url-input::placeholder {
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-/* ---- Buttons ---- */
-.action-btn {
-  padding: 0.6rem 1.3rem;
-  border-radius: 8px;
-  border: none;
-  font-weight: 600;
-  font-size: 0.9rem;
-  cursor: pointer;
-  transition: opacity 0.2s, transform 0.1s;
-  white-space: nowrap;
-}
-.action-btn.primary {
-  background: var(--primary);
-  color: var(--on-primary);
-}
-.action-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.action-btn:hover:not(:disabled) {
-  opacity: 0.85;
-}
-.action-btn:active:not(:disabled) {
-  transform: scale(0.97);
-}
-
-.small-btn {
-  display: inline-block;
-  margin-left: 0.5rem;
-  padding: 0.3rem 0.7rem;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 0.82rem;
-  cursor: pointer;
-}
-.small-btn:hover {
-  border-color: var(--primary);
-}
-.small-btn.reset {
-  color: var(--muted);
-}
-
-/* ---- Params ---- */
-.params-row {
-  display: flex;
-  gap: 1rem;
   margin-bottom: 0.75rem;
+  font-size: 0.82rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   flex-wrap: wrap;
 }
-.param {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  font-size: 0.82rem;
-  color: var(--muted);
+.ap-status.loading { background: var(--surface); color: var(--muted); }
+.ap-status.error { background: rgba(255,107,107,0.1); border: 1px solid rgba(255,107,107,0.3); color: var(--text); }
+.ap-status.ok { background: rgba(76,175,80,0.1); border: 1px solid rgba(76,175,80,0.3); color: #4caf50; }
+.ap-deps { display: flex; gap: 0.75rem; font-size: 0.8rem; }
+.ap-deps .ok { color: #4caf50; }
+.ap-deps .miss { color: #ff6b6b; }
+.ap-retry {
+  padding: 0.25rem 0.6rem; border-radius: 5px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 0.78rem; cursor: pointer;
 }
-.param input {
-  width: 80px;
-  padding: 0.35rem 0.5rem;
-  border-radius: 6px;
+.ap-retry:hover { border-color: var(--primary); }
+
+/* ---- Input card ---- */
+.ap-input-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.ap-url {
+  width: 100%;
+  padding: 0.55rem 0.75rem;
+  border-radius: 7px;
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
-  font-size: 0.85rem;
+  font-size: 0.88rem;
   outline: none;
+  transition: border-color 0.2s;
+  margin-bottom: 0.5rem;
+  box-sizing: border-box;
 }
-.param input:focus {
-  border-color: var(--primary);
+.ap-url:focus { border-color: var(--primary); }
+.ap-url::placeholder { color: var(--muted); font-size: 0.82rem; }
+.ap-actions {
+  display: flex;
+  gap: 0.4rem;
 }
+.ap-btn {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border-radius: 7px;
+  border: none;
+  font-weight: 600;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s;
+  white-space: nowrap;
+}
+.ap-btn.primary { background: var(--primary); color: var(--on-primary); }
+.ap-btn.secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+.ap-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.ap-btn:hover:not(:disabled) { opacity: 0.85; }
+.ap-btn:active:not(:disabled) { transform: scale(0.97); }
 
 /* ---- Messages ---- */
-.error-msg {
-  padding: 0.5rem 0.75rem;
-  background: rgba(255, 107, 107, 0.12);
-  border: 1px solid rgba(255, 107, 107, 0.3);
-  border-radius: 6px;
-  color: #ff6b6b;
-  font-size: 0.88rem;
-  margin-top: 0.5rem;
+.ap-msg {
+  padding: 0.45rem 0.7rem;
+  border-radius: 7px;
+  font-size: 0.82rem;
+  margin-bottom: 0.6rem;
 }
-.success-msg {
-  padding: 0.5rem 0.75rem;
-  background: rgba(76, 175, 80, 0.1);
-  border: 1px solid rgba(76, 175, 80, 0.3);
-  border-radius: 6px;
-  color: #4caf50;
-  font-size: 0.88rem;
-  margin-top: 0.5rem;
-}
-.empty-state {
-  text-align: center;
-  color: var(--muted);
-  padding: 2rem 1rem;
-  font-size: 1rem;
-}
+.ap-msg.error { background: rgba(255,107,107,0.1); border: 1px solid rgba(255,107,107,0.25); color: #ff6b6b; }
+.ap-msg.hint { background: var(--surface); color: var(--muted); font-style: italic; animation: pulse-text 1.5s ease-in-out infinite; }
+@keyframes pulse-text { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
 
-/* ---- Timeline ---- */
-.timeline {
-  margin: 0.75rem 0 1rem;
-}
-.timeline-bar {
-  position: relative;
-  height: 32px;
-  background: var(--bg);
-  border-radius: 6px;
+/* ---- Results ---- */
+.ap-results {
+  background: var(--surface);
   border: 1px solid var(--border);
+  border-radius: 10px;
   overflow: hidden;
 }
-.timeline-seg {
-  position: absolute;
-  top: 2px;
-  bottom: 2px;
-  border-radius: 4px;
+.ap-results-header {
   display: flex;
   align-items: center;
-  justify-content: center;
-  cursor: default;
-  min-width: 18px;
-  transition: opacity 0.15s;
+  justify-content: space-between;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
-.timeline-seg:nth-child(odd) { background: rgba(100, 181, 246, 0.5); }
-.timeline-seg:nth-child(even) { background: rgba(255, 183, 77, 0.5); }
-.timeline-seg:hover { opacity: 0.8; }
-.timeline-label {
-  font-size: 0.7rem;
+.ap-results-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.ap-vid {
+  font-size: 0.78rem;
   font-weight: 600;
   color: var(--text);
+  font-family: monospace;
 }
-.timeline-ticks {
-  display: flex;
-  justify-content: space-between;
+.ap-page {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--on-primary);
+  background: var(--primary);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+}
+.ap-dur {
   font-size: 0.72rem;
   color: var(--muted);
-  margin-top: 0.2rem;
-  padding: 0 2px;
+  background: var(--bg);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
 }
-
-/* ---- Segment list ---- */
-.segment-list {
+.ap-results-actions {
   display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin-bottom: 0.75rem;
-  max-height: 400px;
-  overflow-y: auto;
+  gap: 0.3rem;
+  flex-shrink: 0;
 }
-.segment-item {
+.ap-small-btn {
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.12s;
+}
+.ap-small-btn:hover { border-color: var(--primary); }
+.ap-small-btn.primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary); }
+.ap-small-btn.primary:hover { opacity: 0.85; }
+.ap-small-btn.muted { color: var(--muted); }
+
+/* ---- Song list ---- */
+.ap-songs {
+  padding: 0.5rem 0.75rem 0.6rem;
+}
+.ap-songs-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 0.4rem;
+}
+.ap-song {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0.5rem 0.6rem;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 7px;
   background: var(--bg);
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  transition: border-color 0.15s;
+  margin-bottom: 0.3rem;
+  transition: border-color 0.12s;
+  border: 1px solid transparent;
 }
-.segment-item:hover {
-  border-color: var(--primary);
-}
-.seg-color {
-  width: 12px;
-  height: 12px;
+.ap-song:hover { border-color: var(--border); }
+.ap-song-color {
+  width: 10px;
+  height: 10px;
   border-radius: 3px;
   flex-shrink: 0;
 }
-.seg-label-input {
-  width: 100px;
-  padding: 0.25rem 0.4rem;
-  border-radius: 4px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text);
-  font-size: 0.85rem;
-  font-weight: 500;
-  outline: none;
-  transition: border-color 0.15s, background 0.15s;
-}
-.seg-label-input:hover,
-.seg-label-input:focus {
-  border-color: var(--border);
-  background: var(--surface);
-}
-.seg-time {
+.ap-song-info {
   flex: 1;
-  font-size: 0.82rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.ap-song-label {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ap-song-time {
+  font-size: 0.7rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
-.seg-time small {
-  opacity: 0.7;
-}
-.seg-actions {
+.ap-song-btns {
   display: flex;
-  gap: 0.3rem;
+  gap: 0.25rem;
+  flex-shrink: 0;
 }
-.icon-btn {
-  width: 30px;
-  height: 30px;
+.ap-icon-btn {
+  width: 28px;
+  height: 28px;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -890,82 +771,58 @@ watch(
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.82rem;
-  transition: background 0.15s, border-color 0.15s;
+  font-size: 0.78rem;
+  transition: border-color 0.12s;
 }
-.icon-btn:hover {
-  border-color: var(--primary);
+.ap-icon-btn:hover { border-color: var(--primary); }
+.ap-icon-btn.rename:hover { border-color: #ffa726; color: #ffa726; }
+.ap-icon-btn.delete:hover { border-color: #ff6b6b; color: #ff6b6b; }
+.ap-icon-btn.confirm {
+  border-color: #4caf50; color: #4caf50; font-weight: 700;
 }
-.icon-btn.delete:hover {
-  border-color: #ff6b6b;
-  color: #ff6b6b;
+.ap-icon-btn.confirm:hover { background: rgba(76,175,80,0.1); }
+.ap-icon-btn.cancel {
+  border-color: #ff6b6b; color: #ff6b6b; font-weight: 700;
 }
+.ap-icon-btn.cancel:hover { background: rgba(255,107,107,0.1); }
 
-/* ---- Audio player bar ---- */
-.audio-player-bar {
-  position: sticky;
-  bottom: 0;
-  left: 0;
-  right: 0;
+/* ---- Inline rename ---- */
+.ap-rename-row {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0.45rem 0.75rem;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
-  box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.15);
-  z-index: 10;
-  margin: 0 -1rem;
-  width: calc(100% + 2rem);
+  gap: 0.25rem;
+  width: 100%;
 }
-.player-label {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-  min-width: 80px;
-}
-.player-audio {
+.ap-rename-input {
   flex: 1;
-  height: 36px;
-}
-.icon-btn.close {
-  border: none;
-  background: transparent;
-  font-size: 1.1rem;
-  color: var(--muted);
-}
-.icon-btn.close:hover {
+  min-width: 0;
+  padding: 0.2rem 0.45rem;
+  border-radius: 5px;
+  border: 1px solid var(--primary);
+  background: var(--bg);
   color: var(--text);
+  font-size: 0.8rem;
+  outline: none;
+  font-family: inherit;
+}
+.ap-rename-input:focus {
+  box-shadow: 0 0 0 2px rgba(var(--primary-rgb, 100, 108, 255), 0.2);
 }
 
 /* ---- Spinner ---- */
 .spinner {
   display: inline-block;
-  width: 1em;
-  height: 1em;
+  width: 1em; height: 1em;
   border: 2px solid currentColor;
   border-top-color: transparent;
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---- Mobile ---- */
 @media (max-width: 600px) {
-  .audio-panel {
-    padding: 0.6rem 0.6rem 4rem;
-  }
-  .url-input-row {
-    flex-direction: column;
-  }
-  .params-row {
-    flex-direction: column;
-  }
-  .seg-time small {
-    display: none;
-  }
+  .ap { padding: 0.5rem 0.5rem 3.5rem; }
+  .ap-actions { flex-direction: column; }
 }
 </style>

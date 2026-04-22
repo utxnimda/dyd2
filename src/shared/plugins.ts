@@ -71,3 +71,11 @@ export function requestPluginOpen(pluginId: string, payload?: Record<string, unk
  * The plugin component can watch this to receive data from external triggers.
  */
 export const pluginPayloads = ref<Record<string, Record<string, unknown> | undefined>>({});
+
+/**
+ * Monotonically increasing counter — bumped every time a payload is written.
+ * Plugin components can watch this instead of the payload object itself
+ * to reliably detect new payloads (avoids Vue reactivity edge-cases with
+ * undefined ↔ object transitions inside a ref).
+ */
+export const pluginPayloadVersion = ref(0);
