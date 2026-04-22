@@ -426,65 +426,21 @@ defineExpose({ reload: loadLibrary });
   border-color: color-mix(in srgb, var(--danger, #ff6b6b) 28%, var(--border));
 }
 
-/* ---- 列表容器：多 BV 横向滑 ---- */
+/* ---- 列表容器：多 BV 响应式网格（宽则一行多列，容不下则换到下一行） ---- */
 .sl-list {
-  display: flex;
-  flex-direction: row;
-  flex-wrap: nowrap;
-  /* 勿用 stretch，否则多列时矮列会被拉成与最高列同高，折叠一列后外框仍像未折叠 */
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  align-items: start;
   gap: 0.85rem;
   width: 100%;
-  overflow-x: auto;
-  overflow-y: visible;
+  box-sizing: border-box;
   padding: 0.2rem 0.15rem 0.5rem;
-  -webkit-overflow-scrolling: touch;
-  /* Firefox */
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--primary) 42%, var(--border))
-    color-mix(in srgb, var(--text) 7%, transparent);
-  scroll-snap-type: x proximity;
-}
-/* 横向：胶囊轨道 + 主色滑块 */
-.sl-list::-webkit-scrollbar {
-  height: 8px;
-}
-.sl-list::-webkit-scrollbar-track {
-  margin: 0 6px;
-  background: color-mix(in srgb, var(--text) 6%, transparent);
-  border-radius: 100px;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, #fff 4%, var(--border));
-}
-.sl-list::-webkit-scrollbar-thumb {
-  border-radius: 100px;
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--primary) 50%, var(--surface)),
-    color-mix(in srgb, var(--primary) 35%, var(--muted))
-  );
-  box-shadow: 0 0 0 1px color-mix(in srgb, #fff 12%, var(--primary));
-}
-.sl-list::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--primary) 70%, var(--surface)),
-    color-mix(in srgb, var(--primary) 50%, var(--muted))
-  );
-}
-.sl-list::-webkit-scrollbar-thumb:active {
-  background: color-mix(in srgb, var(--primary) 75%, var(--text));
-}
-.sl-list::-webkit-scrollbar-corner {
-  background: transparent;
 }
 .sl-list--single {
-  flex-wrap: wrap;
-  overflow-x: visible;
-  scroll-snap-type: none;
+  /* 仅一个分组时也占满一行 */
+  grid-template-columns: 1fr;
 }
 .sl-list--single .sl-bv-group {
-  width: 100%;
-  min-width: 0;
   max-width: none;
   max-height: none;
 }
@@ -492,9 +448,9 @@ defineExpose({ reload: loadLibrary });
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
-  flex: 0 0 auto;
-  width: min(380px, calc(100vw - 2.5rem));
-  min-width: min(320px, 90vw);
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
   max-height: 72vh;
   overflow-y: auto;
   padding: 0.5rem 0.55rem 0.6rem;
@@ -511,7 +467,6 @@ defineExpose({ reload: loadLibrary });
     inset 0 1px 0 rgba(255, 255, 255, 0.07);
   backdrop-filter: blur(20px) saturate(1.25);
   -webkit-backdrop-filter: blur(20px) saturate(1.25);
-  scroll-snap-align: start;
   /* Firefox 竖向 */
   scrollbar-color: color-mix(in srgb, var(--primary) 38%, var(--border))
     color-mix(in srgb, var(--text) 5%, transparent);
@@ -794,8 +749,10 @@ defineExpose({ reload: loadLibrary });
   .sl { padding: 0.75rem 0.75rem 4rem; }
   .sl-toolbar { flex-direction: column; align-items: stretch; }
   .sl-search-wrap { max-width: none; }
+  .sl-list {
+    grid-template-columns: 1fr;
+  }
   .sl-bv-group {
-    min-width: min(300px, 91vw);
     max-height: 66vh;
   }
 }
