@@ -481,6 +481,17 @@ function loadMusicMetadata(musicDir) {
   } catch { return {}; }
 }
 
+/** 分发端可能未同步体积很大的 source.*，但 music/ 下已有分轨；曲库仍需索引此类目录。 */
+function musicDirHasAnyTrackFiles(musicDir) {
+  if (!fs.existsSync(musicDir)) return false;
+  for (const f of fs.readdirSync(musicDir)) {
+    if (f === "metadata.json") continue;
+    const full = path.join(musicDir, f);
+    if (fs.statSync(full).isFile()) return true;
+  }
+  return false;
+}
+
 /** 全部分轨合并（不删原片） */
 const MERGE_OUTPUT_BASENAME = "merged_full_span.mp3";
 /** 选中连续分轨合并（会删除被选中的原分轨） */
@@ -1243,9 +1254,10 @@ const server = http.createServer(async (req, res) => {
 
         // Collect page directories: root (p1) + p2, p3, ...
         const pageDirs = [];
-        // Check if root has source file (p1)
+        // Root：有 source.* 表示本机抽过完整源；或无源文件但已有分轨（生产仅同步了小文件）。
         const rootSource = fs.readdirSync(videoBase).find(f => f.startsWith("source."));
-        if (rootSource) pageDirs.push({ page: 1, dir: videoBase });
+        const rootMusicDir = path.join(videoBase, "music");
+        if (rootSource || musicDirHasAnyTrackFiles(rootMusicDir)) pageDirs.push({ page: 1, dir: videoBase });
         // Check pN subdirectories
         for (const sub of fs.readdirSync(videoBase)) {
           const m = sub.match(/^p(\d+)$/);
@@ -1253,7 +1265,9 @@ const server = http.createServer(async (req, res) => {
             const subDir = path.join(videoBase, sub);
             if (fs.statSync(subDir).isDirectory()) {
               const subSource = fs.readdirSync(subDir).find(f => f.startsWith("source."));
-              if (subSource) pageDirs.push({ page: parseInt(m[1], 10), dir: subDir });
+              const subMusicDir = path.join(subDir, "music");
+              if (subSource || musicDirHasAnyTrackFiles(subMusicDir))
+                pageDirs.push({ page: parseInt(m[1], 10), dir: subDir });
             }
           }
         }

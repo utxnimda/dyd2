@@ -56,8 +56,18 @@ const blobCache = new Map<string, string>();
 /* ---- Drag state ---- */
 const floatEl = ref<HTMLElement | null>(null);
 const collapsed = ref(false);
-const posX = ref(16);
-const posY = ref(window.innerHeight - 120);
+function guessInitialGpPos(): { x: number; y: number } {
+  if (typeof window === "undefined") return { x: 16, y: 96 };
+  const gw = Math.min(360, Math.max(268, window.innerWidth - 28));
+  const gh = 132;
+  return {
+    x: Math.max(6, Math.round((window.innerWidth - gw) / 2)),
+    y: Math.max(6, Math.round((window.innerHeight - gh) / 2)),
+  };
+}
+const gp0 = guessInitialGpPos();
+const posX = ref(gp0.x);
+const posY = ref(gp0.y);
 const dragging = ref(false);
 const dragOffset = ref({ x: 0, y: 0 });
 
@@ -269,6 +279,18 @@ function clampPanelPos() {
   posY.value = Math.max(0, Math.min(maxY, posY.value));
 }
 
+/** 每次从隐藏弹出时落在视口中央，避免默认贴在底边半截出屏 */
+function centerFloatingPlayerInViewport() {
+  requestAnimationFrame(() => {
+    if (!playerVisible.value || !currentTrack.value) return;
+    const w = floatEl.value?.offsetWidth ?? Math.min(360, window.innerWidth - 24);
+    const h = floatEl.value?.offsetHeight ?? 132;
+    posX.value = Math.round((window.innerWidth - w) / 2);
+    posY.value = Math.round((window.innerHeight - h) / 2);
+    clampPanelPos();
+  });
+}
+
 function onHeaderPointerDown(e: PointerEvent) {
   if (e.pointerType === "mouse" && e.button !== 0) return;
   const el = e.currentTarget as HTMLElement;
@@ -302,12 +324,20 @@ function onHeaderPointerUp(e: PointerEvent) {
 
 let resizeClamp: (() => void) | null = null;
 
+watch(playerVisible, (vis, wasVisible) => {
+  if (!vis || wasVisible === true) return;
+  void nextTick(() => centerFloatingPlayerInViewport());
+});
+
 onMounted(() => {
   setupMediaSessionHandlers();
   if (typeof window === "undefined") return;
   resizeClamp = () => clampPanelPos();
   window.addEventListener("resize", resizeClamp);
-  nextTick(() => clampPanelPos());
+  void nextTick(() => {
+    if (playerVisible.value && currentTrack.value) centerFloatingPlayerInViewport();
+    else clampPanelPos();
+  });
 });
 onBeforeUnmount(() => {
   if (resizeClamp && typeof window !== "undefined") {

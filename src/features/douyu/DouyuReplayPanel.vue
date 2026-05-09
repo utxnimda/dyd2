@@ -140,14 +140,71 @@ function closeDouyuPlayPopup() {
   douyuPopup = null;
 }
 
+/**
+ * 以当前 opener 浏览器窗口与工作区相交区域为基准居中，缩放至整窗落在可用屏幕区域内（避免半截在屏幕外）。
+ */
+function computeDouyuPopupPlacement(prefW: number, prefH: number): { width: number; height: number; left: number; top: number } {
+  const pad = 10;
+  const sx =
+    typeof window.screenX === "number"
+      ? window.screenX
+      : typeof (window as Window & { screenLeft?: number }).screenLeft === "number"
+        ? (window as Window & { screenLeft: number }).screenLeft
+        : 0;
+  const sy =
+    typeof window.screenY === "number"
+      ? window.screenY
+      : typeof (window as Window & { screenTop?: number }).screenTop === "number"
+        ? (window as Window & { screenTop: number }).screenTop
+        : 0;
+
+  let outerW = typeof window.outerWidth === "number" ? window.outerWidth : window.innerWidth;
+  let outerH = typeof window.outerHeight === "number" ? window.outerHeight : window.innerHeight;
+  outerW = Math.max(outerW, window.innerWidth);
+  outerH = Math.max(outerH, window.innerHeight);
+
+  const aL = typeof screen.availLeft === "number" ? screen.availLeft : 0;
+  const aT = typeof screen.availTop === "number" ? screen.availTop : 0;
+  const aW = typeof screen.availWidth === "number" ? screen.availWidth : window.innerWidth;
+  const aH = typeof screen.availHeight === "number" ? screen.availHeight : window.innerHeight;
+  const aR = aL + aW;
+  const aB = aT + aH;
+
+  let boxLeft = Math.max(aL + pad / 2, sx + pad);
+  let boxTop = Math.max(aT + pad / 2, sy + pad);
+  let boxRight = Math.min(aR - pad / 2, sx + outerW - pad);
+  let boxBottom = Math.min(aB - pad / 2, sy + outerH - pad);
+
+  let boxW = boxRight - boxLeft;
+  let boxH = boxBottom - boxTop;
+  /* 移动端 / 全屏等：outer 与 avail 不交时改用整个工作区 */
+  if (!Number.isFinite(boxW) || !Number.isFinite(boxH) || boxW < 200 || boxH < 140) {
+    boxLeft = aL + pad;
+    boxTop = aT + pad;
+    boxW = aW - pad * 2;
+    boxH = aH - pad * 2;
+    boxRight = boxLeft + boxW;
+    boxBottom = boxTop + boxH;
+  }
+
+  const innerMaxW = Math.max(220, boxW - pad * 2);
+  const innerMaxH = Math.max(150, boxH - pad * 2);
+  const scale = Math.min(1, innerMaxW / prefW, innerMaxH / prefH);
+  let w = Math.round(prefW * scale);
+  let h = Math.round(prefH * scale);
+
+  let left = boxLeft + (boxW - w) / 2;
+  let top = boxTop + (boxH - h) / 2;
+  left = Math.min(Math.max(aL + pad, left), aR - w - pad);
+  top = Math.min(Math.max(aT + pad, top), aB - h - pad);
+
+  return { width: w, height: h, left: Math.round(left), top: Math.round(top) };
+}
+
 function openDouyuPlayPopup(hash: string): boolean {
   const url = douyuPlaybackUrl(hash);
-  const pw = 920;
-  const ph = 540;
-  const sw = typeof screen !== "undefined" ? screen.availWidth : 1200;
-  const sh = typeof screen !== "undefined" ? screen.availHeight : 800;
-  const left = Math.max(0, Math.round((sw - pw) / 2));
-  const top = Math.max(40, Math.round((sh - ph) / 2));
+  const pref = { width: 920, height: 540 };
+  const { width: pw, height: ph, left, top } = computeDouyuPopupPlacement(pref.width, pref.height);
   const feats = [
     `popup=yes`,
     `width=${pw}`,
@@ -163,6 +220,14 @@ function openDouyuPlayPopup(hash: string): boolean {
 
   const win = window.open(url, `douyu_v_${hash}`, feats);
   if (!win) return false;
+  queueMicrotask(() => {
+    try {
+      win.moveTo?.(left, top);
+      win.resizeTo?.(pw, ph);
+    } catch {
+      /* 部分浏览器限制 move/resize — 已通过 features 尽量对齐 */
+    }
+  });
   douyuPopup = win;
   stopDouyuPopupPoll();
   douyuPopupPoll = window.setInterval(() => {
@@ -720,13 +785,33 @@ defineExpose({ reload: loadAll });
   border-color: var(--primary);
 }
 @media (max-width: 600px) {
-  .dy-row {
-    flex-direction: column;
+  .douyu-panel {
     padding: 0.75rem 0.65rem;
   }
+  .dy-row {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: flex-start;
+    padding: 0.65rem 0.45rem;
+    gap: 0.55rem;
+  }
   .dy-thumb-wrap {
-    width: 100%;
-    max-width: none;
+    width: clamp(124px, 36vw, 168px);
+    max-width: 42vw;
+    flex-shrink: 0;
+  }
+  .dy-body {
+    --fmz-video-text-zoom: clamp(0.68, calc((100vw - 138px) / 278), 1);
+    zoom: var(--fmz-video-text-zoom);
+    align-self: flex-start;
+  }
+  @supports not (zoom: 1) {
+    .dy-body {
+      zoom: revert;
+      width: calc(100% / var(--fmz-video-text-zoom));
+      transform: scale(var(--fmz-video-text-zoom));
+      transform-origin: left top;
+    }
   }
   .dy-extract-btn {
     opacity: 1;

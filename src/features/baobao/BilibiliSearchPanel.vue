@@ -1107,7 +1107,7 @@ function playAudioFile(bvid: string, filename: string) {
   50% { opacity: 0.4; }
 }
 
-/* ---- Mobile responsive ---- */
+/* ---- Mobile responsive（左封面右文案；右侧排布与桌面一致，收窄时整体缩放） ---- */
 @media (max-width: 600px) {
   .bili-panel {
     padding: 0.75rem;
@@ -1116,24 +1116,36 @@ function playAudioFile(bvid: string, filename: string) {
     border-radius: 6px;
   }
   .video-row {
-    flex-direction: column;
-    padding: 0.75rem 0.65rem;
-    gap: 0.65rem;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: flex-start;
+    padding: 0.65rem 0.45rem;
+    gap: 0.55rem;
   }
   .row-thumb-wrap {
-    width: 100%;
-    max-width: none;
+    width: clamp(124px, 36vw, 168px);
+    max-width: 42vw;
+    flex-shrink: 0;
   }
-  .row-title {
-    font-size: 0.92rem;
+
+  /*
+   * 假定约 278px 为右侧「理想」排版宽度（与桌面窄侧栏相近）；实际可用 ≈100vw − 封面与留白。
+   * zoom 缩小整块右侧，不改变 meta 横行、margin-left:auto 统计区对齐等微观排布。
+   */
+  .video-row .row-body {
+    --fmz-video-text-zoom: clamp(0.68, calc((100vw - 138px) / 278), 1);
+    zoom: var(--fmz-video-text-zoom);
+    align-self: flex-start;
   }
-  .row-meta {
-    flex-direction: column;
-    align-items: flex-start;
+  @supports not (zoom: 1) {
+    .video-row .row-body {
+      zoom: revert;
+      width: calc(100% / var(--fmz-video-text-zoom));
+      transform: scale(var(--fmz-video-text-zoom));
+      transform-origin: left top;
+    }
   }
-  .row-meta-stats {
-    margin-left: 0;
-  }
+
   .extract-overlay-btn {
     opacity: 1;
   }
