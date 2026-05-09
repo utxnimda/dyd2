@@ -23,6 +23,13 @@ const features = Object.fromEntries(
   Object.entries(rawFeatures).map(([k, v]) => [k, v === true || v === "local"]),
 ) as Record<string, boolean>;
 
+/** 夜观星象面板；未配置时与 sanguo 同步。sanguo 仍可单独为 true 以保留代理与后台采集服务 */
+const sanguoUiEnabled =
+  Object.prototype.hasOwnProperty.call(rawFeatures, "sanguoUi") &&
+  rawFeatures.sanguoUi !== undefined
+    ? rawFeatures.sanguoUi === true || rawFeatures.sanguoUi === "local"
+    : !!features.sanguo;
+
 /** 与官网 SPA Origin 一致（官方为 https://fmz.dongdongne.com ，勿用 api2）；可设 FMZ_UPSTREAM_BROWSER_ORIGIN 覆盖 */
 const FMZ_UPSTREAM_BROWSER_ORIGIN = (
   process.env.FMZ_UPSTREAM_BROWSER_ORIGIN || "https://fmz.dongdongne.com"
@@ -109,6 +116,22 @@ if (features.baobao) {
       });
     },
   };
+  apiProxy["/__douyu_api"] = {
+    target: "https://v.douyu.com",
+    changeOrigin: true,
+    secure: true,
+    rewrite: (p: string) => p.replace(/^\/__douyu_api/, ""),
+    configure: (proxy) => {
+      proxy.on("proxyReq", (proxyReq) => {
+        proxyReq.setHeader("referer", "https://v.douyu.com/");
+        proxyReq.setHeader("origin", "https://v.douyu.com");
+        proxyReq.setHeader(
+          "user-agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        );
+      });
+    },
+  };
 }
 
 export default defineConfig({
@@ -132,7 +155,7 @@ export default defineConfig({
           const filePath = join(__dirname, "image", req.url ?? "");
           if (existsSync(filePath)) {
             const ext = filePath.split(".").pop()?.toLowerCase();
-            const mime: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+            const mime: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", jfif: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
             res.setHeader("Content-Type", mime[ext ?? ""] ?? "application/octet-stream");
             res.end(readFileSync(filePath));
           } else {
@@ -146,6 +169,7 @@ export default defineConfig({
     __FMZ_RELEASE_LABEL__: JSON.stringify(releaseLabel),
     __FMZ_APP_VERSION__: JSON.stringify(pkg.version),
     __FEATURE_SANGUO__: JSON.stringify(!!features.sanguo),
+    __FEATURE_SANGUO_UI__: JSON.stringify(sanguoUiEnabled),
     __FEATURE_BAOBAO__: JSON.stringify(!!features.baobao),
     __FEATURE_AUDIO__: JSON.stringify(!!features.audio),
     __FEATURE_AUDIO_PLUGIN__: JSON.stringify(!!features.audioPlugin),

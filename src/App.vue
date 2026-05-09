@@ -53,11 +53,14 @@ const UsersPanel = __FEATURE_USERS__
 const TreasuryPanel = __FEATURE_TREASURY__
   ? defineAsyncComponent(() => import("./features/treasury/TreasuryPanel.vue"))
   : null;
-const DefenseTowerPanel = __FEATURE_SANGUO__
+const DefenseTowerPanel = __FEATURE_SANGUO_UI__
   ? defineAsyncComponent(() => import("./features/sanguo/DefenseTowerPanel.vue"))
   : null;
 const BilibiliSearchPanel = __FEATURE_BAOBAO__
   ? defineAsyncComponent(() => import("./features/baobao/BilibiliSearchPanel.vue"))
+  : null;
+const DouyuReplayPanel = __FEATURE_BAOBAO__
+  ? defineAsyncComponent(() => import("./features/douyu/DouyuReplayPanel.vue"))
   : null;
 const QuotaDashboardPanel = __FEATURE_QUOTA__
   ? defineAsyncComponent(() => import("./features/quota/QuotaDashboardPanel.vue"))
@@ -70,7 +73,8 @@ const GlobalAudioPlayer = __FEATURE_AUDIO__
   : null;
 
 // Feature flags exposed to template (Vite replaces these at build time)
-const F_SANGUO = __FEATURE_SANGUO__;
+/** 夜观星象 Tab（可与后台采集分离：__FEATURE_SANGUO__ 仍为 true） */
+const F_SANGUO_UI = __FEATURE_SANGUO_UI__;
 const F_BAOBAO = __FEATURE_BAOBAO__;
 const F_BATTLE = __FEATURE_BATTLE__;
 const F_TREASURY = __FEATURE_TREASURY__;
@@ -88,16 +92,16 @@ const settings = ref<StoredSettings>(loadSettings());
 function applyTheme() {
   const s = settings.value;
   if (s.themePreset === "custom") {
-    let rawBg = (s.backgroundColor || "#0f1419").trim();
-    let rawTx = (s.textColor || "#e8eef7").trim();
+    let rawBg = (s.backgroundColor || "#f6f7f8").trim();
+    let rawTx = (s.textColor || "#18191c").trim();
     if (!rawBg.startsWith("#")) rawBg = "#" + rawBg;
     if (!rawTx.startsWith("#")) rawTx = "#" + rawTx;
     const okBg = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(rawBg);
     const okTx = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(rawTx);
     applyThemeVarsToDocument(
       deriveCustomTheme(
-        okBg ? rawBg : "#0f1419",
-        okTx ? rawTx : "#e8eef7",
+        okBg ? rawBg : "#f6f7f8",
+        okTx ? rawTx : "#18191c",
       ),
     );
   } else {
@@ -109,7 +113,52 @@ function applyTheme() {
 // Computed: baobao tab visible = feature compiled in AND runtime toggle on
 const showBaobao = computed(() => F_BAOBAO && settings.value.baobaoMode);
 
-const tab = ref<MainTab>(__FEATURE_SANGUO__ ? "sanguo" : __FEATURE_BAOBAO__ ? "baobao" : "sanguo");
+/** 与主导航按钮顺序一致，用于默认 Tab / 隐藏某一栏后的回退 */
+const NAV_TAB_ORDER: MainTab[] = [
+  "pre",
+  "users",
+  "treasury",
+  "battle",
+  "sanguo",
+  "baobao",
+  "douyu",
+  "quota",
+  "songs",
+];
+
+function isTabAvailable(t: MainTab): boolean {
+  switch (t) {
+    case "pre":
+      return __FEATURE_PRELIMINARY__;
+    case "users":
+      return __FEATURE_USERS__;
+    case "treasury":
+      return __FEATURE_TREASURY__;
+    case "battle":
+      return __FEATURE_BATTLE__;
+    case "sanguo":
+      return F_SANGUO_UI;
+    case "baobao":
+      return showBaobao.value;
+    case "douyu":
+      return showBaobao.value;
+    case "quota":
+      return __FEATURE_QUOTA__;
+    case "songs":
+      return __FEATURE_AUDIO__;
+    default:
+      return false;
+  }
+}
+
+function firstAvailableMainTab(): MainTab {
+  for (const t of NAV_TAB_ORDER) {
+    if (isTabAvailable(t)) return t;
+  }
+  return "baobao";
+}
+
+const tab = ref<MainTab>(firstAvailableMainTab());
 const prePanelTab = ref<PrePanelTab>("total");
 
 /** 战斗爽展示筛选路径段（#/battle/<此段>），刷新后由 hash 或 localStorage 恢复 */
@@ -129,7 +178,9 @@ function applyHashToState() {
     captainHudOnly.value = true;
   } else {
     captainHudOnly.value = false;
-    tab.value = parsed.tab;
+    let nextTab = parsed.tab;
+    if (!F_SANGUO_UI && nextTab === "sanguo") nextTab = firstAvailableMainTab();
+    tab.value = nextTab;
     prePanelTab.value = parsed.prePanel;
     if (parsed.tab === "battle") {
       let seg = parsed.battleShowPath;
@@ -188,6 +239,7 @@ const treRef = ref<any>(null);
 const sanguoRef = ref<any>(null);
 const quotaRef = ref<any>(null);
 const songsRef = ref<any>(null);
+const douyuRef = ref<any>(null);
 
 /** Reload the currently active panel (shared by onApply / loadActivePanel / tab-switch). */
 function reloadPanel(t: MainTab) {
@@ -195,9 +247,10 @@ function reloadPanel(t: MainTab) {
   if (__FEATURE_USERS__ && t === "users") usrRef.value?.reload();
   if (__FEATURE_BATTLE__ && t === "battle") battleRef.value?.reload();
   if (__FEATURE_TREASURY__ && t === "treasury") treRef.value?.reload();
-  if (__FEATURE_SANGUO__ && t === "sanguo") sanguoRef.value?.reload();
+  if (F_SANGUO_UI && t === "sanguo") sanguoRef.value?.reload();
   if (__FEATURE_QUOTA__ && t === "quota") quotaRef.value?.reload();
   if (__FEATURE_AUDIO__ && t === "songs") songsRef.value?.reload();
+  if (__FEATURE_BAOBAO__ && t === "douyu") douyuRef.value?.reload();
 }
 
 async function openTreasuryDetailFromAvatar(memberId: string | number | null | undefined) {
@@ -283,10 +336,10 @@ watch(prePanelTab, () => {
   syncHashFromState();
 });
 
-// When baobao mode is toggled off while on the baobao tab, switch to default tab
+// 宝宝版关闭时若正在 B 站/斗鱼 Tab，退回默认可用 Tab
 watch(showBaobao, (visible) => {
-  if (!visible && tab.value === "baobao") {
-    selectTab(__FEATURE_SANGUO__ ? "sanguo" : "sanguo");
+  if (!visible && (tab.value === "baobao" || tab.value === "douyu")) {
+    selectTab(firstAvailableMainTab());
   }
 });
 </script>
@@ -310,8 +363,9 @@ watch(showBaobao, (visible) => {
     <button v-if="F_USERS" :class="{ on: tab === 'users' }" type="button" @click="selectTab('users')">用户积分</button>
     <button v-if="F_TREASURY" :class="{ on: tab === 'treasury' }" type="button" @click="selectTab('treasury')">团员金库</button>
     <button v-if="F_BATTLE" :class="{ on: tab === 'battle' }" type="button" @click="selectTab('battle')">战斗爽</button>
-    <button v-if="F_SANGUO" :class="{ on: tab === 'sanguo' }" type="button" @click="selectTab('sanguo')">夜观星象</button>
-    <button v-if="showBaobao" :class="{ on: tab === 'baobao' }" type="button" @click="selectTab('baobao')">宝宝魅力时刻</button>
+    <button v-if="F_SANGUO_UI" :class="{ on: tab === 'sanguo' }" type="button" @click="selectTab('sanguo')">夜观星象</button>
+    <button v-if="showBaobao" :class="{ on: tab === 'baobao' }" type="button" @click="selectTab('baobao')">拾观宝片</button>
+    <button v-if="showBaobao" :class="{ on: tab === 'douyu' }" type="button" @click="selectTab('douyu')">遥忆宝章</button>
     <button v-if="F_QUOTA" :class="{ on: tab === 'quota' }" type="button" @click="selectTab('quota')">用量看板</button>
     <button v-if="F_AUDIO" :class="{ on: tab === 'songs' }" type="button" @click="selectTab('songs')">忽闻宝声</button>
   </nav>
@@ -343,11 +397,15 @@ watch(showBaobao, (visible) => {
       @update:battle-show-path="onBattleShowPath"
     />
     <DefenseTowerPanel
-      v-if="F_SANGUO && DefenseTowerPanel && tab === 'sanguo'"
+      v-if="F_SANGUO_UI && DefenseTowerPanel && tab === 'sanguo'"
       ref="sanguoRef"
     />
     <BilibiliSearchPanel
       v-if="showBaobao && BilibiliSearchPanel && tab === 'baobao'"
+    />
+    <DouyuReplayPanel
+      v-if="showBaobao && DouyuReplayPanel && tab === 'douyu'"
+      ref="douyuRef"
     />
     <QuotaDashboardPanel
       v-if="F_QUOTA && QuotaDashboardPanel && tab === 'quota'"

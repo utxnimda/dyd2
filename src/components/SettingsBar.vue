@@ -128,7 +128,7 @@ function toggleBaobaoMode() {
         type="button"
         class="baobao-toggle"
         :class="{ active: form.baobaoMode }"
-        title="宝宝版开关 — 开启后显示宝宝魅力时刻等专属功能"
+        title="宝宝版开关 — 开启后显示拾观宝片、遥忆宝章等专属功能"
         @click="toggleBaobaoMode"
       >
         {{ form.baobaoMode ? '👶 宝宝版' : '👶' }}
@@ -181,7 +181,7 @@ function toggleBaobaoMode() {
                     v-model="form.backgroundColor"
                     type="text"
                     class="color-hex"
-                    placeholder="#0f1419"
+                    placeholder="#f6f7f8"
                     pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$"
                     maxlength="9"
                     :disabled="form.themePreset !== 'custom'"
@@ -206,7 +206,7 @@ function toggleBaobaoMode() {
                     v-model="form.textColor"
                     type="text"
                     class="color-hex"
-                    placeholder="#e8eef7"
+                    placeholder="#18191c"
                     pattern="^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$"
                     maxlength="9"
                     :disabled="form.themePreset !== 'custom'"

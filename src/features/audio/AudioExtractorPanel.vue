@@ -25,6 +25,8 @@ interface DepsStatus {
   ok: boolean;
   ytdlp: boolean;
   ffmpeg: boolean;
+  /** 未返回时视为旧版 audio-server，不在界面判断斗鱼环境 */
+  phantomjs?: boolean;
   message: string;
 }
 
@@ -70,6 +72,7 @@ const deleting = ref<number | null>(null);
 /* ------------------------------------------------------------------ */
 
 const API_BASE = "/__fmz_audio";
+const F_BAOBAO = __FEATURE_BAOBAO__;
 
 function formatTime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -92,15 +95,66 @@ function parseBvid(url: string): string | null {
   return m ? m[0] : null;
 }
 
+/** BV 简写 → 完整 URL；斗鱼等保持原样 */
+function normalizeVideoInput(raw: string): string {
+  const u = raw.trim();
+  if (u.startsWith("BV") && !u.includes("http")) {
+    return `https://www.bilibili.com/video/${u}`;
+  }
+  return u;
+}
+
+/**
+ * 服务端 data/audio 目录名：B 站用 BV号；斗鱼点播用 hash_id（与「遥忆宝章」/status 路由一致）。
+ * 须先解析斗鱼：`…/show/<hash>` 里 hash 常含形如 `Bv` 的子串，若先走 BV 正则会被误判成哔哩 BV 号。
+ */
+function resolveStorageVideoId(normalizedUrl: string): string | null {
+  if (/douyu\.com/i.test(normalizedUrl)) {
+    const m = normalizedUrl.match(/\/show\/([^/?#]+)/i);
+    if (m?.[1]) {
+      try {
+        return decodeURIComponent(m[1]);
+      } catch {
+        return m[1];
+      }
+    }
+    return null;
+  }
+  const bvid = parseBvid(normalizedUrl);
+  if (bvid) return bvid;
+  return null;
+}
+
+/** 作者个人空间列表页（多集），不能直接作为 yt-dlp 单视频输入 */
+function isDouyuAuthorReplayUrl(raw: string): boolean {
+  return /douyu\.com\/author-replay\//i.test(raw.trim());
+}
+
+function goToDouyuReplayTab() {
+  const nextHash = "#/douyu";
+  if (typeof window === "undefined") return;
+  if (window.location.hash === nextHash) {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    return;
+  }
+  window.location.hash = nextHash;
+}
+
 function parsePageFromUrl(url: string): number {
   const m = url.match(/[?&]p=(\d+)/);
   return m ? parseInt(m[1], 10) : 1;
 }
 
 const canExtract = computed(() => {
-  const url = videoUrl.value.trim();
-  return url.length > 0 && (url.includes("bilibili.com") || url.includes("b23.tv") || url.startsWith("BV"));
+  const raw = videoUrl.value.trim();
+  if (!raw.length) return false;
+  if (isDouyuAuthorReplayUrl(raw)) return false;
+  if (raw.includes("bilibili.com") || raw.includes("b23.tv") || raw.startsWith("BV")) return true;
+  const norm = normalizeVideoInput(raw);
+  return resolveStorageVideoId(norm) !== null;
 });
+
+const showDouyuAuthorSpaceHint = computed(() => isDouyuAuthorReplayUrl(videoUrl.value.trim()));
 
 const mergeSelectCount = computed(() => selectedMergeFiles.value.length);
 
@@ -146,13 +200,9 @@ async function checkDeps() {
 }
 
 async function doExtract() {
-  let url = videoUrl.value.trim();
+  let url = normalizeVideoInput(videoUrl.value.trim());
   if (!url) return;
-  if (url.startsWith("BV") && !url.includes("http")) {
-    url = `https://www.bilibili.com/video/${url}`;
-  }
-  const bvid = parseBvid(url);
-  const vid = bvid || Date.now().toString(36);
+  const vid = resolveStorageVideoId(url) || parseBvid(url) || Date.now().toString(36);
   const page = parsePageFromUrl(url);
 
   extracting.value = true;
@@ -182,13 +232,10 @@ async function doExtract() {
 }
 
 async function doSmartExtract() {
-  let url = videoUrl.value.trim();
+  let url = normalizeVideoInput(videoUrl.value.trim());
   if (!url) return;
-  if (url.startsWith("BV") && !url.includes("http")) {
-    url = `https://www.bilibili.com/video/${url}`;
-  }
-  const bvid = parseBvid(url);
-  const vid = bvid || videoId.value || Date.now().toString(36);
+  const vid =
+    resolveStorageVideoId(url) || parseBvid(url) || videoId.value || Date.now().toString(36);
   const page = videoPage.value || parsePageFromUrl(url);
 
   smartExtracting.value = true;
@@ -479,23 +526,20 @@ const loadingLocal = ref(false);
 
 /** 仅手动：按当前链接向服务端查询是否已有本机提取（不会发起下载/重新提取） */
 async function loadExistingData() {
-  let url = videoUrl.value.trim();
+  let url = normalizeVideoInput(videoUrl.value.trim());
   if (!url) return;
-  if (url.startsWith("BV") && !url.includes("http")) {
-    url = `https://www.bilibili.com/video/${url}`;
-  }
-  const bvid = parseBvid(url);
-  if (!bvid) return;
+  const vid = resolveStorageVideoId(url) || parseBvid(url);
+  if (!vid) return;
   const page = parsePageFromUrl(url);
 
   loadingLocal.value = true;
   try {
-    const resp = await fetch(`${API_BASE}/status/${bvid}?p=${page}`);
+    const resp = await fetch(`${API_BASE}/status/${encodeURIComponent(vid)}?p=${page}`);
     if (!resp.ok) return;
     const data = await resp.json();
     if (!data.ok || !data.extracted) return;
 
-    videoId.value = bvid;
+    videoId.value = vid;
     videoPage.value = page;
     audioFile.value = data.sourceFile || "";
     audioDuration.value = data.duration || 0;
@@ -559,10 +603,21 @@ watch(pluginPayloadVersion, () => handlePayload());
       <div class="ap-deps">
         <span :class="depsStatus.ytdlp ? 'ok' : 'miss'">{{ depsStatus.ytdlp ? '✅' : '❌' }} yt-dlp</span>
         <span :class="depsStatus.ffmpeg ? 'ok' : 'miss'">{{ depsStatus.ffmpeg ? '✅' : '❌' }} ffmpeg</span>
+        <span v-if="depsStatus.phantomjs !== undefined" :class="depsStatus.phantomjs ? 'ok' : 'miss'">{{
+          depsStatus.phantomjs ? "✅" : "❌"
+        }}
+          phantomjs</span>
       </div>
       <button class="ap-retry" @click="checkDeps">🔄 重新检查</button>
     </div>
-    <div v-else-if="depsStatus?.ok" class="ap-status ok">✅ 就绪</div>
+    <div v-else-if="depsStatus?.ok" class="ap-status ok ap-status-stack">
+      <span>✅ 核心依赖就绪（yt-dlp + ffmpeg）</span>
+      <div v-if="depsStatus.phantomjs !== undefined" class="ap-deps">
+        <span :class="depsStatus.phantomjs ? 'ok' : 'miss'">{{ depsStatus.phantomjs ? "✅" : "⚠️" }} phantomjs（已由
+          <code>npm install</code> 提供 phantomjs-prebuilt；服务端会自动加入 PATH。若仍缺失可
+          <a href="https://phantomjs.org/download.html" target="_blank" rel="noopener noreferrer">手动安装</a>）</span>
+      </div>
+    </div>
 
     <!-- URL Input + Actions -->
     <div class="ap-input-card">
@@ -570,10 +625,26 @@ watch(pluginPayloadVersion, () => handlePayload());
         v-model="videoUrl"
         type="text"
         class="ap-url"
-        placeholder="粘贴B站视频链接或BV号..."
+        placeholder="B站链接/BV号 或 vmobile：…douyu.com/show/…（「遥忆宝章」一键提取会自动填入）"
         :disabled="extracting || smartExtracting"
         @keydown.enter="doExtract"
       />
+      <div v-if="showDouyuAuthorSpaceHint" class="ap-msg hint ap-douyu-space">
+        这是<strong>斗鱼作者空间</strong>（多集列表），本插件每次只处理<strong>一条</strong>点播链接
+        <code>…/show/&lt;hash&gt;</code>。<br />
+        请切换到顶部「遥忆宝章」分页，在列表中对某一集点<strong>提取音频</strong>；或把<strong>某一集的点播页链接</strong>粘贴到上方。你提供的作者主页仅用于在原站浏览：
+        <a
+          href="https://v.douyu.com/author-replay/01wNyQQWx7q2"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          https://v.douyu.com/author-replay/01wNyQQWx7q2</a>。
+        <span v-if="F_BAOBAO" class="ap-douyu-space-actions">
+          <button type="button" class="ap-small-btn primary" @click="goToDouyuReplayTab">
+            打开「遥忆宝章」分页
+          </button>
+        </span>
+      </div>
       <div class="ap-actions">
         <button
           class="ap-btn secondary"
@@ -755,9 +826,17 @@ watch(pluginPayloadVersion, () => handlePayload());
 .ap-status.loading { background: var(--surface); color: var(--muted); }
 .ap-status.error { background: rgba(255,107,107,0.1); border: 1px solid rgba(255,107,107,0.3); color: var(--text); }
 .ap-status.ok { background: rgba(76,175,80,0.1); border: 1px solid rgba(76,175,80,0.3); color: #4caf50; }
-.ap-deps { display: flex; gap: 0.75rem; font-size: 0.8rem; }
+.ap-status-stack { flex-direction: column; align-items: flex-start; gap: 0.35rem; }
+.ap-deps { display: flex; gap: 0.75rem; font-size: 0.8rem; flex-wrap: wrap; }
 .ap-deps .ok { color: #4caf50; }
 .ap-deps .miss { color: #ff6b6b; }
+.ap-status-stack .ap-deps {
+  width: 100%;
+}
+.ap-status-stack .ap-deps a {
+  color: var(--text);
+  text-decoration: underline;
+}
 .ap-retry {
   padding: 0.25rem 0.6rem; border-radius: 5px; border: 1px solid var(--border);
   background: var(--surface); color: var(--text); font-size: 0.78rem; cursor: pointer;
@@ -818,6 +897,8 @@ watch(pluginPayloadVersion, () => handlePayload());
 }
 .ap-msg.error { background: rgba(255,107,107,0.1); border: 1px solid rgba(255,107,107,0.25); color: #ff6b6b; }
 .ap-msg.hint { background: var(--surface); color: var(--muted); font-style: italic; animation: pulse-text 1.5s ease-in-out infinite; }
+.ap-douyu-space { font-style: normal; line-height: 1.55; animation: none; }
+.ap-douyu-space-actions { display: block; margin-top: 0.65rem; }
 @keyframes pulse-text { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
 
 /* ---- Results ---- */

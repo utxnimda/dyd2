@@ -22,7 +22,7 @@ export type StoredSettings = {
   backgroundColor: string;
   /** 主正文 / 标题用字色（自定义时生效；预设会覆盖到界面变量） */
   textColor: string;
-  /** 宝宝版全局开关 — 开启后显示宝宝魅力时刻等宝宝专属功能 */
+  /** 宝宝版全局开关 — 开启后显示「拾观宝片」「遥忆宝章」等专属功能 */
   baobaoMode: boolean;
 };
 
@@ -44,9 +44,9 @@ export const defaultSettings = (): StoredSettings => ({
   bearerToken: "",
   reactionsApiBase: "/__fmz_reactions",
   reactionsSecret: "",
-  themePreset: "dark-default",
-  backgroundColor: "#0f1419",
-  textColor: "#e8eef7",
+  themePreset: "bilibili-pink",
+  backgroundColor: "#f6f7f8",
+  textColor: "#18191c",
   baobaoMode: false,
 });
 
@@ -58,9 +58,11 @@ export function loadSettings(): StoredSettings {
     const base = defaultSettings();
     const merged = { ...base, ...parsed };
     if (!parsed.themePreset) {
-      const bg = String(parsed.backgroundColor || "").toLowerCase();
-      merged.themePreset =
-        bg && bg !== "#0f1419" ? "custom" : "dark-default";
+      const bg = String(parsed.backgroundColor ?? "").trim().toLowerCase();
+      if (!bg) merged.themePreset = base.themePreset;
+      else if (bg === "#0f1419") merged.themePreset = "dark-default";
+      else if (bg === "#f6f7f8") merged.themePreset = "bilibili-pink";
+      else merged.themePreset = "custom";
     }
     if (parsed.textColor == null || parsed.textColor === "") {
       merged.textColor = base.textColor;

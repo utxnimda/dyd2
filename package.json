@@ -1,10 +1,11 @@
 {
   "name": "fmz-dashboard",
   "private": true,
-  "version": "1.1.2",
-  "fmzReleaseLabel": "v1.1.2",
+  "version": "1.1.4",
+  "fmzReleaseLabel": "v1.1.4",
   "fmzFeatures": {
     "sanguo": true,
+    "sanguoUi": false,
     "baobao": true,
     "audio": true,
     "audioPlugin": false,
@@ -32,12 +33,15 @@
   },
   "dependencies": {
     "axios": "^1.7.9",
+    "md5": "^2.3.0",
+    "phantomjs-prebuilt": "^2.1.16",
     "vue": "^3.5.13"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2",
     "@playwright/test": "^1.51.0",
+    "@types/md5": "^2.3.6",
     "@vitejs/plugin-vue": "^5.2.1",
+    "concurrently": "^9.1.2",
     "typescript": "~5.7.2",
     "vite": "^6.0.3"
   }

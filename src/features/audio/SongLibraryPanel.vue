@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, computed, watch } from "vue";
 import {
   playTrack,
   currentTrack,
@@ -50,16 +50,28 @@ const videos = ref<VideoEntry[]>([]);
 
 // Search / filter
 const searchQuery = ref("");
+const isSearching = computed(() => searchQuery.value.trim().length > 0);
 
-/** BV 分组折叠：true = 该 BV 下列表已收起 */
-const bvCollapsed = ref<Record<string, boolean>>({});
+/** 无搜索时的手风琴：同一时间只展开一个 BV；null = 全部收起 */
+const expandedBvid = ref<string | null>(null);
+
+/** 有搜索时：默认全部展开；仅记录「被用户收起」的分组（true = 收起） */
+const bvFoldWhileSearch = ref<Record<string, boolean>>({});
 
 function isBvCollapsed(bvid: string): boolean {
-  return !!bvCollapsed.value[bvid];
+  if (isSearching.value) return !!bvFoldWhileSearch.value[bvid];
+  return expandedBvid.value !== bvid;
 }
 
 function toggleBvFold(bvid: string) {
-  bvCollapsed.value = { ...bvCollapsed.value, [bvid]: !isBvCollapsed(bvid) };
+  if (isSearching.value) {
+    bvFoldWhileSearch.value = {
+      ...bvFoldWhileSearch.value,
+      [bvid]: !isBvCollapsed(bvid),
+    };
+    return;
+  }
+  expandedBvid.value = expandedBvid.value === bvid ? null : bvid;
 }
 
 /* ------------------------------------------------------------------ */
@@ -67,6 +79,10 @@ function toggleBvFold(bvid: string) {
 /* ------------------------------------------------------------------ */
 
 const API_BASE = "/__fmz_audio";
+
+/** 「忽闻宝声」列表依赖本机 audio-extractor（Vite 反代 → 8789）；未启动时会出现连接失败 */
+const AUDIO_SERVICE_HINT =
+  "请先在本机启动音频后端：在项目根目录另开终端执行 npm run audio-server（需与 npm run dev 同时运行）；或直接执行 npm run dev:all 一次启动前端与后端。";
 
 function formatTime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -124,6 +140,39 @@ const songsGroupedByBvid = computed(() => {
     }));
 });
 
+watch(songsGroupedByBvid, (groups) => {
+  const cur = expandedBvid.value;
+  if (cur != null && !groups.some((g) => g.bvid === cur)) {
+    expandedBvid.value = null;
+  }
+  const ids = new Set(groups.map((g) => g.bvid));
+  const fold = bvFoldWhileSearch.value;
+  if (Object.keys(fold).length === 0) return;
+  const next = { ...fold };
+  let changed = false;
+  for (const k of Object.keys(next)) {
+    if (!ids.has(k)) {
+      delete next[k];
+      changed = true;
+    }
+  }
+  if (changed) bvFoldWhileSearch.value = next;
+});
+
+watch(
+  () => searchQuery.value.trim(),
+  (q, prev) => {
+    const prevQ = prev ?? "";
+    if (q.length > 0 && prevQ.length === 0) {
+      bvFoldWhileSearch.value = {};
+    }
+    if (q.length === 0 && prevQ.length > 0) {
+      bvFoldWhileSearch.value = {};
+      expandedBvid.value = null;
+    }
+  },
+);
+
 /* ------------------------------------------------------------------ */
 /*  API                                                               */
 /* ------------------------------------------------------------------ */
@@ -133,15 +182,45 @@ async function loadLibrary() {
   error.value = "";
   try {
     const resp = await fetch(`${API_BASE}/library`);
-    if (!resp.ok) throw new Error("Failed to load library");
+    if (!resp.ok) {
+      throw new ConnectError(resp.status);
+    }
     const data = await resp.json();
-    if (!data.ok) throw new Error(data.error || "Failed");
+    if (!data.ok) throw new Error(data.error || "曲库读取失败");
     videos.value = data.videos || [];
-  } catch (e: any) {
-    error.value = e.message || "加载失败";
+  } catch (e: unknown) {
+    if (e instanceof ConnectError) {
+      error.value =
+        `无法加载曲库（HTTP ${e.httpStatus ?? "?"}）。${AUDIO_SERVICE_HINT}`;
+    } else if (looksLikeOfflineError(e)) {
+      error.value = `无法连接到本地音频服务。${AUDIO_SERVICE_HINT}`;
+    } else {
+      error.value = e instanceof Error ? e.message : "加载失败";
+    }
   } finally {
     loading.value = false;
   }
+}
+
+class ConnectError extends Error {
+  readonly httpStatus: number;
+  constructor(httpStatus: number) {
+    super("HTTP error");
+    this.name = "ConnectError";
+    this.httpStatus = httpStatus;
+  }
+}
+
+function looksLikeOfflineError(e: unknown): boolean {
+  if (e instanceof TypeError) return true;
+  if (!(e instanceof Error)) return false;
+  const m = e.message.toLowerCase();
+  return (
+    m.includes("failed to fetch") ||
+    m.includes("networkerror") ||
+    m.includes("load failed") ||
+    m.includes("network request failed")
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -218,7 +297,17 @@ defineExpose({ reload: loadLibrary });
       <p v-else-if="!loading" class="sl-subtitle">本地提取的音频与分轨</p>
       <div class="sl-toolbar">
         <div class="sl-search-wrap">
-          <span class="sl-search-ico" aria-hidden="true">🔍</span>
+          <button
+            class="sl-refresh"
+            type="button"
+            aria-label="刷新列表"
+            @click="loadLibrary"
+            :disabled="loading"
+            title="刷新列表"
+          >
+            <span v-if="loading" class="spinner"></span>
+            <span v-else aria-hidden="true">↻</span>
+          </button>
           <input
             v-model="searchQuery"
             type="search"
@@ -226,11 +315,8 @@ defineExpose({ reload: loadLibrary });
             placeholder="搜索 BV、歌名、文件名"
             enterkeyhint="search"
           />
+          <span class="sl-search-ico" aria-hidden="true">🔍</span>
         </div>
-        <button class="sl-refresh" @click="loadLibrary" :disabled="loading" title="刷新列表">
-          <span v-if="loading" class="spinner"></span>
-          <span v-else>↻</span>
-        </button>
       </div>
     </div>
 
@@ -244,21 +330,35 @@ defineExpose({ reload: loadLibrary });
 
     <!-- Empty -->
     <div v-if="!loading && !error && videos.length === 0" class="sl-msg empty">
-      还没有提取过歌曲，去「宝宝魅力时刻」点击 🎵 提取吧！
+      还没有提取过歌曲，去「拾观宝片」或「遥忆宝章」点击 🎵 提取吧！
     </div>
 
     <!-- 按 BV 分组 -->
+    <!-- 单列纵向列表：未搜索时为手风琴；有搜索关键字时默认全部展开，可多组同时开着 -->
     <div
       v-if="songsGroupedByBvid.length > 0"
       class="sl-list"
-      :class="{ 'sl-list--single': songsGroupedByBvid.length === 1 }"
     >
-      <div v-for="group in songsGroupedByBvid" :key="group.bvid" class="sl-bv-group">
+      <div
+        v-for="group in songsGroupedByBvid"
+        :key="group.bvid"
+        class="sl-bv-group"
+        :class="{ 'sl-bv-group--open': !isBvCollapsed(group.bvid) }"
+      >
         <div
           class="sl-bv-head"
           role="button"
           tabindex="0"
-          :title="isBvCollapsed(group.bvid) ? '展开列表' : '折叠列表'"
+          :aria-expanded="!isBvCollapsed(group.bvid)"
+          :title="
+            isSearching
+              ? isBvCollapsed(group.bvid)
+                ? '展开'
+                : '收起'
+              : isBvCollapsed(group.bvid)
+                ? '展开此 BV（将收起其他分组）'
+                : '收起'
+          "
           @click="toggleBvFold(group.bvid)"
           @keydown.enter.prevent="toggleBvFold(group.bvid)"
           @keydown.space.prevent="toggleBvFold(group.bvid)"
@@ -322,7 +422,7 @@ defineExpose({ reload: loadLibrary });
 <style scoped>
 .sl {
   padding: 1rem 1.25rem 1.25rem;
-  max-width: 960px;
+  max-width: min(680px, 100%);
   margin: 0 auto;
 }
 
@@ -342,17 +442,37 @@ defineExpose({ reload: loadLibrary });
 .sl-toolbar {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  width: 100%;
+  box-sizing: border-box;
+  /* 与 .sl-list 左右内边距一致，外框与下方卡片列表对齐 */
+  padding: 0 0.15rem;
 }
 .sl-search-wrap {
   position: relative;
   flex: 1;
   min-width: 0;
-  max-width: 420px;
+  display: flex;
+  align-items: stretch;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
+  background: color-mix(in srgb, var(--surface) 45%, transparent);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.05);
+  overflow: hidden;
+  min-height: 2.5rem;
+  transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+}
+.sl-search-wrap:focus-within {
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent),
+    inset 0 1px 1px rgba(0, 0, 0, 0.04);
 }
 .sl-search-ico {
   position: absolute;
-  left: 0.9rem;
+  right: 0.85rem;
   top: 50%;
   transform: translateY(-50%);
   font-size: 0.75rem;
@@ -360,34 +480,39 @@ defineExpose({ reload: loadLibrary });
   pointer-events: none;
 }
 .sl-search {
+  flex: 1;
+  min-width: 0;
   width: 100%;
   box-sizing: border-box;
-  padding: 0.5rem 0.75rem 0.5rem 2.25rem;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
-  background: color-mix(in srgb, var(--surface) 45%, transparent);
+  padding: 0.5rem 2.35rem 0.5rem 0.65rem;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: var(--text);
   font-size: 0.84rem;
   outline: none;
-  transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
-  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.05);
-  backdrop-filter: blur(16px) saturate(1.2);
-  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  appearance: none;
+  -webkit-appearance: none;
+}
+.sl-search::-webkit-search-decoration,
+.sl-search::-webkit-search-cancel-button {
+  appearance: none;
+  -webkit-appearance: none;
+}
+.sl-search:focus {
+  box-shadow: none;
 }
 .sl-search::placeholder { color: var(--muted); }
-.sl-search:focus {
-  background: color-mix(in srgb, var(--surface) 55%, transparent);
-  border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
-  box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent),
-    inset 0 1px 1px rgba(0, 0, 0, 0.04);
-}
 .sl-refresh {
-  width: 2.4rem;
-  height: 2.4rem;
-  border-radius: 50%;
-  border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
-  background: color-mix(in srgb, var(--surface) 42%, transparent);
+  flex-shrink: 0;
+  width: 2.65rem;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  border-right: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  background: transparent;
   color: var(--text);
   cursor: pointer;
   display: inline-flex;
@@ -395,16 +520,17 @@ defineExpose({ reload: loadLibrary });
   justify-content: center;
   font-size: 1.05rem;
   line-height: 1;
-  flex-shrink: 0;
-  transition: border-color 0.15s, background 0.15s, transform 0.12s;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  transition: border-color 0.15s, background 0.15s, color 0.12s;
 }
 .sl-refresh:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
-  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
 }
-.sl-refresh:active:not(:disabled) { transform: scale(0.96); }
+.sl-refresh:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: -2px;
+}
+.sl-refresh:active:not(:disabled) { transform: scale(0.94); }
 .sl-refresh:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* ---- Messages ---- */
@@ -426,24 +552,16 @@ defineExpose({ reload: loadLibrary });
   border-color: color-mix(in srgb, var(--danger, #ff6b6b) 28%, var(--border));
 }
 
-/* ---- 列表容器：多 BV 响应式网格（宽则一行多列，容不下则换到下一行） ---- */
+/* 单列纵向：与手风琴逻辑一致（一次只开一个 BV），手机端也少挤占横向 */
 .sl-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
-  align-items: start;
-  gap: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
   width: 100%;
   box-sizing: border-box;
   padding: 0.2rem 0.15rem 0.5rem;
 }
-.sl-list--single {
-  /* 仅一个分组时也占满一行 */
-  grid-template-columns: 1fr;
-}
-.sl-list--single .sl-bv-group {
-  max-width: none;
-  max-height: none;
-}
+
 .sl-bv-group {
   display: flex;
   flex-direction: column;
@@ -451,8 +569,7 @@ defineExpose({ reload: loadLibrary });
   min-width: 0;
   width: 100%;
   max-width: 100%;
-  max-height: 72vh;
-  overflow-y: auto;
+  overflow-y: visible;
   padding: 0.5rem 0.55rem 0.6rem;
   border-radius: 16px;
   border: 1px solid color-mix(in srgb, #fff 10%, var(--border));
@@ -470,6 +587,10 @@ defineExpose({ reload: loadLibrary });
   /* Firefox 竖向 */
   scrollbar-color: color-mix(in srgb, var(--primary) 38%, var(--border))
     color-mix(in srgb, var(--text) 5%, transparent);
+}
+.sl-bv-group.sl-bv-group--open {
+  max-height: 72vh;
+  overflow-y: auto;
 }
 .sl-bv-group::-webkit-scrollbar {
   width: 8px;
@@ -747,13 +868,8 @@ defineExpose({ reload: loadLibrary });
 
 @media (max-width: 600px) {
   .sl { padding: 0.75rem 0.75rem 4rem; }
-  .sl-toolbar { flex-direction: column; align-items: stretch; }
-  .sl-search-wrap { max-width: none; }
-  .sl-list {
-    grid-template-columns: 1fr;
-  }
-  .sl-bv-group {
-    max-height: 66vh;
+  .sl-bv-group.sl-bv-group--open {
+    max-height: min(70vh, 85dvh);
   }
 }
 </style>

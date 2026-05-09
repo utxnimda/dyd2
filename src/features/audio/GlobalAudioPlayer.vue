@@ -13,6 +13,31 @@ import {
   playlist,
 } from "./audioPlayerStore";
 
+import { playerPortraitBgUrl } from "../../shared/playerPortraitBg";
+
+/** 横向 1000 等分区：从左到右每段增加图片可见度 0.1%（0%~100%，共 1001 个 stop 线性对齐） */
+function buildGpWatermarkPhotoMaskUrl(): string {
+  let stops = "";
+  for (let i = 0; i <= 1000; i++) {
+    const offsetPct = `${i / 10}%`; // 0% … 100%
+    const visible = i / 1000; // 停止点处可见比例 0→1（小区间递增 1/1000）
+    stops += `<stop offset="${offsetPct}" stop-color="white" stop-opacity="${visible}"/>`;
+  }
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" preserveAspectRatio="none">` +
+    `<defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="0%">` +
+    stops +
+    `</linearGradient></defs><rect width="256" height="256" fill="url(#g)"/></svg>`;
+  return `url(data:image/svg+xml;base64,${btoa(svg)})`;
+}
+
+const gpWatermarkPhotoMaskUrl = buildGpWatermarkPhotoMaskUrl();
+
+const gpPhotoLayerStyle: Record<string, string> = {
+  backgroundImage: `url('${playerPortraitBgUrl}')`,
+  WebkitMaskImage: gpWatermarkPhotoMaskUrl,
+  maskImage: gpWatermarkPhotoMaskUrl,
+};
 /* ---- Audio state ---- */
 const audioEl = ref<HTMLAudioElement | null>(null);
 const playing = ref(false);
@@ -323,6 +348,7 @@ watch(shuffleMode, (mode) => {
       :class="{ collapsed, dragging }"
       :style="{ left: posX + 'px', top: posY + 'px' }"
     >
+      <div class="gp-bg-photo" aria-hidden="true" :style="gpPhotoLayerStyle" />
       <!-- Hidden audio element -->
       <audio
         ref="audioEl"
@@ -447,16 +473,12 @@ watch(shuffleMode, (mode) => {
   --gp-surface: color-mix(in srgb, var(--surface) 48%, transparent);
   position: fixed;
   z-index: 10000;
+  isolation: isolate;
   width: 340px;
   max-width: calc(100vw - 24px);
   border-radius: 14px;
   border: 1px solid color-mix(in srgb, #fff 12%, var(--border));
-  background: linear-gradient(
-    160deg,
-    color-mix(in srgb, var(--primary) 18%, transparent) 0%,
-    var(--gp-surface) 38%,
-    color-mix(in srgb, var(--bg) 28%, transparent) 100%
-  );
+  background-color: transparent;
   box-shadow:
     0 8px 32px rgba(0, 0, 0, 0.22),
     0 2px 8px rgba(0, 0, 0, 0.1),
@@ -468,13 +490,63 @@ watch(shuffleMode, (mode) => {
   transition: box-shadow 0.2s, transform 0.1s, opacity 0.2s;
   user-select: none;
 }
+
+/* 水印照片：独占一层，整块不设 opacity —— 横向浓淡仅由 SVG mask（见 gpPhotoLayerStyle）控制 */
+.gp-bg-photo {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background-size: cover;
+  background-position: center right;
+  background-repeat: no-repeat;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+.gp > *:not(.gp-bg-photo) {
+  position: relative;
+  z-index: 2;
+}
+
+.gp::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  border-radius: inherit;
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--surface) 38%, transparent) 0%,
+    transparent 46%
+  ),
+  linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--primary) 16%, transparent) 0%,
+    color-mix(in srgb, var(--surface) 52%, transparent) 42%,
+    color-mix(in srgb, var(--bg) 74%, transparent) 100%
+  );
+  opacity: 0.88;
+}
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .gp {
+  .gp::after {
     background: linear-gradient(
+      to right,
+      color-mix(in srgb, var(--surface) 52%, transparent) 0%,
+      transparent 48%
+    ),
+    linear-gradient(
       160deg,
       color-mix(in srgb, var(--primary) 8%, var(--surface)) 0%,
-      var(--surface) 100%
+      color-mix(in srgb, var(--surface) 88%, transparent) 100%
     );
+    opacity: 0.93;
   }
 }
 .gp.dragging {

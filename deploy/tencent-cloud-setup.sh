@@ -49,6 +49,7 @@ SSL_DIR=/etc/ssl/fmz
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NGINX_SRC="$SCRIPT_DIR/nginx-fmz-dashboard.conf"
+NGINX_LOC_SRC="$SCRIPT_DIR/nginx-fmz-dashboard-locations.inc"
 
 detect_pkg_mgr() {
   if command -v dnf >/dev/null 2>&1; then
@@ -105,9 +106,19 @@ apply_nginx_site() {
   sed "s/YOUR_DOMAIN_OR_IP/$DOMAIN/g" "$NGINX_SRC" >"$1"
 }
 
+install_nginx_locations_inc() {
+  if [[ ! -f "$NGINX_LOC_SRC" ]]; then
+    echo "找不到 $NGINX_LOC_SRC" >&2
+    exit 1
+  fi
+  mkdir -p /etc/nginx/conf.d
+  cp -f "$NGINX_LOC_SRC" /etc/nginx/conf.d/nginx-fmz-dashboard-locations.inc
+}
+
 enable_nginx_site_debian() {
   local dst=/etc/nginx/sites-available/fmz-dashboard
   apply_nginx_site "$dst"
+  install_nginx_locations_inc
   ln -sf "$dst" /etc/nginx/sites-enabled/fmz-dashboard
   rm -f /etc/nginx/sites-enabled/default
 }
@@ -118,6 +129,7 @@ enable_nginx_site_rhel() {
     mv /etc/nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf.bak.$(date +%s) || true
   fi
   apply_nginx_site /etc/nginx/conf.d/fmz-dashboard.conf
+  install_nginx_locations_inc
 }
 
 maybe_open_firewalld() {
@@ -179,6 +191,10 @@ fi
 
 if [[ ! -f "$NGINX_SRC" ]]; then
   echo "找不到 $NGINX_SRC" >&2
+  exit 1
+fi
+if [[ ! -f "$NGINX_LOC_SRC" ]]; then
+  echo "找不到 $NGINX_LOC_SRC" >&2
   exit 1
 fi
 

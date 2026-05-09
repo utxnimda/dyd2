@@ -6,6 +6,7 @@ export type ThemePresetId =
   | "light-cool"
   | "light-blue"
   | "eye-green"
+  | "bilibili-pink"
   | "custom";
 
 export type ThemeCssVars = {
@@ -212,6 +213,22 @@ export const THEME_PRESETS: Array<{
       onPrimary: "#f0fdf4",
       accent: "#0f766e",
       danger: "#b91c1c",
+    },
+  },
+  {
+    id: "bilibili-pink",
+    label: "哔哩粉白",
+    hint: "亮灰背景 + B 站标志性粉色，贴近官网观感",
+    vars: {
+      bg: "#f6f7f8",
+      surface: "#ffffff",
+      border: "#e3e5e7",
+      text: "#18191c",
+      muted: "#9499a0",
+      primary: "#fb7299",
+      onPrimary: "#ffffff",
+      accent: "#00a1d6",
+      danger: "#f85a54",
     },
   },
 ];

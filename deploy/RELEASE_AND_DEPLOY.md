@@ -109,6 +109,7 @@ git push origin main
 
 - **Web 根目录**：`/var/www/fmz-dashboard/`
 - **上传对象**：优先 **`release/<fmzReleaseLabel>/`** 下的 **`index.html`**、**`assets/`**、（可选）**`BUILD_INFO.txt`**
+- **SSH 私钥（本机路径）**：以 **`deploy/连接服务器与部署步骤.txt`** 为准；当前环境常用 **`D:\nimda1.pem`**（须为下载的 `.pem` 文件，不是控制台里的密钥 ID）。
 
 **Windows PowerShell（OpenSSH `scp`）示例：**
 
@@ -143,7 +144,7 @@ curl -sk "https://YOUR_SERVER_IP/" | findstr /i "data-fmz"
 ## 6. 赞踩服务（reactions-server）与 Nginx
 
 - **进程**：仓库 **`server/`**，默认监听 **`127.0.0.1:8787`**（`PORT` 可改）。生产环境需在服务器上 **`npm ci && npm start`** 或由 systemd 保活。
-- **Nginx**：参考 **`deploy/nginx-fmz-dashboard.conf`**。关键片段：
+- **Nginx**：参考 **`deploy/nginx-fmz-dashboard.conf`** 与同目录 **`nginx-fmz-dashboard-locations.inc`**（`include` 引用，需一并部署到 `/etc/nginx/conf.d/`）。关键片段：
 
   ```nginx
   location /__fmz_reactions/ {
@@ -306,7 +307,7 @@ scp -i KEY server/audio-extractor-server.mjs root@SERVER:/opt/fmz-audio-server/
 
 ```powershell
 # 同步所有歌曲数据（含 source.mp3，完整但体积大）
-scp -i "E:\Workspace\pem\nimda_tencent.pem" -o StrictHostKeyChecking=accept-new `
+scp -i "D:\nimda1.pem" -o StrictHostKeyChecking=accept-new `
   -r .\server\data\audio\ `
   root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 
@@ -320,7 +321,7 @@ scp -i "E:\Workspace\pem\nimda_tencent.pem" -o StrictHostKeyChecking=accept-new 
 ```bash
 rsync -avz --progress \
   --exclude='source.*' \
-  -e "ssh -i E:/Workspace/pem/nimda_tencent.pem" \
+  -e "ssh -i D:/nimda1.pem" \
   ./server/data/audio/ \
   root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 ```
@@ -448,9 +449,15 @@ curl -sk https://www.dianfanbao.net/__fmz_audio/library
 ```bash
 # 增量同步新歌曲（rsync 只传输新增/变更的文件）
 rsync -avz --progress --exclude='source.*' \
-  -e "ssh -i E:/Workspace/pem/nimda_tencent.pem" \
+  -e "ssh -i D:/nimda1.pem" \
   ./server/data/audio/ \
   root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 ```
 
 歌曲库前端会自动从 `/library` API 获取最新列表，无需任何额外操作。
+
+---
+
+## 12. 大陆环境 HTTPS（直连 443 异常、8443 可访问：走 CDN）
+
+部分网络下访客 **直连 CVM `443`** 可能被链路干扰，但 **`8443`** 正常。在用户侧仍以 **`https://www.域名`** 访问时，需要在 **腾讯云控制台** 配置 **CDN（或 EdgeOne）**：边缘 **443**，**HTTPS 回源到 `服务器IP:8443`**；并在 DNS 把 **`www` 改为 CDN 分配的 CNAME**。**无法通过本仓库脚本或远端 SSH 代你登录控制台完成**。详细点击顺序、`/__fmz_*` 勿缓存、`dianfanbao.net` apex 的处理，见：**`deploy/tencent-cdn-plan2-8443-origin.md`**。

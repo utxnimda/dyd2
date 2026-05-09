@@ -2,7 +2,8 @@
  * Audio Extractor Server
  *
  * Standalone HTTP server for extracting and splitting audio from Bilibili videos.
- * Dependencies: yt-dlp, ffmpeg (must be in PATH or configured below).
+ * Dependencies: yt-dlp, ffmpeg (must be in PATH). Douyu vod (DouyuShow) needs **phantomjs**：
+ *   项目根目录 `npm install` 会安装 phantomjs-prebuilt，本服务会自动把其二进制目录加入子进程 PATH（无需手动装 PhantomJS）。
  *
  * Usage: node server/audio-extractor-server.mjs
  * Default port: 8789
@@ -15,10 +16,14 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+/** 前端开发时：server/audio-extractor-server.mjs → 仓库根 fmz-dashboard */
+const REPO_ROOT = path.resolve(__dirname, "..");
 const DATA_DIR = path.join(__dirname, "data", "audio");
 const PORT = parseInt(process.env.AUDIO_PORT || "8789", 10);
 const MUSIC_DETECTOR_PY = path.join(__dirname, "music_detector.py");
@@ -91,49 +96,151 @@ function fmtTime(sec) {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+/** `phantomjs-prebuilt` 安装后的目录（含 phantomjs 可执行文件） */
+function getPhantomjsPrebuiltDir() {
+  try {
+    return path.dirname(require("phantomjs-prebuilt").path);
+  } catch {
+    return null;
+  }
+}
+
+/** 将目录置于 PATH / Path 前部，供子进程找到 phantomjs */
+function mergePathPrepend(env, dir) {
+  if (!dir) return env;
+  const sep = path.delimiter;
+  const cur = env.PATH || env.Path || "";
+  const norm = path.normalize(dir);
+  if (cur.split(sep).some((p) => path.normalize(p) === norm)) {
+    return env;
+  }
+  const prep = `${dir}${sep}${cur}`;
+  return { ...env, PATH: prep, Path: prep };
+}
+
+/** 仅斗鱼 URL：为 yt-dlp 子进程附加捆绑的 phantomjs */
+function envForYtDlp(urlStr) {
+  if (!/douyu\.com/i.test(String(urlStr))) return process.env;
+  return mergePathPrepend(process.env, getPhantomjsPrebuiltDir());
+}
+
+/** 健康检查用：优先使用 phantomjs-prebuilt */
+function envForPhantomProbe() {
+  return mergePathPrepend(process.env, getPhantomjsPrebuiltDir());
+}
+
 /* ------------------------------------------------------------------ */
-/*  Core: Extract audio from Bilibili video                           */
+/*  Core: Extract audio from video URL (Bilibili / Douyu / …) via yt-dlp   */
 /* ------------------------------------------------------------------ */
 
+/** yt-dlp 输出 source.ext；勿把 .part / 极小文件当个成品缓存 */
+function findCachedSourceAudio(dir) {
+  const extOk = /\.(mp3|m4a|opus|aac|wav|webm)$/i;
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!/^source\./i.test(f) || /\.(part|frag|temp|tmp|ytdl)$/i.test(f)) continue;
+      if (!extOk.test(f)) continue;
+      const p = path.join(dir, f);
+      let st;
+      try {
+        st = fs.statSync(p);
+      } catch {
+        continue;
+      }
+      if (!st.isFile() || st.size < 4096) continue;
+      return f;
+    }
+  } catch {
+    /* dir missing etc. */
+  }
+  return null;
+}
+
+function formatYtdlpExtractError(rawMessage, pageUrl) {
+  const msg = String(rawMessage);
+  let out = msg.startsWith("yt-dlp failed:") ? msg : `yt-dlp failed: ${msg}`;
+  if (/phantomjs/i.test(msg) && (/douyu/i.test(msg) || /douyu/i.test(String(pageUrl || "")))) {
+    out += [
+      "",
+      "",
+      "[斗鱼点播] yt-dlp 的 DouyuShow 需要 PhantomJS。请在项目根目录执行 npm install（会安装 phantomjs-prebuilt），并重启 npm run audio-server。",
+      "- 若仍失败：在终端执行 node -e \"console.log(require('phantomjs-prebuilt').path)\" 应输出 phantomjs.exe 路径；并执行 yt-dlp -U",
+      "- 手动安装参见: https://phantomjs.org/download.html",
+      "",
+      "[提示] 若之前因 videoId 错误生成了错位目录（例如 hash 含 Bv… 被判成哔哩 BV 号），可删除 server/data/audio 下对应空/错文件夹再重试提取。",
+    ].join("\n");
+  }
+  if (/incorrect codec parameters|invalid data found|conversion failed|ffmpeg exited/i.test(msg)) {
+    out += `${out.endsWith("\n") ? "" : "\n\n"}[音视频] ffmpeg 在处理下载结果时出错。请在终端确认 ffmpeg --version；或删除本条目的 server/data/audio/<videoId> 后重新提取`;
+  }
+  return out;
+}
+
+function formatYtDlpChildError(stderrStr, stdoutStr, errLike, url) {
+  const stderr = String(stderrStr || "").trim();
+  const stdout = String(stdoutStr || "").trim();
+  const codeBit = errLike?.code != null ? `code=${String(errLike.code)} ` : "";
+  const base = `${codeBit}${String(errLike?.message || errLike)}${
+    stderr ? `\n${stderr}` : stdout ? `\n${stdout}` : ""
+  }`.trim();
+  return formatYtdlpExtractError(base, url);
+}
+
 /**
- * Extract audio from a Bilibili video URL using yt-dlp.
- * Returns the path to the extracted audio file.
+ * Extract audio using yt-dlp (-x mp3). DouyuShow requires PhantomJS on PATH.
+ * @returns {{ file: string, cached: boolean, dir: string }}
  */
 async function extractAudio(url, videoId, page) {
   const dir = videoDir(videoId, page);
   const outputTemplate = path.join(dir, "source.%(ext)s");
 
-  // Check if already extracted
-  const existing = fs.readdirSync(dir).find((f) => f.startsWith("source."));
-  if (existing) {
-    return { file: path.join(dir, existing), cached: true, dir };
+  const cachedName = findCachedSourceAudio(dir);
+  if (cachedName) {
+    return { file: path.join(dir, cachedName), cached: true, dir };
+  }
+
+  if (/douyu\.com/i.test(String(url))) {
+    const pd = getPhantomjsPrebuiltDir();
+    console.log(`[extract] Douyu phantomjs bin dir (prepended PATH): ${pd || "(missing — npm install phantomjs-prebuilt in repo root)"}`);
   }
 
   const args = [
     "--no-playlist",
-    "-x",                          // extract audio only
-    "--audio-format", "mp3",       // convert to mp3
-    "--audio-quality", "0",        // best quality
+    "--no-continue",
+    "-x",
+    "--audio-format", "mp3",
+    "--audio-quality", "0",
     "-o", outputTemplate,
     "--no-check-certificates",
     url,
   ];
 
+  const isDouyin = /douyu\.com/i.test(String(url));
+  const timeoutMs = isDouyin ? 900_000 : 300_000;
+
   try {
     const { stdout, stderr } = await execFileAsync("yt-dlp", args, {
-      timeout: 300_000, // 5 min timeout
-      maxBuffer: 10 * 1024 * 1024,
+      timeout: timeoutMs,
+      maxBuffer: 50 * 1024 * 1024,
+      env: envForYtDlp(url),
+      cwd: REPO_ROOT,
+      windowsHide: true,
     });
-    console.log("[yt-dlp stdout]", stdout.slice(0, 500));
-    if (stderr) console.log("[yt-dlp stderr]", stderr.slice(0, 500));
+    console.log("[yt-dlp stdout]", String(stdout || "").slice(0, 500));
+    const se = String(stderr || "");
+    if (se) console.log("[yt-dlp stderr]", se.slice(0, 900));
   } catch (err) {
-    throw new Error(`yt-dlp failed: ${err.message}`);
+    const stderrStr =
+      err.stderr != null ? (Buffer.isBuffer(err.stderr) ? err.stderr.toString("utf8") : String(err.stderr)) : "";
+    const stdoutStr =
+      err.stdout != null ? (Buffer.isBuffer(err.stdout) ? err.stdout.toString("utf8") : String(err.stdout)) : "";
+    console.error("[yt-dlp FAILED]", stderrStr.slice(-2800));
+    throw new Error(formatYtDlpChildError(stderrStr, stdoutStr, err, url));
   }
 
-  // Find the output file
-  const files = fs.readdirSync(dir).filter((f) => f.startsWith("source."));
-  if (files.length === 0) throw new Error("yt-dlp produced no output file");
-  return { file: path.join(dir, files[0]), cached: false, dir };
+  const outName = findCachedSourceAudio(dir);
+  if (!outName) throw new Error("yt-dlp produced no usable audio file");
+  return { file: path.join(dir, outName), cached: false, dir };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1292,6 +1399,7 @@ const server = http.createServer(async (req, res) => {
       let ffmpegOk = false;
       let pythonOk = false;
       let librosaOk = false;
+      let phantomjsOk = false;
 
       try {
         await execFileAsync("yt-dlp", ["--version"], { timeout: 5000 });
@@ -1301,6 +1409,14 @@ const server = http.createServer(async (req, res) => {
       try {
         await execFileAsync("ffmpeg", ["-version"], { timeout: 5000 });
         ffmpegOk = true;
+      } catch {}
+
+      try {
+        await execFileAsync("phantomjs", ["--version"], {
+          timeout: 5000,
+          env: envForPhantomProbe(),
+        });
+        phantomjsOk = true;
       } catch {}
 
       try {
@@ -1315,17 +1431,26 @@ const server = http.createServer(async (req, res) => {
       }
 
       const allOk = ytdlpOk && ffmpegOk;
+      const baseMsg = allOk
+        ? librosaOk
+          ? "All dependencies ready (smart music detection enabled)"
+          : "Core dependencies ready (smart music detection unavailable — install librosa)"
+        : `Missing: ${[!ytdlpOk && "yt-dlp", !ffmpegOk && "ffmpeg"].filter(Boolean).join(", ")}`;
+
+      let message = baseMsg;
+      if (allOk && !phantomjsOk) {
+        message +=
+          ". 斗鱼点播依赖 PhantomJS（yt-dlp 签名）：请先在项目根目录 npm install（含 phantomjs-prebuilt）；若仍为否，再在系统 PATH 中安装 phantomjs";
+      }
+
       return json(res, 200, {
         ok: allOk,
         ytdlp: ytdlpOk,
         ffmpeg: ffmpegOk,
+        phantomjs: phantomjsOk,
         python: pythonOk,
         librosa: librosaOk,
-        message: allOk
-          ? (librosaOk
-            ? "All dependencies ready (smart music detection enabled)"
-            : "Core dependencies ready (smart music detection unavailable — install librosa)")
-          : `Missing: ${[!ytdlpOk && "yt-dlp", !ffmpegOk && "ffmpeg"].filter(Boolean).join(", ")}`,
+        message,
       });
     }
 
@@ -1361,6 +1486,13 @@ server.listen(PORT, () => {
     execFileAsync("ffmpeg", ["-version"], { timeout: 5000 }).then(
       (r) => console.log(`   ✅ ffmpeg ${r.stdout.split("\n")[0]}`),
       () => console.warn("   ❌ ffmpeg not found! Install: winget install ffmpeg"),
+    ),
+    execFileAsync("phantomjs", ["--version"], { timeout: 5000, env: envForPhantomProbe() }).then(
+      (r) => console.log(`   ✅ phantomjs ${String(r.stdout).trim().split("\n")[0]} (bundled via phantomjs-prebuilt or PATH)`),
+      () => console.warn(
+        "   ⚠️  phantomjs not found — run npm install in project root (phantomjs-prebuilt), "
+        + "or add PhantomJS from https://phantomjs.org/download.html to PATH",
+      ),
     ),
     execFileAsync("python", ["-c", "import librosa; print(librosa.__version__)"], { timeout: 15000 }).then(
       (r) => console.log(`   ✅ python + librosa ${r.stdout.trim()} (smart music detection enabled)`),

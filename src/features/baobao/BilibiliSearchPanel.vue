@@ -2,6 +2,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, reactive } from "vue";
 import { requestPluginOpen } from "../../shared/plugins";
+import {
+  getOrFetchWbiMixinKey,
+  invalidateBiliWbiCache,
+  signBiliWbiQuery,
+} from "./biliWbi";
 
 const F_AUDIO = __FEATURE_AUDIO__;
 const F_AUDIO_PLUGIN = __FEATURE_AUDIO_PLUGIN__;
@@ -24,14 +29,6 @@ interface BiliVideo {
 const DEFAULT_KEYWORD = "电饭宝";
 const keyword = ref(DEFAULT_KEYWORD);
 const useCustom = ref(false);
-
-/** Sub-tab: "all" shows everything, "replay" auto-filters replay/录播 videos */
-type SubTab = "all" | "replay";
-const subTab = ref<SubTab>("all");
-const SUB_TAB_OPTIONS: { value: SubTab; label: string }[] = [
-  { value: "all", label: "全部" },
-  { value: "replay", label: "录播" },
-];
 
 /** Sort order for bilibili search: totalrank=综合, pubdate=最新, click=播放量 */
 type SortOrder = "totalrank" | "pubdate" | "click";
@@ -154,19 +151,8 @@ function formatDate(ts: number): string {
   return `${y}-${m}-${day}`;
 }
 
-/** Build the actual search keyword based on sub-tab */
-function buildSearchKeyword(): string {
-  const base = keyword.value.trim();
-  if (!base) return "";
-  if (subTab.value === "replay") {
-    // Append "录播" if not already present
-    return base.includes("录播") ? base : `${base} 录播`;
-  }
-  return base;
-}
-
 async function search(p = 1) {
-  const kw = buildSearchKeyword();
+  const kw = keyword.value.trim();
   if (!kw) return;
   loading.value = true;
   errorMsg.value = "";
@@ -175,22 +161,41 @@ async function search(p = 1) {
   try {
     // Ensure buvid3 fingerprint is available (required to avoid 412)
     const buvid3 = await ensureBuvid3();
-    const params = new URLSearchParams({
+    // B 站分类搜索必须用 WBI 签名接口，`order`(最新/播放量) 在未签名旧链路上常被忽略（与「综合」雷同）
+    const mixinKey = await getOrFetchWbiMixinKey(buvid3);
+    const signedBase: Record<string, string | number> = {
       search_type: "video",
       keyword: kw,
-      page: String(p),
-      page_size: String(pageSize),
+      page: p,
+      page_size: pageSize,
       order: sortOrder.value,
-    });
+      duration: 0,
+      tids: 0,
+    };
     const headers: Record<string, string> = {};
     if (buvid3) headers["x-bili-buvid3"] = buvid3;
-    const resp = await fetch(`/__bili_api/x/web-interface/search/type?${params}`, { headers });
+    let qs = signBiliWbiQuery(signedBase, mixinKey);
+    let resp = await fetch(`/__bili_api/x/web-interface/wbi/search/type?${qs}`, { headers });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const json = await resp.json();
+    let json = await resp.json();
+
+    const needWbiRetry =
+      json?.code === 0 && json?.data?.v_voucher != null && String(json.data.v_voucher).length > 0;
+    if (needWbiRetry) {
+      invalidateBiliWbiCache();
+      qs = signBiliWbiQuery({ ...signedBase, page: p }, await getOrFetchWbiMixinKey(buvid3));
+      resp = await fetch(`/__bili_api/x/web-interface/wbi/search/type?${qs}`, { headers });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      json = await resp.json();
+    }
     if (json.code !== 0) {
       throw new Error(json.message || `API error code ${json.code}`);
     }
     const data = json.data;
+    totalPages.value =
+      typeof data.numPages === "number"
+        ? data.numPages
+        : Math.ceil((Number(data.numResults) || 0) / pageSize);
     const list: BiliVideo[] = (data.result || []).map((item: any) => ({
       aid: item.aid,
       bvid: item.bvid,
@@ -207,7 +212,6 @@ async function search(p = 1) {
     }));
     videos.value = list;
     page.value = p;
-    totalPages.value = Math.ceil((data.numResults || data.numPages * pageSize || 0) / pageSize);
     // Pre-fetch pages info for all videos
     fetchAllVideoPages();
   } catch (e: any) {
@@ -236,13 +240,6 @@ function changeSort(order: SortOrder) {
   sortOrder.value = order;
   // Re-search from page 1 with new sort order
   if (searched.value) search(1);
-}
-
-function changeSubTab(tab: SubTab) {
-  if (subTab.value === tab) return;
-  subTab.value = tab;
-  // Re-search from page 1 with new filter
-  search(1);
 }
 
 function prevPage() {
@@ -413,20 +410,8 @@ function playAudioFile(bvid: string, filename: string) {
       </button>
     </div>
 
-    <!-- Sub-tabs & Sort bar -->
+    <!-- Sort bar -->
     <div v-if="searched" class="filter-row">
-      <div class="sub-tabs">
-        <button
-          v-for="opt in SUB_TAB_OPTIONS"
-          :key="opt.value"
-          type="button"
-          class="sub-tab-btn"
-          :class="{ active: subTab === opt.value }"
-          @click="changeSubTab(opt.value)"
-        >
-          {{ opt.label }}
-        </button>
-      </div>
       <div class="sort-bar">
         <span class="sort-label">排序：</span>
         <button
@@ -450,11 +435,10 @@ function playAudioFile(bvid: string, filename: string) {
       没有找到相关视频，换个关键字试试吧 🎬
     </div>
 
-    <!-- Video grid -->
-    <div v-if="hasResults" class="video-grid">
-      <div v-for="v in videos" :key="v.bvid" class="video-card">
-        <!-- Thumbnail / Player -->
-        <div class="thumb-wrap" @click="togglePlay(v.bvid)">
+    <!-- 与哔哩哔哩搜索一致的横向列表：左封面、右标题与信息 -->
+    <div v-if="hasResults" class="video-results">
+      <article v-for="v in videos" :key="v.bvid" class="video-row">
+        <div class="row-thumb-wrap" @click="togglePlay(v.bvid)">
           <img
             v-if="playingBvid !== v.bvid"
             :src="getThumb(v)"
@@ -490,28 +474,30 @@ function playAudioFile(bvid: string, filename: string) {
             🎵
           </button>
         </div>
-        <!-- Multi-part page dropdown (always visible if multi-page) -->
-        <div v-if="videoPages[v.bvid]?.length > 1" class="page-dropdown-wrap">
-          <select
-            class="page-dropdown"
-            :value="selectedPages[v.bvid] || 1"
-            @change="selectPage(v.bvid, Number(($event.target as HTMLSelectElement).value))"
-          >
-            <option
-              v-for="pg in videoPages[v.bvid]"
-              :key="pg.page"
-              :value="pg.page"
+
+        <div class="row-body">
+          <h3 class="row-title" :title="v.title" @click="openVideo(v.bvid)">{{ v.title }}</h3>
+          <p v-if="v.description.trim()" class="row-desc">{{ v.description }}</p>
+          <p v-if="v.tag.trim()" class="row-tags">{{ v.tag }}</p>
+
+          <div v-if="videoPages[v.bvid]?.length > 1" class="page-dropdown-wrap row-inline-gap">
+            <select
+              class="page-dropdown"
+              :value="selectedPages[v.bvid] || 1"
+              @change="selectPage(v.bvid, Number(($event.target as HTMLSelectElement).value))"
             >
-              P{{ pg.page }} · {{ pg.part }} ({{ formatSeconds(pg.duration) }})
-            </option>
-          </select>
-          <span class="page-dropdown-count">{{ videoPages[v.bvid].length }}P</span>
-        </div>
-        <!-- Info -->
-        <div class="card-info">
-          <h3 class="card-title" :title="v.title" @click="openVideo(v.bvid)">{{ v.title }}</h3>
-          <!-- 音频：仅点击展开时按 BV 查询本机状态，不自动批量拉取 -->
-          <div v-if="F_AUDIO" class="audio-status-row">
+              <option
+                v-for="pg in videoPages[v.bvid]"
+                :key="pg.page"
+                :value="pg.page"
+              >
+                P{{ pg.page }} · {{ pg.part }} ({{ formatSeconds(pg.duration) }})
+              </option>
+            </select>
+            <span class="page-dropdown-count">{{ videoPages[v.bvid].length }}P</span>
+          </div>
+
+          <div v-if="F_AUDIO" class="audio-status-row row-inline-gap">
             <span v-if="audioStatuses[v.bvid]?.extracted" class="audio-badge extracted" title="已提取音频">🎵 已提取</span>
             <span v-if="audioStatuses[v.bvid]?.hasMusic" class="audio-badge music" title="已分割歌曲">
               🎶 {{ audioStatuses[v.bvid].musicFiles.length }} 首歌曲
@@ -549,18 +535,17 @@ function playAudioFile(bvid: string, filename: string) {
               <div v-else class="audio-file-empty">暂无分割歌曲</div>
             </template>
           </div>
-          <div class="card-bottom">
-            <div class="card-author">
-              <span class="author-name">{{ v.author }}</span>
-              <span class="card-date">{{ formatDate(v.pubdate) }}</span>
-            </div>
-            <div class="card-stats">
-              <span class="stat"><svg class="stat-icon" viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z" fill="currentColor"/></svg>{{ formatCount(v.play) }}</span>
-              <span class="stat"><svg class="stat-icon" viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z" fill="currentColor"/></svg>{{ formatCount(v.danmaku) }}</span>
-            </div>
+          <div class="row-meta">
+            <span class="up-name">{{ v.author }}</span>
+            <span class="meta-sep">·</span>
+            <span class="row-date">{{ formatDate(v.pubdate) }}</span>
+            <span class="row-meta-stats">
+              <span class="stat"><svg class="stat-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z" fill="currentColor"/></svg>{{ formatCount(v.play) }}</span>
+              <span class="stat"><svg class="stat-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z" fill="currentColor"/></svg>{{ formatCount(v.danmaku) }}</span>
+            </span>
           </div>
         </div>
-      </div>
+      </article>
     </div>
 
     <!-- Pagination -->
@@ -648,67 +633,43 @@ function playAudioFile(bvid: string, filename: string) {
   opacity: 0.85;
 }
 
-/* ---- Filter row (sub-tabs + sort) ---- */
+/* ---- Sort 行 ---- */
 .filter-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  align-items: flex-end;
   gap: 1rem;
-  margin-bottom: 1rem;
+  padding-bottom: 0.35rem;
+  margin-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
-}
-.sub-tabs {
-  display: flex;
-  gap: 0.35rem;
-}
-.sub-tab-btn {
-  padding: 0.35rem 0.9rem;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--muted);
-  font-size: 0.85rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-.sub-tab-btn:hover {
-  border-color: var(--primary);
-  color: var(--text);
-}
-.sub-tab-btn.active {
-  background: var(--primary);
-  color: var(--on-primary);
-  border-color: var(--primary);
 }
 .sort-bar {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.2rem;
+  flex-wrap: wrap;
 }
 .sort-label {
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   color: var(--muted);
-  margin-right: 0.25rem;
+  margin-right: 0.35rem;
 }
 .sort-btn {
-  padding: 0.3rem 0.75rem;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--surface);
+  padding: 0.3rem 0.55rem;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
   color: var(--muted);
   font-size: 0.82rem;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: color 0.15s;
 }
 .sort-btn:hover {
-  border-color: var(--primary);
   color: var(--text);
 }
 .sort-btn.active {
-  background: var(--primary);
-  color: var(--on-primary);
-  border-color: var(--primary);
+  color: var(--primary);
+  font-weight: 600;
 }
 
 /* ---- Spinner ---- */
@@ -741,33 +702,34 @@ function playAudioFile(bvid: string, filename: string) {
   font-size: 1.1rem;
 }
 
-/* ---- Video grid (bilibili style) ---- */
-.video-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 0.85rem 0.75rem;
+/* ---- B 站式横向搜索结果列表（左封面、右文案，与站内核稿一致） ---- */
+.video-results {
+  background: var(--surface);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.video-row {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  padding: 1rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+}
+.video-row:last-child {
+  border-bottom: none;
 }
 
-.video-card {
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  overflow: visible;
-  transition: transform 0.2s ease;
-}
-.video-card:hover {
-  transform: translateY(-2px);
-}
-
-/* ---- Thumbnail (bilibili style) ---- */
-.thumb-wrap {
+.row-thumb-wrap {
   position: relative;
-  width: 100%;
+  flex-shrink: 0;
+  width: 206px;
+  max-width: 38vw;
   aspect-ratio: 16 / 10;
   background: #1a1a1a;
   cursor: pointer;
   overflow: hidden;
-  border-radius: 8px;
+  border-radius: 6px;
 }
 .thumb {
   width: 100%;
@@ -776,8 +738,8 @@ function playAudioFile(bvid: string, filename: string) {
   display: block;
   transition: transform 0.3s ease;
 }
-.thumb-wrap:hover .thumb {
-  transform: scale(1.06);
+.row-thumb-wrap:hover .thumb {
+  transform: scale(1.05);
 }
 .player-iframe {
   width: 100%;
@@ -796,7 +758,7 @@ function playAudioFile(bvid: string, filename: string) {
   opacity: 0;
   transition: opacity 0.2s;
 }
-.thumb-wrap:hover .play-icon {
+.row-thumb-wrap:hover .play-icon {
   opacity: 1;
 }
 .duration-badge {
@@ -832,24 +794,30 @@ function playAudioFile(bvid: string, filename: string) {
   z-index: 2;
   backdrop-filter: blur(4px);
 }
-.thumb-wrap:hover .extract-overlay-btn,
+.row-thumb-wrap:hover .extract-overlay-btn,
 .extract-overlay-btn.always-show {
   opacity: 1;
 }
 .extract-overlay-btn:hover {
-  background: rgba(0, 161, 214, 0.85);
-  transform: scale(1.1);
+  background: color-mix(in srgb, var(--accent) 88%, black);
+  transform: scale(1.05);
 }
 
-/* ---- Card info (bilibili style) ---- */
-.card-info {
-  padding: 0.5rem 0.15rem 0.25rem;
+.row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
 }
-.card-title {
-  margin: 0 0 0.3rem;
-  font-size: 0.88rem;
+.row-inline-gap {
+  margin-top: 0.25rem;
+}
+.row-title {
+  margin: 0;
+  font-size: 1.02rem;
   font-weight: 500;
-  line-height: 1.4;
+  line-height: 1.45;
   color: var(--text);
   cursor: pointer;
   display: -webkit-box;
@@ -858,40 +826,58 @@ function playAudioFile(bvid: string, filename: string) {
   overflow: hidden;
   transition: color 0.15s;
 }
-.card-title:hover {
+.row-title:hover {
   color: var(--primary);
 }
-.card-bottom {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  margin-top: 0.15rem;
+.row-desc {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
-.card-author {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  min-width: 0;
-}
-.author-name {
+.row-tags {
+  margin: 0;
   font-size: 0.78rem;
   color: var(--muted);
-  white-space: nowrap;
+  opacity: 0.85;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  margin-top: 0.35rem;
+  padding-top: 0.15rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.up-name {
+  color: var(--muted);
+  max-width: 12rem;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 100px;
-}
-.card-date {
-  font-size: 0.72rem;
-  color: var(--muted);
-  opacity: 0.6;
   white-space: nowrap;
 }
-.card-stats {
-  display: flex;
+.meta-sep {
+  opacity: 0.45;
+  user-select: none;
+}
+.row-date {
+  white-space: nowrap;
+}
+.row-meta-stats {
+  margin-left: auto;
+  display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.55rem;
   flex-shrink: 0;
 }
 .stat {
@@ -1126,20 +1112,27 @@ function playAudioFile(bvid: string, filename: string) {
   .bili-panel {
     padding: 0.75rem;
   }
-  .video-grid {
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: 0.5rem;
+  .video-results {
+    border-radius: 6px;
   }
-  .card-title {
-    font-size: 0.8rem;
+  .video-row {
+    flex-direction: column;
+    padding: 0.75rem 0.65rem;
+    gap: 0.65rem;
   }
-  .card-bottom {
+  .row-thumb-wrap {
+    width: 100%;
+    max-width: none;
+  }
+  .row-title {
+    font-size: 0.92rem;
+  }
+  .row-meta {
     flex-direction: column;
     align-items: flex-start;
-    gap: 0.15rem;
   }
-  .author-name {
-    max-width: 80px;
+  .row-meta-stats {
+    margin-left: 0;
   }
   .extract-overlay-btn {
     opacity: 1;
