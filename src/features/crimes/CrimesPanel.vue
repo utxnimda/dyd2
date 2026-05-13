@@ -61,15 +61,17 @@ const currentVoter = ref(localStorage.getItem("crimes_voter") || "");
 const voterDialogOpen = ref(false);
 const voterInput = ref("");
 const descExpanded = ref(false);
+// Track which wishlist row's recommenders dropdown is expanded
+const expandedWishSongId = ref<string | null>(null);
+
+function toggleRecommenders(songId: string) {
+  expandedWishSongId.value = expandedWishSongId.value === songId ? null : songId;
+}
 
 // Sub-tab: "playlist" | "wishlist"
 const subTab = ref<"playlist" | "wishlist">("playlist");
 
-// Currently playing song
-const playingUrl = ref<string | null>(null);
-const playingId = ref<number | null>(null);
-const audioEl = ref<HTMLAudioElement | null>(null);
-const isAudioPaused = ref(true);
+
 
 /* ------------------------------------------------------------------ */
 /*  Computed                                                          */
@@ -234,53 +236,7 @@ function isLocalRecommended(songId: number): boolean {
   return localRecommended.value.has(String(songId));
 }
 
-/* ------------------------------------------------------------------ */
-/*  Playback                                                          */
-/* ------------------------------------------------------------------ */
 
-async function playSong(track: Track) {
-  if (playingId.value === track.id) {
-    if (audioEl.value) {
-      if (audioEl.value.paused) audioEl.value.play();
-      else audioEl.value.pause();
-    }
-    return;
-  }
-
-  // Use backend audio proxy to bypass CORS
-  const proxyUrl = `${API_BASE}/audio-proxy/${track.id}`;
-  playingUrl.value = proxyUrl;
-  playingId.value = track.id;
-  isAudioPaused.value = false;
-  error.value = "";
-
-  // Wait for next tick so <audio> src updates, then play
-  setTimeout(() => {
-    if (audioEl.value) {
-      audioEl.value.load();
-      audioEl.value.play().catch(() => {
-        error.value = "播放失败（可能需要 VIP 或歌曲不可用）";
-        stopPlaying();
-      });
-    }
-  }, 50);
-}
-
-function stopPlaying() {
-  audioEl.value?.pause();
-  playingUrl.value = null;
-  playingId.value = null;
-  isAudioPaused.value = true;
-}
-
-function onAudioPause() { isAudioPaused.value = true; }
-function onAudioPlay() { isAudioPaused.value = false; }
-
-/** Play all from the first track */
-function playAll() {
-  const tracks = filteredTracks.value;
-  if (tracks.length > 0) playSong(tracks[0]);
-}
 
 /* ------------------------------------------------------------------ */
 /*  Voter identity                                                    */
@@ -367,9 +323,6 @@ defineExpose({ reload });
           </button>
         </div>
         <div class="nc-banner-actions">
-          <button class="nc-btn nc-btn--play" @click="playAll">
-            <span class="nc-btn-ico">▶</span> 播放全部
-          </button>
           <button
             class="nc-btn nc-btn--wish"
             @click="subTab = subTab === 'wishlist' ? 'playlist' : 'wishlist'"
@@ -472,21 +425,13 @@ defineExpose({ reload });
         v-for="(track, idx) in filteredTracks"
         :key="track.id"
         class="nc-row"
-        :class="{
-          'nc-row--even': idx % 2 === 0,
-          'nc-row--playing': playingId === track.id,
-        }"
+        :class="{ 'nc-row--even': idx % 2 === 0 }"
       >
-        <!-- Index / playing indicator -->
-        <span class="nc-cell nc-cell-idx">
-          <template v-if="playingId === track.id">
-            <span class="nc-playing-ico" :class="{ paused: isAudioPaused }">♫</span>
-          </template>
-          <template v-else>{{ padIndex(idx + 1) }}</template>
-        </span>
+        <!-- Index -->
+        <span class="nc-cell nc-cell-idx">{{ padIndex(idx + 1) }}</span>
 
         <!-- Title + cover -->
-        <span class="nc-cell nc-cell-title" @click="playSong(track)">
+        <span class="nc-cell nc-cell-title">
           <img :src="track.albumCover + '?param=34y34'" class="nc-row-cover" alt="" />
           <span class="nc-song-name" :title="track.name">{{ track.name }}</span>
         </span>
@@ -528,7 +473,7 @@ defineExpose({ reload });
       <div v-if="wishlistEntries.length === 0" class="nc-wish-empty">
         愿望单为空，去歌单中点 ☆ 推荐歌曲吧
       </div>
-      <div v-else class="nc-table-wrap">
+      <div v-else class="nc-table-wrap nc-wish-table">
         <!-- Sort bar -->
         <div class="nc-sort-bar">
           <span class="nc-sort-label">排序：</span>
@@ -536,62 +481,60 @@ defineExpose({ reload });
           <button :class="{ on: wishlistSort === 'likes' }" @click="wishlistSort = 'likes'">点赞</button>
           <button :class="{ on: wishlistSort === 'alpha' }" @click="wishlistSort = 'alpha'">字母</button>
         </div>
-        <!-- Table header (same layout as playlist) -->
+        <!-- Table header -->
         <div class="nc-table-header">
           <span class="nc-th nc-th-idx"></span>
-          <span class="nc-th nc-th-title">音乐标题</span>
+          <span class="nc-th nc-th-title nc-th-title--no-cover">音乐标题</span>
           <span class="nc-th nc-th-artist">歌手</span>
-          <span class="nc-th nc-th-album">推荐人</span>
           <span class="nc-th nc-th-actions">操作</span>
           <span class="nc-th nc-th-dur">推荐数</span>
         </div>
-        <div
-          v-for="(item, idx) in wishlistEntries"
-          :key="item.songId"
-          class="nc-row"
-          :class="{ 'nc-row--even': idx % 2 === 0 }"
-        >
-          <span class="nc-cell nc-cell-idx">{{ padIndex(idx + 1) }}</span>
-          <span class="nc-cell nc-cell-title">
-            <span class="nc-song-name">{{ item.songName }}</span>
-          </span>
-          <span class="nc-cell nc-cell-artist">{{ item.artist }}</span>
-          <span class="nc-cell nc-cell-album nc-recommenders">
-            <span
-              v-for="(r, ri) in item.recommenders.slice(-5).reverse()"
-              :key="ri"
-              class="nc-recommender-tag"
-              :title="r.at"
-            >{{ r.name }}</span>
-            <span v-if="item.recommenders.length > 5" class="nc-recommender-more">
-              +{{ item.recommenders.length - 5 }}
+        <template v-for="(item, idx) in wishlistEntries" :key="item.songId">
+          <div
+            class="nc-row"
+            :class="{ 'nc-row--even': idx % 2 === 0, 'nc-row--expanded': expandedWishSongId === item.songId }"
+          >
+            <span class="nc-cell nc-cell-idx">{{ padIndex(idx + 1) }}</span>
+            <span class="nc-cell nc-cell-title nc-cell-title--no-cover">
+              <span class="nc-song-name">{{ item.songName }}</span>
             </span>
-          </span>
-          <span class="nc-cell nc-cell-actions">
-            <button
-              class="nc-act-btn nc-act-btn--fixed"
-              :class="{ liked: myVote(Number(item.songId)) === 'like' }"
-              @click.stop="vote(Number(item.songId), myVote(Number(item.songId)) === 'like' ? 'cancel' : 'like')"
-              title="点赞"
+            <span class="nc-cell nc-cell-artist">{{ item.artist }}</span>
+            <span class="nc-cell nc-cell-actions">
+              <button
+                class="nc-act-btn nc-act-btn--fixed"
+                :class="{ liked: myVote(Number(item.songId)) === 'like' }"
+                @click.stop="vote(Number(item.songId), myVote(Number(item.songId)) === 'like' ? 'cancel' : 'like')"
+                title="点赞"
+              >
+                <svg class="nc-ico" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><sup>{{ getVote(Number(item.songId))?.likes || 0 }}</sup>
+              </button>
+            </span>
+            <span
+              class="nc-cell nc-cell-dur nc-recommend-count nc-recommend-clickable"
+              @click="toggleRecommenders(item.songId)"
+              title="点击查看推荐人"
             >
-              <svg class="nc-ico" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><sup>{{ getVote(Number(item.songId))?.likes || 0 }}</sup>
-            </button>
-          </span>
-          <span class="nc-cell nc-cell-dur nc-recommend-count">{{ item.count }}</span>
-        </div>
+              {{ item.count }}
+              <svg class="nc-expand-arrow" :class="{ open: expandedWishSongId === item.songId }" viewBox="0 0 12 12"><path d="M3 5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </span>
+          </div>
+          <!-- Recommenders dropdown panel -->
+          <div v-if="expandedWishSongId === item.songId" class="nc-recs-dropdown">
+            <div class="nc-recs-dropdown-title">推荐人（{{ Math.min(item.recommenders.length, 100) }}/{{ item.recommenders.length }}）</div>
+            <div class="nc-recs-dropdown-list">
+              <span
+                v-for="(r, ri) in item.recommenders.slice(-100).reverse()"
+                :key="ri"
+                class="nc-recommender-tag"
+                :title="r.at"
+              >{{ r.name }}</span>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
 
-    <!-- Hidden audio -->
-    <audio
-      v-if="playingUrl"
-      ref="audioEl"
-      :src="playingUrl"
-      @ended="stopPlaying"
-      @error="stopPlaying"
-      @pause="onAudioPause"
-      @play="onAudioPlay"
-    />
+
 
     <!-- Voter dialog -->
     <div v-if="voterDialogOpen" class="nc-overlay" @click.self="voterDialogOpen = false">
@@ -617,7 +560,7 @@ defineExpose({ reload });
 
 <style scoped>
 /* ================================================================== */
-/*  Netease-inspired dark theme                                       */
+/*  Theme-aware styles using CSS variables                            */
 /* ================================================================== */
 .nc {
   max-width: 980px;
@@ -634,8 +577,8 @@ defineExpose({ reload });
   gap: 1.5rem;
   padding: 1.5rem;
   border-radius: 12px;
-  background: linear-gradient(135deg, #1a1f2e 0%, #141822 100%);
-  border: 1px solid rgba(255,255,255,0.06);
+  background: var(--surface, #1a2332);
+  border: 1px solid var(--border, #2d3a4d);
   margin-bottom: 0;
 }
 
@@ -656,8 +599,8 @@ defineExpose({ reload });
   position: absolute;
   top: 8px;
   right: -6px;
-  background: #ec4141;
-  color: #fff;
+  background: var(--primary, #5c9eff);
+  color: var(--on-primary, #0a1628);
   font-size: 0.65rem;
   padding: 2px 8px;
   border-radius: 2px;
@@ -678,27 +621,27 @@ defineExpose({ reload });
   font-weight: 700;
   margin: 0 0 0.5rem;
   line-height: 1.3;
-  color: #fff;
+  color: var(--text, #e8eef7);
 }
 
 .nc-banner-meta {
   display: flex;
   gap: 1rem;
   font-size: 0.8rem;
-  color: #999;
+  color: var(--muted, #8b9cb3);
   margin-bottom: 0.5rem;
   flex-wrap: wrap;
 }
 
 .nc-meta-link {
-  color: #5eb0e8;
+  color: var(--primary, #5c9eff);
   text-decoration: none;
 }
 .nc-meta-link:hover { text-decoration: underline; }
 
 .nc-banner-desc {
   font-size: 0.8rem;
-  color: #888;
+  color: var(--muted, #8b9cb3);
   line-height: 1.5;
   margin-bottom: 0.75rem;
   position: relative;
@@ -719,7 +662,7 @@ defineExpose({ reload });
 .nc-desc-toggle {
   background: none;
   border: none;
-  color: #5eb0e8;
+  color: var(--primary, #5c9eff);
   cursor: pointer;
   font-size: 0.75rem;
   padding: 0;
@@ -750,10 +693,10 @@ defineExpose({ reload });
 }
 
 .nc-btn--play {
-  background: #ec4141;
-  color: #fff;
+  background: var(--primary, #5c9eff);
+  color: var(--on-primary, #0a1628);
 }
-.nc-btn--play:hover { background: #d63636; }
+.nc-btn--play:hover { opacity: 0.85; }
 .nc-btn--play:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .nc-btn-ico {
@@ -761,23 +704,23 @@ defineExpose({ reload });
 }
 
 .nc-btn--wish {
-  background: rgba(255,255,255,0.08);
-  color: #ccc;
-  border: 1px solid rgba(255,255,255,0.12);
+  background: color-mix(in srgb, var(--surface, #1a2332) 80%, var(--text, #e8eef7) 20%);
+  color: var(--text, #e8eef7);
+  border: 1px solid var(--border, #2d3a4d);
 }
-.nc-btn--wish:hover { background: rgba(255,255,255,0.14); }
+.nc-btn--wish:hover { opacity: 0.85; }
 
 .nc-btn--ghost {
   background: transparent;
-  color: #999;
-  border: 1px solid #444;
+  color: var(--muted, #8b9cb3);
+  border: 1px solid var(--border, #2d3a4d);
 }
-.nc-btn--ghost:hover { border-color: #888; color: #ccc; }
+.nc-btn--ghost:hover { border-color: var(--primary, #5c9eff); color: var(--text, #e8eef7); }
 
 .nc-badge {
   font-size: 0.7rem;
-  background: #ec4141;
-  color: #fff;
+  background: var(--primary, #5c9eff);
+  color: var(--on-primary, #0a1628);
   padding: 1px 6px;
   border-radius: 10px;
   margin-left: 2px;
@@ -786,14 +729,14 @@ defineExpose({ reload });
 .nc-voter-chip {
   padding: 0.4rem 0.8rem;
   border-radius: 20px;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.1);
-  color: #aaa;
+  background: var(--surface, #1a2332);
+  border: 1px solid var(--border, #2d3a4d);
+  color: var(--muted, #8b9cb3);
   font-size: 0.8rem;
   cursor: pointer;
   transition: all 0.15s;
 }
-.nc-voter-chip:hover { background: rgba(255,255,255,0.12); color: #fff; }
+.nc-voter-chip:hover { border-color: var(--primary, #5c9eff); color: var(--text, #e8eef7); }
 
 /* ---- Empty state ---- */
 .nc-empty-state {
@@ -808,12 +751,12 @@ defineExpose({ reload });
 
 .nc-empty-state h2 {
   margin: 0 0 0.5rem;
-  color: #fff;
+  color: var(--text, #e8eef7);
   font-size: 1.4rem;
 }
 
 .nc-empty-state p {
-  color: #888;
+  color: var(--muted, #8b9cb3);
   margin: 0 0 1.5rem;
   font-size: 0.9rem;
 }
@@ -828,19 +771,19 @@ defineExpose({ reload });
 .nc-id-input {
   flex: 1;
   padding: 0.55rem 0.85rem;
-  border: 1px solid #333;
+  border: 1px solid var(--border, #2d3a4d);
   border-radius: 20px;
-  background: #1a1f26;
-  color: #e8eef7;
+  background: var(--bg, #0f1419);
+  color: var(--text, #e8eef7);
   font-size: 0.9rem;
 }
-.nc-id-input:focus { outline: none; border-color: #ec4141; }
+.nc-id-input:focus { outline: none; border-color: var(--primary, #5c9eff); }
 
 /* ---- Loading / Error ---- */
 .nc-loading {
   text-align: center;
   padding: 3rem;
-  color: #888;
+  color: var(--muted, #8b9cb3);
 }
 
 .nc-spinner {
@@ -863,10 +806,10 @@ defineExpose({ reload });
   gap: 0.5rem;
   padding: 0.6rem 1rem;
   margin: 0.75rem 0;
-  background: rgba(231,76,60,0.08);
-  border: 1px solid rgba(231,76,60,0.2);
+  background: color-mix(in srgb, var(--danger, #ff6b6b) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger, #ff6b6b) 20%, transparent);
   border-radius: 6px;
-  color: #e74c3c;
+  color: var(--danger, #ff6b6b);
   font-size: 0.85rem;
 }
 
@@ -884,10 +827,10 @@ defineExpose({ reload });
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem 0;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  border-bottom: 1px solid var(--border, #2d3a4d);
   margin-bottom: 0;
-  gap: 0.75rem;
-  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex-wrap: nowrap;
 }
 
 .nc-sub-tabs {
@@ -896,25 +839,26 @@ defineExpose({ reload });
 }
 
 .nc-sub-tabs button {
-  padding: 0.45rem 1rem;
+  padding: 0.45rem 0.75rem;
   border: none;
   background: transparent;
-  color: #888;
+  color: var(--muted, #8b9cb3);
   cursor: pointer;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   font-weight: 600;
   border-bottom: 2px solid transparent;
   transition: all 0.15s;
+  white-space: nowrap;
 }
 
 .nc-sub-tabs button.on {
-  color: #ec4141;
-  border-bottom-color: #ec4141;
+  color: var(--primary, #5c9eff);
+  border-bottom-color: var(--primary, #5c9eff);
 }
 
 .nc-tab-count {
   font-size: 0.7rem;
-  color: #888;
+  color: var(--muted, #8b9cb3);
   margin-left: 3px;
 }
 
@@ -939,15 +883,16 @@ defineExpose({ reload });
 
 .nc-search-input {
   padding: 0.35rem 0.6rem 0.35rem 1.8rem;
-  border: 1px solid #333;
+  border: 1px solid var(--border, #2d3a4d);
   border-radius: 16px;
-  background: rgba(255,255,255,0.04);
-  color: #ccc;
+  background: var(--bg, #0f1419);
+  color: var(--text, #e8eef7);
   font-size: 0.8rem;
-  width: 160px;
+  width: 180px;
+  min-width: 0;
   transition: width 0.2s;
 }
-.nc-search-input:focus { outline: none; border-color: #555; width: 200px; }
+.nc-search-input:focus { outline: none; border-color: var(--primary, #5c9eff); width: 220px; }
 
 .nc-switch-playlist {
   display: flex;
@@ -956,26 +901,27 @@ defineExpose({ reload });
 
 .nc-switch-input {
   padding: 0.35rem 0.6rem;
-  border: 1px solid #333;
+  border: 1px solid var(--border, #2d3a4d);
   border-radius: 16px 0 0 16px;
-  background: rgba(255,255,255,0.04);
-  color: #ccc;
+  background: var(--bg, #0f1419);
+  color: var(--text, #e8eef7);
   font-size: 0.8rem;
-  width: 90px;
+  width: 100px;
+  min-width: 0;
 }
-.nc-switch-input:focus { outline: none; border-color: #555; }
+.nc-switch-input:focus { outline: none; border-color: var(--primary, #5c9eff); }
 
 .nc-switch-btn {
   padding: 0.35rem 0.6rem;
-  border: 1px solid #333;
+  border: 1px solid var(--border, #2d3a4d);
   border-left: none;
   border-radius: 0 16px 16px 0;
-  background: rgba(255,255,255,0.06);
-  color: #aaa;
+  background: var(--surface, #1a2332);
+  color: var(--muted, #8b9cb3);
   cursor: pointer;
   font-size: 0.85rem;
 }
-.nc-switch-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+.nc-switch-btn:hover { color: var(--text, #e8eef7); }
 
 /* ---- Table ---- */
 .nc-table-wrap {
@@ -988,13 +934,14 @@ defineExpose({ reload });
   align-items: center;
   padding: 0.5rem 0.75rem;
   font-size: 0.75rem;
-  color: #666;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
+  color: var(--muted, #8b9cb3);
+  border-bottom: 1px solid var(--border, #2d3a4d);
   user-select: none;
 }
 
 .nc-th-idx   { width: 40px; text-align: center; flex-shrink: 0; }
 .nc-th-title { flex: 2; min-width: 0; padding-left: calc(34px + 0.6rem); }
+.nc-th-title--no-cover { padding-left: 0.4rem; }
 .nc-th-artist { flex: 1; min-width: 0; }
 .nc-th-album { flex: 1; min-width: 0; }
 .nc-th-actions { width: 100px; text-align: center; flex-shrink: 0; }
@@ -1010,19 +957,11 @@ defineExpose({ reload });
 }
 
 .nc-row--even {
-  background: rgba(255,255,255,0.015);
+  background: color-mix(in srgb, var(--surface, #1a2332) 50%, var(--bg, #0f1419) 50%);
 }
 
 .nc-row:hover {
-  background: rgba(255,255,255,0.05);
-}
-
-.nc-row--playing {
-  background: rgba(236,65,65,0.08) !important;
-}
-
-.nc-row--playing .nc-song-name {
-  color: #ec4141;
+  background: var(--surface, #1a2332);
 }
 
 /* Cells */
@@ -1031,19 +970,7 @@ defineExpose({ reload });
   text-align: center;
   flex-shrink: 0;
   font-size: 0.8rem;
-  color: #555;
-}
-
-.nc-playing-ico {
-  color: #ec4141;
-  font-size: 0.9rem;
-  animation: nc-pulse 1s ease-in-out infinite;
-}
-.nc-playing-ico.paused { animation: none; opacity: 0.5; }
-
-@keyframes nc-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  color: var(--muted, #8b9cb3);
 }
 
 .nc-cell-title {
@@ -1052,7 +979,6 @@ defineExpose({ reload });
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  cursor: pointer;
 }
 
 .nc-row-cover {
@@ -1068,19 +994,19 @@ defineExpose({ reload });
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 0.88rem;
-  color: #e0e0e0;
+  color: var(--text, #e8eef7);
   transition: color 0.15s;
 }
 
 .nc-cell-title:hover .nc-song-name {
-  color: #fff;
+  color: var(--primary, #5c9eff);
 }
 
 .nc-cell-artist {
   flex: 1;
   min-width: 0;
   font-size: 0.8rem;
-  color: #777;
+  color: var(--muted, #8b9cb3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1090,10 +1016,14 @@ defineExpose({ reload });
   flex: 1;
   min-width: 0;
   font-size: 0.8rem;
-  color: #666;
+  color: var(--muted, #8b9cb3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.nc-cell-title--no-cover {
+  padding-left: 0.4rem;
 }
 
 .nc-cell-actions {
@@ -1112,7 +1042,7 @@ defineExpose({ reload });
   padding: 0.15rem 0.35rem;
   font-size: 0.85rem;
   border-radius: 4px;
-  color: #666;
+  color: var(--muted, #8b9cb3);
   transition: all 0.12s;
   position: relative;
 }
@@ -1142,7 +1072,7 @@ defineExpose({ reload });
   stroke: none;
 }
 
-.nc-act-btn:hover { background: rgba(255,255,255,0.08); color: #ccc; }
+.nc-act-btn:hover { background: var(--surface, #1a2332); color: var(--text, #e8eef7); }
 
 .nc-act-btn sup {
   font-size: 0.6rem;
@@ -1151,28 +1081,28 @@ defineExpose({ reload });
   margin-left: 1px;
 }
 
-.nc-act-btn.liked { color: #ec4141; }
-.nc-act-btn.liked .nc-ico { fill: #ec4141; }
-.nc-act-btn.disliked { color: #e74c3c; }
-.nc-act-btn.wished { color: #faad14; }
-.nc-act-btn.wished .nc-ico { fill: #faad14; }
+.nc-act-btn.liked { color: var(--danger, #ff6b6b); }
+.nc-act-btn.liked .nc-ico { fill: var(--danger, #ff6b6b); }
+.nc-act-btn.disliked { color: var(--danger, #ff6b6b); }
+.nc-act-btn.wished { color: var(--accent, #3dd68c); }
+.nc-act-btn.wished .nc-ico { fill: var(--accent, #3dd68c); }
 .nc-act-btn:disabled { cursor: default; }
 
 .nc-act-btn--rm {
   font-size: 0.75rem;
-  color: #e74c3c;
-  border: 1px solid rgba(231,76,60,0.2);
+  color: var(--danger, #ff6b6b);
+  border: 1px solid color-mix(in srgb, var(--danger, #ff6b6b) 20%, transparent);
   border-radius: 10px;
   padding: 0.15rem 0.5rem;
 }
-.nc-act-btn--rm:hover { background: rgba(231,76,60,0.12); }
+.nc-act-btn--rm:hover { background: color-mix(in srgb, var(--danger, #ff6b6b) 12%, transparent); }
 
 .nc-cell-dur {
   width: 56px;
   text-align: right;
   flex-shrink: 0;
   font-size: 0.8rem;
-  color: #555;
+  color: var(--muted, #8b9cb3);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1182,35 +1112,35 @@ defineExpose({ reload });
   align-items: center;
   gap: 0.25rem;
   padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid rgba(255,255,255,0.04);
+  border-bottom: 1px solid var(--border, #2d3a4d);
 }
 
 .nc-sort-label {
   font-size: 0.75rem;
-  color: #666;
+  color: var(--muted, #8b9cb3);
   margin-right: 0.25rem;
 }
 
 .nc-sort-bar button {
   padding: 0.2rem 0.6rem;
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid var(--border, #2d3a4d);
   border-radius: 12px;
   background: transparent;
-  color: #888;
+  color: var(--muted, #8b9cb3);
   font-size: 0.72rem;
   cursor: pointer;
   transition: all 0.12s;
 }
 
 .nc-sort-bar button:hover {
-  background: rgba(255,255,255,0.06);
-  color: #ccc;
+  background: var(--surface, #1a2332);
+  color: var(--text, #e8eef7);
 }
 
 .nc-sort-bar button.on {
-  background: rgba(236,65,65,0.12);
-  border-color: rgba(236,65,65,0.3);
-  color: #ec4141;
+  background: color-mix(in srgb, var(--primary, #5c9eff) 15%, transparent);
+  border-color: color-mix(in srgb, var(--primary, #5c9eff) 40%, transparent);
+  color: var(--primary, #5c9eff);
   font-weight: 600;
 }
 
@@ -1218,7 +1148,7 @@ defineExpose({ reload });
 .nc-wish-empty {
   text-align: center;
   padding: 3rem;
-  color: #666;
+  color: var(--muted, #8b9cb3);
   font-size: 0.9rem;
 }
 
@@ -1234,8 +1164,8 @@ defineExpose({ reload });
 }
 
 .nc-dialog {
-  background: #1a1f26;
-  border: 1px solid #333;
+  background: var(--bg, #0f1419);
+  border: 1px solid var(--border, #2d3a4d);
   border-radius: 12px;
   padding: 1.5rem;
   width: 320px;
@@ -1244,13 +1174,13 @@ defineExpose({ reload });
 
 .nc-dialog h3 {
   margin: 0 0 0.5rem;
-  color: #fff;
+  color: var(--text, #e8eef7);
 }
 
 .nc-dialog p {
   margin: 0 0 1rem;
   font-size: 0.85rem;
-  color: #888;
+  color: var(--muted, #8b9cb3);
 }
 
 .nc-dialog .nc-id-input {
@@ -1266,45 +1196,76 @@ defineExpose({ reload });
   justify-content: flex-end;
 }
 
-/* ---- Wishlist recommenders ---- */
+/* ---- Wishlist recommenders dropdown ---- */
 .nc-recommend-count {
-  color: #ec4141;
+  color: var(--primary, #5c9eff);
   font-weight: 700;
   font-size: 0.85rem;
   font-variant-numeric: tabular-nums;
 }
 
-.nc-cell-album.nc-recommenders {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem;
+.nc-recommend-clickable {
+  cursor: pointer;
+  display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
-  overflow: visible;
-  white-space: normal;
+  gap: 2px;
+  user-select: none;
+  transition: color 0.12s;
 }
 
-.nc-recommenders {
+.nc-recommend-clickable:hover {
+  color: var(--accent, #3dd68c);
+}
+
+.nc-expand-arrow {
+  width: 10px;
+  height: 10px;
+  transition: transform 0.2s;
+  flex-shrink: 0;
+}
+
+.nc-expand-arrow.open {
+  transform: rotate(180deg);
+}
+
+.nc-row--expanded {
+  background: color-mix(in srgb, var(--primary, #5c9eff) 6%, var(--bg, #0f1419) 94%) !important;
+}
+
+.nc-recs-dropdown {
+  padding: 0.6rem 0.75rem 0.6rem calc(40px + 0.75rem);
+  background: color-mix(in srgb, var(--surface, #1a2332) 60%, var(--bg, #0f1419) 40%);
+  border-bottom: 1px solid var(--border, #2d3a4d);
+  animation: nc-slide-down 0.15s ease-out;
+}
+
+@keyframes nc-slide-down {
+  from { opacity: 0; max-height: 0; }
+  to { opacity: 1; max-height: 300px; }
+}
+
+.nc-recs-dropdown-title {
+  font-size: 0.72rem;
+  color: var(--muted, #8b9cb3);
+  margin-bottom: 0.4rem;
+}
+
+.nc-recs-dropdown-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem;
-  align-items: center;
-  justify-content: flex-start;
+  gap: 0.3rem;
+  max-height: 200px;
+  overflow-y: auto;
 }
 
 .nc-recommender-tag {
   display: inline-block;
-  padding: 0.1rem 0.45rem;
+  padding: 0.15rem 0.5rem;
   border-radius: 10px;
-  background: rgba(94, 176, 232, 0.12);
-  color: #5eb0e8;
-  font-size: 0.7rem;
+  background: color-mix(in srgb, var(--primary, #5c9eff) 12%, transparent);
+  color: var(--primary, #5c9eff);
+  font-size: 0.72rem;
   white-space: nowrap;
-}
-
-.nc-recommender-more {
-  font-size: 0.7rem;
-  color: #666;
 }
 
 /* ---- Responsive ---- */
@@ -1316,8 +1277,48 @@ defineExpose({ reload });
   }
   .nc-banner-cover img { width: 140px; height: 140px; }
   .nc-banner-actions { justify-content: center; }
+
+  /* Toolbar: keep tabs + search on one line */
+  .nc-toolbar {
+    flex-wrap: nowrap;
+    gap: 0.3rem;
+    overflow-x: auto;
+  }
+  .nc-sub-tabs { flex-shrink: 0; }
+  .nc-sub-tabs button { padding: 0.35rem 0.5rem; font-size: 0.75rem; }
+  .nc-toolbar-right { flex-shrink: 1; min-width: 0; }
+  .nc-search-input { width: 100px; font-size: 0.72rem; padding-left: 1.5rem; }
+  .nc-search-input:focus { width: 120px; }
+  .nc-search-ico { font-size: 0.65rem; left: 0.4rem; }
+  .nc-switch-input { width: 90px; font-size: 0.72rem; }
+  .nc-switch-btn { font-size: 0.75rem; padding: 0.3rem 0.4rem; }
+
+  /* Playlist: hide album column on mobile */
   .nc-th-album, .nc-cell-album { display: none; }
-  .nc-th-actions, .nc-cell-actions { width: 90px; }
-  .nc-search-input { width: 120px; }
+  .nc-th-actions, .nc-cell-actions { width: 60px; }
+  .nc-act-btn--fixed { min-width: 2.2rem; }
+
+  /* Playlist title: smaller cover offset on mobile */
+  .nc-th-title { padding-left: calc(28px + 0.4rem); }
+  .nc-row-cover { width: 28px; height: 28px; }
+  .nc-cell-title { gap: 0.4rem; }
+  .nc-song-name { font-size: 0.8rem; }
+  .nc-cell-artist { font-size: 0.72rem; }
+  .nc-cell-dur { width: 44px; font-size: 0.72rem; }
+  .nc-cell-idx { width: 28px; font-size: 0.72rem; }
+  .nc-th-idx { width: 28px; }
+  .nc-th-dur { width: 44px; }
+
+  /* Wishlist: no cover offset */
+  .nc-wish-table .nc-th-title--no-cover,
+  .nc-wish-table .nc-cell-title--no-cover { padding-left: 0; }
+
+  /* Sort bar compact */
+  .nc-sort-bar { padding: 0.35rem 0.5rem; }
+  .nc-sort-bar button { font-size: 0.65rem; padding: 0.15rem 0.45rem; }
+  .nc-sort-label { font-size: 0.65rem; }
+
+  /* Dropdown adjust */
+  .nc-recs-dropdown { padding-left: calc(28px + 0.5rem); }
 }
 </style>
