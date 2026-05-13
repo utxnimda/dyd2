@@ -79,6 +79,7 @@ const FEATURE_SERVICES = {
   sanguo: { name: "defense", script: "defense-tower-server", color: "blue" },
   audio: { name: "audio", script: "audio-server", color: "yellow" },
   quota: { name: "quota", script: "quota-server", color: "green" },
+  crimes: { name: "crimes", script: "crimes-server", color: "red" },
   // reactions server is needed by battle/treasury/users/preliminary
   battle: { name: "reactions", script: "reactions-server", color: "cyan" },
   treasury: { name: "reactions", script: "reactions-server", color: "cyan" },

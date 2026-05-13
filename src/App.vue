@@ -71,6 +71,9 @@ const SongLibraryPanel = __FEATURE_AUDIO__
 const GlobalAudioPlayer = __FEATURE_AUDIO__
   ? defineAsyncComponent(() => import("./features/audio/GlobalAudioPlayer.vue"))
   : null;
+const CrimesPanel = __FEATURE_CRIMES__
+  ? defineAsyncComponent(() => import("./features/crimes/CrimesPanel.vue"))
+  : null;
 
 // Feature flags exposed to template (Vite replaces these at build time)
 /** 夜观星象 Tab（可与后台采集分离：__FEATURE_SANGUO__ 仍为 true） */
@@ -82,6 +85,7 @@ const F_PRELIMINARY = __FEATURE_PRELIMINARY__;
 const F_USERS = __FEATURE_USERS__;
 const F_QUOTA = __FEATURE_QUOTA__;
 const F_AUDIO = __FEATURE_AUDIO__;
+const F_CRIMES = __FEATURE_CRIMES__;
 
 // Battle show route — tree-shaken when __FEATURE_BATTLE__ is false
 const formatBattleShowPath = __FEATURE_BATTLE__ ? _fmtBSP : (_?: any) => "";
@@ -146,6 +150,8 @@ function isTabAvailable(t: MainTab): boolean {
       return __FEATURE_QUOTA__;
     case "songs":
       return __FEATURE_AUDIO__;
+    case "crimes":
+      return __FEATURE_CRIMES__;
     default:
       return false;
   }
@@ -240,6 +246,7 @@ const sanguoRef = ref<any>(null);
 const quotaRef = ref<any>(null);
 const songsRef = ref<any>(null);
 const douyuRef = ref<any>(null);
+const crimesRef = ref<any>(null);
 
 /** Reload the currently active panel (shared by onApply / loadActivePanel / tab-switch). */
 function reloadPanel(t: MainTab) {
@@ -251,6 +258,7 @@ function reloadPanel(t: MainTab) {
   if (__FEATURE_QUOTA__ && t === "quota") quotaRef.value?.reload();
   if (__FEATURE_AUDIO__ && t === "songs") songsRef.value?.reload();
   if (__FEATURE_BAOBAO__ && t === "douyu") douyuRef.value?.reload();
+  if (__FEATURE_CRIMES__ && t === "crimes") crimesRef.value?.reload();
 }
 
 async function openTreasuryDetailFromAvatar(memberId: string | number | null | undefined) {
@@ -368,6 +376,7 @@ watch(showBaobao, (visible) => {
     <button v-if="showBaobao" :class="{ on: tab === 'douyu' }" type="button" @click="selectTab('douyu')">遥忆宝章</button>
     <button v-if="F_QUOTA" :class="{ on: tab === 'quota' }" type="button" @click="selectTab('quota')">用量看板</button>
     <button v-if="F_AUDIO" :class="{ on: tab === 'songs' }" type="button" @click="selectTab('songs')">忽闻宝声</button>
+    <button v-if="F_CRIMES" :class="{ on: tab === 'crimes' }" type="button" @click="selectTab('crimes')">细数宝罪</button>
   </nav>
   <main>
     <PreliminaryPanel
@@ -414,6 +423,10 @@ watch(showBaobao, (visible) => {
     <SongLibraryPanel
       v-if="F_AUDIO && SongLibraryPanel && tab === 'songs'"
       ref="songsRef"
+    />
+    <CrimesPanel
+      v-if="F_CRIMES && CrimesPanel && tab === 'crimes'"
+      ref="crimesRef"
     />
   </main>
   <!-- Global floating audio player (always available when audio feature is on) -->

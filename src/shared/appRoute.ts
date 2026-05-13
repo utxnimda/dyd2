@@ -9,7 +9,8 @@ export type MainTab =
   | "baobao"
   | "douyu"
   | "quota"
-  | "songs";
+  | "songs"
+  | "crimes";
 
 export type PrePanelTab = "total" | "nogf" | "perround" | "gf" | "logging";
 
@@ -54,6 +55,7 @@ const TAB_ALIASES: Record<string, MainTab> = {
   library: "songs",
   audio: "sanguo",
   "audio-extractor": "sanguo",
+  crimes: "crimes",
 };
 
 /** Parse location.hash — supports #/pre/gf, #captain-hud (fullscreen), #/battle, #/treasury, etc. */

@@ -96,6 +96,11 @@ if (features.audio) {
   addSimpleProxy("/__fmz_audio", "http://127.0.0.1:8789");
 }
 
+// Crimes server (needed by crimes)
+if (features.crimes) {
+  addSimpleProxy("/__fmz_crimes", "http://127.0.0.1:8790");
+}
+
 // Bilibili API proxy (needed by baobao)
 if (features.baobao) {
   apiProxy["/__bili_api"] = {
@@ -178,6 +183,7 @@ export default defineConfig({
     __FEATURE_PRELIMINARY__: JSON.stringify(!!features.preliminary),
     __FEATURE_USERS__: JSON.stringify(!!features.users),
     __FEATURE_QUOTA__: JSON.stringify(!!features.quota),
+    __FEATURE_CRIMES__: JSON.stringify(!!features.crimes),
   },
   server: {
     /** 显式0.0.0.0：本机局域网请用 http://内网IP:5173，不要用公网 IP（多数路由器不支持回环） */

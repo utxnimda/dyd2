@@ -16,6 +16,7 @@ declare const __FEATURE_TREASURY__: boolean;
 declare const __FEATURE_PRELIMINARY__: boolean;
 declare const __FEATURE_USERS__: boolean;
 declare const __FEATURE_QUOTA__: boolean;
+declare const __FEATURE_CRIMES__: boolean;
 
 declare module "*.jfif" {
   const src: string;

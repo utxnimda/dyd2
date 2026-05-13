@@ -8,12 +8,13 @@
     "sanguoUi": false,
     "baobao": true,
     "audio": true,
-    "audioPlugin": false,
+    "audioPlugin": "local",
     "battle": false,
     "treasury": false,
     "preliminary": false,
     "users": false,
-    "quota": false
+    "quota": "local",
+    "crimes": true
   },
   "type": "module",
   "scripts": {
@@ -23,6 +24,7 @@
     "reactions-server": "npm run start --prefix server",
     "defense-tower-server": "node server/defense-tower-server.mjs",
     "audio-server": "node server/audio-extractor-server.mjs",
+    "crimes-server": "node server/crimes-server.mjs",
     "quota-server": "node server/quota-server.cjs",
     "check:reactions": "node scripts/check-reactions.mjs",
     "pack": "node scripts/bump-patch.mjs && vite build && node scripts/pack-release.mjs",
