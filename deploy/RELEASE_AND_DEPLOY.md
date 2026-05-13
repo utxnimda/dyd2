@@ -109,14 +109,14 @@ git push origin main
 
 - **Web 根目录**：`/var/www/fmz-dashboard/`
 - **上传对象**：优先 **`release/<fmzReleaseLabel>/`** 下的 **`index.html`**、**`assets/`**、（可选）**`BUILD_INFO.txt`**
-- **SSH 私钥（本机路径）**：以 **`deploy/连接服务器与部署步骤.txt`** 为准；当前环境常用 **`D:\nimda1.pem`**（须为下载的 `.pem` 文件，不是控制台里的密钥 ID）。
+- **SSH 私钥（本机路径）**：以 **`deploy/连接服务器与部署步骤.txt`** 为准；当前环境常用 **[YOUR_KEY_PATH]**（须为下载的 `.pem` 文件，不是控制台里的密钥 ID）。
 
 **Windows PowerShell（OpenSSH `scp`）示例：**
 
 ```powershell
 Set-Location "D:\path\to\fmz-dashboard"
 npm run pack
-scp -i "C:\path\to\YOUR_KEY.pem" -o StrictHostKeyChecking=accept-new `
+scp -i "[YOUR_KEY_PATH]" -o StrictHostKeyChecking=accept-new `
   -r .\release\v0.71\assets `
   .\release\v0.71\index.html `
   .\release\v0.71\BUILD_INFO.txt `
@@ -307,9 +307,9 @@ scp -i KEY server/audio-extractor-server.mjs root@SERVER:/opt/fmz-audio-server/
 
 ```powershell
 # 同步所有歌曲数据（含 source.mp3，完整但体积大）
-scp -i "D:\nimda1.pem" -o StrictHostKeyChecking=accept-new `
+scp -i "[YOUR_KEY_PATH]" -o StrictHostKeyChecking=accept-new `
   -r .\server\data\audio\ `
-  root@118.195.150.4:/opt/fmz-audio-server/data/audio/
+  root@[YOUR_SERVER_IP]:/opt/fmz-audio-server/data/audio/
 
 # 仅同步歌曲文件（排除 source.mp3，节省带宽）
 # 需要在服务器上使用 rsync：
@@ -321,9 +321,9 @@ scp -i "D:\nimda1.pem" -o StrictHostKeyChecking=accept-new `
 ```bash
 rsync -avz --progress \
   --exclude='source.*' \
-  -e "ssh -i D:/nimda1.pem" \
+  -e "ssh -i [YOUR_KEY_PATH]" \
   ./server/data/audio/ \
-  root@118.195.150.4:/opt/fmz-audio-server/data/audio/
+  root@[YOUR_SERVER_IP]:/opt/fmz-audio-server/data/audio/
 ```
 
 #### 11.3.3 环境变量
@@ -449,9 +449,9 @@ curl -sk https://www.dianfanbao.net/__fmz_audio/library
 ```bash
 # 增量同步新歌曲（rsync 只传输新增/变更的文件）
 rsync -avz --progress --exclude='source.*' \
-  -e "ssh -i D:/nimda1.pem" \
+-e "ssh -i [YOUR_KEY_PATH]" \
   ./server/data/audio/ \
-  root@118.195.150.4:/opt/fmz-audio-server/data/audio/
+root@[YOUR_SERVER_IP]:/opt/fmz-audio-server/data/audio/
 ```
 
 歌曲库前端会自动从 `/library` API 获取最新列表，无需任何额外操作。
