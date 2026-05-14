@@ -10,7 +10,8 @@ export type MainTab =
   | "douyu"
   | "quota"
   | "songs"
-  | "crimes";
+  | "crimes"
+  | "danmaku";
 
 export type PrePanelTab = "total" | "nogf" | "perround" | "gf" | "logging";
 
@@ -56,6 +57,8 @@ const TAB_ALIASES: Record<string, MainTab> = {
   audio: "sanguo",
   "audio-extractor": "sanguo",
   crimes: "crimes",
+  danmaku: "danmaku",
+  "douyu-danmaku": "danmaku",
 };
 
 /** Parse location.hash — supports #/pre/gf, #captain-hud (fullscreen), #/battle, #/treasury, etc. */

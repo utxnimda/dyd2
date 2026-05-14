@@ -3,8 +3,9 @@
  *
  * Provides APIs for:
  * 1. Fetching Netease Cloud Music playlists
- * 2. Song voting (like/dislike)
- * 3. Wishlist management (recommend songs from playlist)
+ * 2. Fetching QQ Music playlists
+ * 3. Song voting (like/dislike)
+ * 4. Wishlist management (recommend songs from playlist)
  *
  * Usage: node server/crimes-server.mjs
  * Default port: 8790
@@ -30,6 +31,13 @@ const NETEASE_HEADERS = {
   "Referer": "https://music.163.com/",
   "Origin": "https://music.163.com",
   "Content-Type": "application/x-www-form-urlencoded",
+};
+
+// Common headers for QQ Music API requests
+const QQ_MUSIC_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+  "Referer": "https://y.qq.com/",
+  "Origin": "https://y.qq.com",
 };
 
 // Ensure data directory exists
@@ -110,6 +118,63 @@ function loadWishlist() {
 function saveWishlist(wishlist) {
   fs.writeFileSync(WISHLIST_FILE, JSON.stringify(wishlist, null, 2), "utf-8");
 }
+
+/* ------------------------------------------------------------------ */
+/*  Data migration — add platform prefix to old song IDs              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Migrate old data keys from plain songId to "platform:songId" format.
+ * - Pure numeric keys → "netease:xxx" (old data was all from Netease)
+ * - Alphanumeric keys (QQ Music songmid) → "qq:xxx"
+ * - Keys already containing ":" → skip (already migrated)
+ */
+function migrateDataKeys() {
+  let changed = false;
+
+  // Migrate votes
+  const votes = loadVotes();
+  const migratedVotes = {};
+  for (const [key, value] of Object.entries(votes)) {
+    if (key.includes(":")) {
+      migratedVotes[key] = value;
+    } else if (/^\d+$/.test(key)) {
+      migratedVotes[`netease:${key}`] = value;
+      changed = true;
+    } else {
+      // Alphanumeric (QQ Music songmid like "0002zMFX3VfcbE")
+      migratedVotes[`qq:${key}`] = value;
+      changed = true;
+    }
+  }
+  if (changed) {
+    saveVotes(migratedVotes);
+    console.log(`[crimes] Migrated votes: ${Object.keys(votes).length} → ${Object.keys(migratedVotes).length} entries`);
+  }
+
+  // Migrate wishlist
+  changed = false;
+  const wishlist = loadWishlist();
+  const migratedWishlist = {};
+  for (const [key, value] of Object.entries(wishlist)) {
+    if (key.includes(":")) {
+      migratedWishlist[key] = value;
+    } else if (/^\d+$/.test(key)) {
+      migratedWishlist[`netease:${key}`] = value;
+      changed = true;
+    } else {
+      migratedWishlist[`qq:${key}`] = value;
+      changed = true;
+    }
+  }
+  if (changed) {
+    saveWishlist(migratedWishlist);
+    console.log(`[crimes] Migrated wishlist: ${Object.keys(wishlist).length} → ${Object.keys(migratedWishlist).length} entries`);
+  }
+}
+
+// Run migration on startup
+migrateDataKeys();
 
 /* ------------------------------------------------------------------ */
 /*  Netease Cloud Music API helpers                                   */
@@ -269,6 +334,140 @@ async function resolveAudioUrl(songId) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  QQ Music API helpers                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Fetch QQ Music playlist detail using the public FCGI API.
+ * QQ Music uses a different ID system — the disstid (playlist ID).
+ */
+async function fetchQQPlaylistDetail(playlistId) {
+  const cacheFile = path.join(PLAYLISTS_CACHE_DIR, `qq_${playlistId}.json`);
+
+  // Check cache (valid for 10 minutes)
+  if (fs.existsSync(cacheFile)) {
+    const stat = fs.statSync(cacheFile);
+    const ageMs = Date.now() - stat.mtimeMs;
+    if (ageMs < 10 * 60 * 1000) {
+      return JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+    }
+  }
+
+  // Use QQ Music's public FCGI interface
+  const reqData = {
+    comm: {
+      ct: 24,
+      cv: 0,
+    },
+    playlist: {
+      module: "music.srfDissInfo.aiDissInfo",
+      method: "uniform_get_Ede",
+      param: {
+        disstid: Number(playlistId),
+        userinfo: 1,
+        tag: 1,
+      },
+    },
+  };
+
+  const url = `https://u.y.qq.com/cgi-bin/musicu.fcg?data=${encodeURIComponent(JSON.stringify(reqData))}`;
+  console.log(`[crimes] Fetching QQ Music playlist: ${playlistId}`);
+
+  const resp = await fetch(url, { headers: QQ_MUSIC_HEADERS });
+  if (!resp.ok) throw new Error(`QQ Music API error: ${resp.status}`);
+
+  const data = await resp.json();
+  const dissInfo = data?.playlist?.data;
+  if (!dissInfo) {
+    // Try alternative API format
+    return await fetchQQPlaylistDetailAlt(playlistId, cacheFile);
+  }
+
+  const result = buildQQPlaylistResult(dissInfo);
+
+  // Save cache
+  fs.writeFileSync(cacheFile, JSON.stringify(result, null, 2), "utf-8");
+  return result;
+}
+
+/** Alternative QQ Music API (older FCGI endpoint) */
+async function fetchQQPlaylistDetailAlt(playlistId, cacheFile) {
+  const url = `https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg?type=1&json=1&utf8=1&onlysong=0&new_format=1&disstid=${playlistId}&loginUin=0&hostUin=0&format=json&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq.json&needNewCode=0`;
+  console.log(`[crimes] Fetching QQ Music playlist (alt): ${playlistId}`);
+
+  const resp = await fetch(url, {
+    headers: {
+      ...QQ_MUSIC_HEADERS,
+      "Referer": `https://y.qq.com/n/ryqq/playlist/${playlistId}`,
+    },
+  });
+  if (!resp.ok) throw new Error(`QQ Music alt API error: ${resp.status}`);
+
+  const data = await resp.json();
+  const cdlist = data?.cdlist;
+  if (!cdlist || cdlist.length === 0) throw new Error("QQ Music: No playlist data returned");
+
+  const cd = cdlist[0];
+  const result = {
+    id: cd.disstid || playlistId,
+    name: cd.dissname || "QQ音乐歌单",
+    description: cd.desc || "",
+    coverUrl: cd.logo || cd.dir_pic_url2 || "",
+    trackCount: cd.songnum || cd.songlist?.length || 0,
+    playCount: cd.visitnum || 0,
+    source: "qq",
+    tracks: (cd.songlist || []).map((t) => ({
+      id: t.songmid || t.mid || t.id,
+      name: t.songname || t.name || "",
+      artist: (t.singer || []).map((s) => s.name).join(" / "),
+      album: t.albumname || t.album?.name || "",
+      albumCover: t.albummid
+        ? `https://y.qq.com/music/photo_new/T002R300x300M000${t.albummid}.jpg`
+        : "",
+      duration: (t.interval || 0) * 1000, // QQ Music uses seconds, convert to ms
+    })),
+    fetchedAt: new Date().toISOString(),
+  };
+
+  // Save cache
+  if (cacheFile) {
+    fs.writeFileSync(cacheFile, JSON.stringify(result, null, 2), "utf-8");
+  }
+  return result;
+}
+
+/** Build standardized playlist result from QQ Music dissInfo */
+function buildQQPlaylistResult(dissInfo) {
+  const songlist = dissInfo.songlist || dissInfo.songList || [];
+  return {
+    id: dissInfo.disstid || dissInfo.id || "",
+    name: dissInfo.dissname || dissInfo.title || "QQ音乐歌单",
+    description: dissInfo.desc || dissInfo.introduction || "",
+    coverUrl: dissInfo.logo || dissInfo.picurl || dissInfo.dir_pic_url2 || "",
+    trackCount: dissInfo.songnum || dissInfo.total_song_num || songlist.length,
+    playCount: dissInfo.visitnum || dissInfo.visit_num || 0,
+    source: "qq",
+    tracks: songlist.map((t) => {
+      const songInfo = t.songInfo || t;
+      const mid = songInfo.mid || songInfo.songmid || songInfo.id;
+      const singers = songInfo.singer || [];
+      const albumMid = songInfo.album?.mid || songInfo.albummid || "";
+      return {
+        id: mid,
+        name: songInfo.title || songInfo.name || songInfo.songname || "",
+        artist: singers.map((s) => s.name || s.title).join(" / "),
+        album: songInfo.album?.title || songInfo.album?.name || songInfo.albumname || "",
+        albumCover: albumMid
+          ? `https://y.qq.com/music/photo_new/T002R300x300M000${albumMid}.jpg`
+          : "",
+        duration: (songInfo.interval || 0) * 1000,
+      };
+    }),
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /*  HTTP Server                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -292,6 +491,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && playlistMatch) {
       const playlistId = playlistMatch[1];
       const playlist = await fetchPlaylistDetail(playlistId);
+      return json(res, 200, { ok: true, playlist });
+    }
+
+    /* ---- GET /qq-playlist/:id — Fetch QQ Music playlist ---- */
+    const qqPlaylistMatch = pathname.match(/^\/qq-playlist\/([\w]+)$/);
+    if (req.method === "GET" && qqPlaylistMatch) {
+      const playlistId = qqPlaylistMatch[1];
+      const playlist = await fetchQQPlaylistDetail(playlistId);
       return json(res, 200, { ok: true, playlist });
     }
 

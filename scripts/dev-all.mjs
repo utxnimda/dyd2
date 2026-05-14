@@ -80,6 +80,7 @@ const FEATURE_SERVICES = {
   audio: { name: "audio", script: "audio-server", color: "yellow" },
   quota: { name: "quota", script: "quota-server", color: "green" },
   crimes: { name: "crimes", script: "crimes-server", color: "red" },
+  douyuDanmaku: { name: "danmaku", script: "danmaku-server", color: "white" },
   // reactions server is needed by battle/treasury/users/preliminary
   battle: { name: "reactions", script: "reactions-server", color: "cyan" },
   treasury: { name: "reactions", script: "reactions-server", color: "cyan" },

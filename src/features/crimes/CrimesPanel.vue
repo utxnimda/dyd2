@@ -6,7 +6,7 @@ import { ref, computed, onMounted } from "vue";
 /* ------------------------------------------------------------------ */
 
 interface Track {
-  id: number;
+  id: number | string;
   name: string;
   artist: string;
   album: string;
@@ -15,7 +15,7 @@ interface Track {
 }
 
 interface PlaylistInfo {
-  id: number;
+  id: number | string;
   name: string;
   description: string;
   coverUrl: string;
@@ -23,6 +23,7 @@ interface PlaylistInfo {
   playCount: number;
   tracks: Track[];
   fetchedAt: string;
+  source?: "netease" | "qq"; // playlist source platform
 }
 
 interface VoteEntry {
@@ -44,7 +45,11 @@ interface WishlistEntry {
 /* ------------------------------------------------------------------ */
 
 const API_BASE = "/__fmz_crimes";
-const DEFAULT_PLAYLIST_ID = "575852081";
+const DEFAULT_NETEASE_ID = "575852081";
+const DEFAULT_QQ_ID = "9711988130";
+
+// Platform selector: "netease" | "qq"
+const platform = ref<"netease" | "qq">(localStorage.getItem("crimes_platform") as any || "netease");
 
 const loading = ref(false);
 const error = ref("");
@@ -52,9 +57,17 @@ const playlist = ref<PlaylistInfo | null>(null);
 const votes = ref<Record<string, VoteEntry>>({});
 const wishlist = ref<Record<string, WishlistEntry>>({});
 // Local set of song IDs this client has recommended (persisted in localStorage)
-const localRecommended = ref<Set<string>>(new Set(
-  JSON.parse(localStorage.getItem("crimes_recommended") || "[]"),
-));
+// Migrate old plain IDs to platform-prefixed format
+const _rawRecommended: string[] = JSON.parse(localStorage.getItem("crimes_recommended") || "[]");
+const _migratedRecommended = _rawRecommended.map((id) => {
+  if (id.includes(":")) return id; // already qualified
+  if (/^\d+$/.test(id)) return `netease:${id}`;
+  return `qq:${id}`;
+});
+if (_migratedRecommended.some((v, i) => v !== _rawRecommended[i])) {
+  localStorage.setItem("crimes_recommended", JSON.stringify(_migratedRecommended));
+}
+const localRecommended = ref<Set<string>>(new Set(_migratedRecommended));
 const searchQuery = ref("");
 const playlistIdInput = ref("");
 const currentVoter = ref(localStorage.getItem("crimes_voter") || "");
@@ -97,14 +110,14 @@ const filteredTracks = computed(() => {
   // Apply sort
   if (playlistSort.value === "likes") {
     tracks = [...tracks].sort((a, b) => {
-      const la = votes.value[String(a.id)]?.likes || 0;
-      const lb = votes.value[String(b.id)]?.likes || 0;
+      const la = votes.value[qualifiedId(a)]?.likes || 0;
+      const lb = votes.value[qualifiedId(b)]?.likes || 0;
       return lb - la;
     });
   } else if (playlistSort.value === "recommend") {
     tracks = [...tracks].sort((a, b) => {
-      const ra = wishlist.value[String(a.id)]?.count || 0;
-      const rb = wishlist.value[String(b.id)]?.count || 0;
+      const ra = wishlist.value[qualifiedId(a)]?.count || 0;
+      const rb = wishlist.value[qualifiedId(b)]?.count || 0;
       return rb - ra;
     });
   } else if (playlistSort.value === "alpha") {
@@ -135,6 +148,23 @@ const wishlistEntries = computed(() => {
 
 const wishlistCount = computed(() => wishlistEntries.value.length);
 
+/**
+ * Generate a globally unique song ID with platform prefix.
+ * e.g. "netease:575852081" or "qq:12345"
+ */
+function qualifiedId(trackOrId: Track | number | string): string {
+  if (typeof trackOrId === "object" && trackOrId !== null) {
+    const src = playlist.value?.source || "netease";
+    return `${src}:${trackOrId.id}`;
+  }
+  // Already qualified (contains ":")
+  const s = String(trackOrId);
+  if (s.includes(":")) return s;
+  // Fallback: assume current platform
+  const src = playlist.value?.source || "netease";
+  return `${src}:${s}`;
+}
+
 /** Format play count like Netease: 12345 → 1.2万 */
 function formatPlayCount(n: number): string {
   if (n >= 100_000_000) return (n / 100_000_000).toFixed(1) + "亿";
@@ -146,19 +176,56 @@ function formatPlayCount(n: number): string {
 /*  API calls                                                         */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Extract playlist ID from user input.
+ * Supports raw ID or full QQ Music URL.
+ */
+function extractPlaylistId(input: string): string {
+  const trimmed = input.trim();
+  // QQ Music URL patterns
+  const qqUrlMatch = trimmed.match(/y\.qq\.com\/n\/ryqq(?:_v2)?\/playlist\/(\d+)/);
+  if (qqUrlMatch) return qqUrlMatch[1];
+  // Strip "qq:" prefix if present
+  if (/^qq:/i.test(trimmed)) return trimmed.replace(/^qq:/i, "").trim();
+  return trimmed;
+}
+
+function getDefaultId(): string {
+  return platform.value === "qq" ? DEFAULT_QQ_ID : DEFAULT_NETEASE_ID;
+}
+
+function switchPlatform(p: "netease" | "qq") {
+  platform.value = p;
+  localStorage.setItem("crimes_platform", p);
+  // Update input placeholder with default ID
+  playlistIdInput.value = "";
+  // Auto-load default playlist for the new platform
+  loadPlaylist();
+}
+
 async function loadPlaylist(id?: string) {
-  const pid = id || playlistIdInput.value.trim() || DEFAULT_PLAYLIST_ID;
-  if (!pid) {
+  const rawInput = id || playlistIdInput.value.trim() || getDefaultId();
+  if (!rawInput) {
     error.value = "请输入歌单 ID";
     return;
   }
+
+  const pid = extractPlaylistId(rawInput);
+  if (!pid) {
+    error.value = "无法识别歌单 ID";
+    return;
+  }
+
   loading.value = true;
   error.value = "";
   try {
-    const resp = await fetch(`${API_BASE}/playlist/${pid}`);
+    const endpoint = platform.value === "qq" ? `${API_BASE}/qq-playlist/${pid}` : `${API_BASE}/playlist/${pid}`;
+    const resp = await fetch(endpoint);
     if (!resp.ok) throw new Error(`加载失败 (${resp.status})`);
     const data = await resp.json();
     if (!data.ok) throw new Error(data.error || "加载失败");
+    // Mark the source on the playlist
+    data.playlist.source = platform.value;
     playlist.value = data.playlist;
     playlistIdInput.value = pid;
     localStorage.setItem("crimes_playlist_id", pid);
@@ -187,7 +254,7 @@ async function loadWishlist() {
   } catch { /* ignore */ }
 }
 
-async function vote(songId: number, action: "like" | "dislike" | "cancel") {
+async function vote(songId: string, action: "like" | "dislike" | "cancel") {
   if (!currentVoter.value) {
     voterDialogOpen.value = true;
     return;
@@ -200,7 +267,7 @@ async function vote(songId: number, action: "like" | "dislike" | "cancel") {
     });
     const data = await resp.json();
     if (data.ok) {
-      votes.value = { ...votes.value, [String(songId)]: data.song };
+      votes.value = { ...votes.value, [songId]: data.song };
     }
   } catch { /* ignore */ }
 }
@@ -210,12 +277,13 @@ async function addToWishlist(track: Track) {
     voterDialogOpen.value = true;
     return;
   }
+  const qid = qualifiedId(track);
   try {
     const resp = await fetch(`${API_BASE}/wishlist/recommend`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        songId: track.id,
+        songId: qid,
         songName: track.name,
         artist: track.artist,
         recommender: currentVoter.value,
@@ -226,14 +294,14 @@ async function addToWishlist(track: Track) {
       // Update server data
       wishlist.value = { ...wishlist.value, [data.song.songId]: data.song };
       // Mark locally as recommended
-      localRecommended.value = new Set([...localRecommended.value, String(track.id)]);
+      localRecommended.value = new Set([...localRecommended.value, qid]);
       localStorage.setItem("crimes_recommended", JSON.stringify([...localRecommended.value]));
     }
   } catch { /* ignore */ }
 }
 
-function isLocalRecommended(songId: number): boolean {
-  return localRecommended.value.has(String(songId));
+function isLocalRecommended(songId: string): boolean {
+  return localRecommended.value.has(songId);
 }
 
 
@@ -261,11 +329,11 @@ function formatDuration(ms: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-function getVote(songId: number): VoteEntry | null {
-  return votes.value[String(songId)] || null;
+function getVote(songId: string): VoteEntry | null {
+  return votes.value[songId] || null;
 }
 
-function myVote(songId: number): "like" | "dislike" | null {
+function myVote(songId: string): "like" | "dislike" | null {
   const entry = getVote(songId);
   if (!entry || !currentVoter.value) return null;
   return entry.voters[currentVoter.value] || null;
@@ -280,7 +348,7 @@ function padIndex(i: number): string {
 /* ------------------------------------------------------------------ */
 
 onMounted(() => {
-  const savedId = localStorage.getItem("crimes_playlist_id") || DEFAULT_PLAYLIST_ID;
+  const savedId = localStorage.getItem("crimes_playlist_id") || getDefaultId();
   playlistIdInput.value = savedId;
   loadPlaylist(savedId);
   loadVotes();
@@ -301,7 +369,7 @@ defineExpose({ reload });
     <!-- ============ Banner / Playlist Header (Netease style) ============ -->
     <div v-if="playlist" class="nc-banner">
       <div class="nc-banner-cover">
-        <img :src="playlist.coverUrl + '?param=200y200'" alt="cover" />
+        <img :src="playlist.coverUrl + (playlist.source === 'qq' ? '' : '?param=200y200')" alt="cover" />
         <span class="nc-cover-badge">歌单</span>
       </div>
       <div class="nc-banner-info">
@@ -310,6 +378,14 @@ defineExpose({ reload });
           <span class="nc-meta-count">🎵 {{ playlist.trackCount }} 首</span>
           <span class="nc-meta-play">▶ {{ formatPlayCount(playlist.playCount) }}次播放</span>
           <a
+            v-if="playlist.source === 'qq'"
+            class="nc-meta-link"
+            :href="`https://y.qq.com/n/ryqq/playlist/${playlist.id}`"
+            target="_blank"
+            rel="noopener"
+          >↗ QQ音乐打开</a>
+          <a
+            v-else
             class="nc-meta-link"
             :href="`https://music.163.com/#/playlist?id=${playlist.id}`"
             target="_blank"
@@ -340,12 +416,16 @@ defineExpose({ reload });
     <div v-if="!playlist && !loading" class="nc-empty-state">
       <div class="nc-empty-icon">🎵</div>
       <h2>细数宝罪</h2>
-      <p>输入网易云歌单 ID，开始探索</p>
+      <p>选择平台并输入歌单 ID，开始探索</p>
       <div class="nc-id-bar">
+        <select v-model="platform" class="nc-platform-select" @change="playlistIdInput = ''">
+          <option value="netease">🎵 网易云音乐</option>
+          <option value="qq">🎶 QQ音乐</option>
+        </select>
         <input
           v-model="playlistIdInput"
           type="text"
-          :placeholder="`歌单 ID（默认 ${DEFAULT_PLAYLIST_ID}）`"
+          :placeholder="`歌单 ID（默认 ${getDefaultId()}）`"
           class="nc-id-input"
           @keydown.enter="loadPlaylist()"
         />
@@ -387,10 +467,14 @@ defineExpose({ reload });
           />
         </div>
         <div class="nc-switch-playlist">
+          <select v-model="platform" class="nc-platform-sel" @change="switchPlatform(platform)">
+            <option value="netease">🎵 网易云</option>
+            <option value="qq">🎶 QQ</option>
+          </select>
           <input
             v-model="playlistIdInput"
             type="text"
-            placeholder="歌单 ID"
+            :placeholder="platform === 'qq' ? 'QQ歌单ID' : '歌单ID'"
             class="nc-switch-input"
             @keydown.enter="loadPlaylist()"
           />
@@ -414,7 +498,7 @@ defineExpose({ reload });
       <!-- Table header -->
       <div class="nc-table-header">
         <span class="nc-th nc-th-idx"></span>
-        <span class="nc-th nc-th-title">音乐标题</span>
+        <span class="nc-th nc-th-title" :class="{ 'nc-th-title--no-cover': playlist?.source === 'qq' }">音乐标题</span>
         <span class="nc-th nc-th-artist">歌手</span>
         <span class="nc-th nc-th-album">专辑</span>
         <span class="nc-th nc-th-actions">操作</span>
@@ -431,8 +515,8 @@ defineExpose({ reload });
         <span class="nc-cell nc-cell-idx">{{ padIndex(idx + 1) }}</span>
 
         <!-- Title + cover -->
-        <span class="nc-cell nc-cell-title">
-          <img :src="track.albumCover + '?param=34y34'" class="nc-row-cover" alt="" />
+        <span class="nc-cell nc-cell-title" :class="{ 'nc-cell-title--no-cover': playlist?.source === 'qq' }">
+          <img v-if="playlist?.source !== 'qq'" :src="track.albumCover + '?param=34y34'" class="nc-row-cover" alt="" />
           <span class="nc-song-name" :title="track.name">{{ track.name }}</span>
         </span>
 
@@ -446,20 +530,20 @@ defineExpose({ reload });
         <span class="nc-cell nc-cell-actions">
           <button
             class="nc-act-btn nc-act-btn--fixed"
-            :class="{ liked: myVote(track.id) === 'like' }"
-            @click.stop="vote(track.id, myVote(track.id) === 'like' ? 'cancel' : 'like')"
+            :class="{ liked: myVote(qualifiedId(track)) === 'like' }"
+            @click.stop="vote(qualifiedId(track), myVote(qualifiedId(track)) === 'like' ? 'cancel' : 'like')"
             title="点赞"
           >
-            <svg class="nc-ico" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><sup>{{ getVote(track.id)?.likes || 0 }}</sup>
+            <svg class="nc-ico" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><sup>{{ getVote(qualifiedId(track))?.likes || 0 }}</sup>
           </button>
           <button
             class="nc-act-btn nc-act-btn--fixed"
-            :class="{ wished: isLocalRecommended(track.id) }"
+            :class="{ wished: isLocalRecommended(qualifiedId(track)) }"
             @click.stop="addToWishlist(track)"
-            :disabled="isLocalRecommended(track.id)"
+            :disabled="isLocalRecommended(qualifiedId(track))"
             title="推荐到愿望单"
           >
-            <svg class="nc-ico" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><sup>{{ wishlist[String(track.id)]?.count || 0 }}</sup>
+            <svg class="nc-ico" viewBox="0 0 24 24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg><sup>{{ wishlist[qualifiedId(track)]?.count || 0 }}</sup>
           </button>
         </span>
 
@@ -502,11 +586,11 @@ defineExpose({ reload });
             <span class="nc-cell nc-cell-actions">
               <button
                 class="nc-act-btn nc-act-btn--fixed"
-                :class="{ liked: myVote(Number(item.songId)) === 'like' }"
-                @click.stop="vote(Number(item.songId), myVote(Number(item.songId)) === 'like' ? 'cancel' : 'like')"
+                :class="{ liked: myVote(item.songId) === 'like' }"
+                @click.stop="vote(item.songId, myVote(item.songId) === 'like' ? 'cancel' : 'like')"
                 title="点赞"
               >
-                <svg class="nc-ico" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><sup>{{ getVote(Number(item.songId))?.likes || 0 }}</sup>
+                <svg class="nc-ico" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><sup>{{ getVote(item.songId)?.likes || 0 }}</sup>
               </button>
             </span>
             <span
@@ -779,6 +863,44 @@ defineExpose({ reload });
 }
 .nc-id-input:focus { outline: none; border-color: var(--primary, #5c9eff); }
 
+/* Platform selector (empty state) */
+.nc-platform-select {
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--border, #2d3a4d);
+  border-radius: 20px;
+  background: var(--surface, #1a2332);
+  color: var(--text, #e8eef7);
+  font-size: 0.85rem;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238b9cb3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.7rem center;
+  padding-right: 2rem;
+}
+.nc-platform-select:focus { outline: none; border-color: var(--primary, #5c9eff); }
+
+/* Platform selector (toolbar, compact) */
+.nc-platform-sel {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border, #2d3a4d);
+  border-radius: 16px 0 0 16px;
+  background: var(--surface, #1a2332);
+  color: var(--text, #e8eef7);
+  font-size: 0.72rem;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%238b9cb3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.35rem center;
+  padding-right: 1.2rem;
+  border-right: none;
+  white-space: nowrap;
+}
+.nc-platform-sel:focus { outline: none; border-color: var(--primary, #5c9eff); }
+
 /* ---- Loading / Error ---- */
 .nc-loading {
   text-align: center;
@@ -902,12 +1024,13 @@ defineExpose({ reload });
 .nc-switch-input {
   padding: 0.35rem 0.6rem;
   border: 1px solid var(--border, #2d3a4d);
-  border-radius: 16px 0 0 16px;
+  border-radius: 0;
   background: var(--bg, #0f1419);
   color: var(--text, #e8eef7);
   font-size: 0.8rem;
   width: 100px;
   min-width: 0;
+  border-left: none;
 }
 .nc-switch-input:focus { outline: none; border-color: var(--primary, #5c9eff); }
 
@@ -1292,6 +1415,7 @@ defineExpose({ reload });
   .nc-search-ico { font-size: 0.65rem; left: 0.4rem; }
   .nc-switch-input { width: 90px; font-size: 0.72rem; }
   .nc-switch-btn { font-size: 0.75rem; padding: 0.3rem 0.4rem; }
+  .nc-platform-sel { font-size: 0.65rem; padding: 0.25rem 0.3rem; }
 
   /* Playlist: hide album column on mobile */
   .nc-th-album, .nc-cell-album { display: none; }

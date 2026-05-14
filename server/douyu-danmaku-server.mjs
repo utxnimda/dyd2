@@ -1,0 +1,715 @@
+/**
+ * douyu-danmaku-server.mjs
+ * Douyu live room danmaku capture service.
+ *
+ * - Connects to Douyu danmaku server via raw TCP socket (multi-room)
+ * - Implements Douyu STT (Serialized Text Transport) protocol
+ * - Forwards danmaku to frontend via Server-Sent Events (SSE)
+ * - Supports trigger+action configuration for #command style messages
+ * - Password protection for adding/removing rooms
+ *
+ * Port: 8791 (configurable via PORT env)
+ */
+
+import http from "node:http";
+import net from "node:net";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.PORT) || 8791;
+const DATA_DIR = join(__dirname, "data", "danmaku");
+
+if (!existsSync(DATA_DIR)) {
+  mkdirSync(DATA_DIR, { recursive: true });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Password configuration                                           */
+/* ------------------------------------------------------------------ */
+
+const BACKEND_PASSWORD = "lsyysl";
+
+/* ------------------------------------------------------------------ */
+/*  Backend rooms persistence                                         */
+/* ------------------------------------------------------------------ */
+
+const ROOMS_FILE = join(DATA_DIR, "backend-rooms.json");
+
+function loadSavedRooms() {
+  try { if (existsSync(ROOMS_FILE)) return JSON.parse(readFileSync(ROOMS_FILE, "utf-8")); } catch { /* ignore */ }
+  return [];
+}
+function saveRoomsList() {
+  const ids = [...backendRooms.keys()];
+  writeFileSync(ROOMS_FILE, JSON.stringify(ids, null, 2), "utf-8");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Room info cache                                                   */
+/* ------------------------------------------------------------------ */
+
+const roomInfoCache = new Map(); // roomId -> { data, fetchedAt }
+const ROOM_INFO_TTL = 60_000; // 1 minute cache
+
+async function fetchRoomInfo(roomId) {
+  const cached = roomInfoCache.get(roomId);
+  if (cached && Date.now() - cached.fetchedAt < ROOM_INFO_TTL) {
+    return cached.data;
+  }
+  try {
+    const resp = await fetch(`https://www.douyu.com/betard/${roomId}`);
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    const r = json.room;
+    if (!r) return null;
+    const info = {
+      room_id: r.room_id,
+      room_name: (r.room_name || "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">"),
+      owner_name: r.owner_name || "",
+      owner_uid: r.owner_uid || "",
+      show_status: r.show_status, // 1=live, 2=offline
+      game_name: r.game_name || r.cate_name || "",
+      cate_name: r.cate_name || "",
+      online_num: r.online_num || 0,
+      fans_num: r.fans_num || 0,
+      room_thumb: r.room_thumb || "",
+      start_time: r.show_time || 0,
+      avatar: r.avatar?.middle || r.avatar?.small || "",
+    };
+    roomInfoCache.set(roomId, { data: info, fetchedAt: Date.now() });
+    return info;
+  } catch (e) {
+    console.error(`[danmaku] Failed to fetch room info for ${roomId}:`, e.message);
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Danmaku recording (backend mode only)                             */
+/* ------------------------------------------------------------------ */
+
+const RECORD_DIR = join(DATA_DIR, "records");
+if (!existsSync(RECORD_DIR)) mkdirSync(RECORD_DIR, { recursive: true });
+
+/**
+ * Per-room recording state is stored inside each RoomConnection object.
+ */
+function startRecordingForRoom(conn) {
+  const now = new Date();
+  const dateStr = now.toISOString().slice(0, 10);
+  const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, "");
+  const roomDir = join(RECORD_DIR, String(conn.roomId));
+  if (!existsSync(roomDir)) mkdirSync(roomDir, { recursive: true });
+  conn.recordFile = join(roomDir, `${dateStr}_${timeStr}.jsonl`);
+  conn.recordedCount = 0;
+  const header = { _type: "session_start", roomId: conn.roomId, startedAt: now.toISOString(), ts: Date.now() };
+  appendFileSync(conn.recordFile, JSON.stringify(header) + "\n", "utf-8");
+  console.log(`[danmaku-record] Started recording room ${conn.roomId}`);
+}
+
+function stopRecordingForRoom(conn) {
+  if (!conn.recordFile) return;
+  const footer = { _type: "session_end", roomId: conn.roomId, endedAt: new Date().toISOString(), recordedCount: conn.recordedCount, ts: Date.now() };
+  try { appendFileSync(conn.recordFile, JSON.stringify(footer) + "\n", "utf-8"); } catch { /* ignore */ }
+  console.log(`[danmaku-record] Stopped recording room ${conn.roomId}. Total: ${conn.recordedCount}`);
+  conn.recordFile = null;
+  conn.recordedCount = 0;
+}
+
+function recordDanmakuForRoom(conn, danmaku) {
+  if (!conn.recordFile) return;
+  try { appendFileSync(conn.recordFile, JSON.stringify(danmaku) + "\n", "utf-8"); conn.recordedCount++; } catch { /* ignore */ }
+}
+
+function listRecordings(roomId) {
+  const results = [];
+  const rooms = roomId ? [String(roomId)] : (existsSync(RECORD_DIR) ? readdirSync(RECORD_DIR) : []);
+  for (const rid of rooms) {
+    const roomDir = join(RECORD_DIR, rid);
+    if (!existsSync(roomDir)) continue;
+    const files = readdirSync(roomDir).filter(f => f.endsWith(".jsonl")).sort().reverse();
+    for (const f of files) {
+      const match = f.match(/^(\d{4}-\d{2}-\d{2})_(\d{6})\.jsonl$/);
+      if (!match) continue;
+      const filePath = join(roomDir, f);
+      let lineCount = 0; let sessionStart = null; let sessionEnd = null;
+      try {
+        const content = readFileSync(filePath, "utf-8");
+        for (const line of content.trim().split("\n")) {
+          try {
+            const obj = JSON.parse(line);
+            if (obj._type === "session_start") sessionStart = obj;
+            else if (obj._type === "session_end") sessionEnd = obj;
+            else lineCount++;
+          } catch { /* skip */ }
+        }
+      } catch { /* ignore */ }
+      results.push({ roomId: rid, file: f, date: match[1], time: match[2].replace(/(\d{2})(\d{2})(\d{2})/, "$1:$2:$3"), messageCount: lineCount, startedAt: sessionStart?.startedAt || null, endedAt: sessionEnd?.endedAt || null });
+    }
+  }
+  return results;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Trigger + Action configuration persistence                        */
+/* ------------------------------------------------------------------ */
+
+const CONFIG_FILE = join(DATA_DIR, "triggers.json");
+const LOG_FILE = join(DATA_DIR, "action-log.json");
+
+function loadTriggers() {
+  try { if (existsSync(CONFIG_FILE)) return JSON.parse(readFileSync(CONFIG_FILE, "utf-8")); } catch { /* ignore */ }
+  return { triggers: [{ id: "default_cmd", pattern: "#", action: "log", enabled: true, description: "Capture all #command style danmaku and log the content after #" }] };
+}
+
+/** Available action types for triggers */
+const AVAILABLE_ACTIONS = [
+  { id: "log", label: "展示" },
+  { id: "song-request", label: "点歌" },
+];
+function saveTriggers(config) { writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8"); }
+function loadActionLog() { try { if (existsSync(LOG_FILE)) return JSON.parse(readFileSync(LOG_FILE, "utf-8")); } catch { /* ignore */ } return []; }
+function saveActionLog(log) { writeFileSync(LOG_FILE, JSON.stringify(log.slice(-500), null, 2), "utf-8"); }
+
+let triggerConfig = loadTriggers();
+let actionLog = loadActionLog();
+
+/* ------------------------------------------------------------------ */
+/*  Song request tracking — per-room persistent data                  */
+/* ------------------------------------------------------------------ */
+
+const SONG_DIR = join(DATA_DIR, "song-requests");
+if (!existsSync(SONG_DIR)) mkdirSync(SONG_DIR, { recursive: true });
+
+/**
+ * Data files per room:
+ *   <roomId>_timeline.json  — array of { song, artist, ts, uid, nn }
+ *   <roomId>_session.json   — { "song artist": count } (clearable)
+ *   <roomId>_total.json     — { "song artist": count } (permanent)
+ */
+function songFilePath(roomId, suffix) { return join(SONG_DIR, `${roomId}_${suffix}.json`); }
+
+function loadJsonFile(p, fallback) {
+  try { if (existsSync(p)) return JSON.parse(readFileSync(p, "utf-8")); } catch { /* ignore */ }
+  return typeof fallback === "function" ? fallback() : fallback;
+}
+function saveJsonFile(p, data) { writeFileSync(p, JSON.stringify(data, null, 2), "utf-8"); }
+
+function loadTimeline(roomId) { return loadJsonFile(songFilePath(roomId, "timeline"), []); }
+function saveTimeline(roomId, data) { saveJsonFile(songFilePath(roomId, "timeline"), data.slice(-2000)); }
+function loadSessionStats(roomId) { return loadJsonFile(songFilePath(roomId, "session"), {}); }
+function saveSessionStats(roomId, data) { saveJsonFile(songFilePath(roomId, "session"), data); }
+function loadTotalStats(roomId) { return loadJsonFile(songFilePath(roomId, "total"), {}); }
+function saveTotalStats(roomId, data) { saveJsonFile(songFilePath(roomId, "total"), data); }
+
+/**
+ * Parse trigger content: first token = song name, second token = artist.
+ * Record into timeline, session stats, and total stats.
+ */
+function recordSongRequest(roomId, content, danmaku) {
+  const parts = content.trim().split(/\s+/);
+  if (parts.length < 1 || !parts[0]) return null;
+  const song = parts[0];
+  const artist = parts.length >= 2 ? parts[1] : "";
+  // Key: "song artist" if artist provided, otherwise "song" alone
+  const key = artist ? `${song} ${artist}` : song;
+  const ts = Date.now();
+  const requester = { nn: danmaku.nn || "", uid: danmaku.uid || "", ts };
+
+  // Timeline
+  const timeline = loadTimeline(roomId);
+  timeline.push({ song, artist, ts, uid: danmaku.uid || "", nn: danmaku.nn || "" });
+  saveTimeline(roomId, timeline);
+
+  // Session stats (clearable) — stores { count, requesters[] }
+  const session = loadSessionStats(roomId);
+  if (!session[key] || typeof session[key] === "number") {
+    const oldCount = typeof session[key] === "number" ? session[key] : 0;
+    session[key] = { count: oldCount, requesters: [] };
+  }
+  session[key].count++;
+  session[key].requesters.push(requester);
+  saveSessionStats(roomId, session);
+
+  // Total stats (permanent) — stores { count, requesters[] }
+  const total = loadTotalStats(roomId);
+  if (!total[key] || typeof total[key] === "number") {
+    const oldCount = typeof total[key] === "number" ? total[key] : 0;
+    total[key] = { count: oldCount, requesters: [] };
+  }
+  total[key].count++;
+  total[key].requesters.push(requester);
+  // Keep only last 50 requesters in total to avoid unbounded growth
+  if (total[key].requesters.length > 50) total[key].requesters = total[key].requesters.slice(-50);
+  saveTotalStats(roomId, total);
+
+  return { song, artist, key, sessionCount: session[key].count, totalCount: total[key].count, ts, nn: danmaku.nn || "" };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Recent danmaku from recording files                               */
+/* ------------------------------------------------------------------ */
+
+function getRecentDanmaku(roomId, limit = 100) {
+  const roomDir = join(RECORD_DIR, String(roomId));
+  if (!existsSync(roomDir)) return [];
+  const files = readdirSync(roomDir).filter(f => f.endsWith(".jsonl")).sort().reverse();
+  const result = [];
+  for (const f of files) {
+    if (result.length >= limit) break;
+    try {
+      const lines = readFileSync(join(roomDir, f), "utf-8").trim().split("\n");
+      for (let i = lines.length - 1; i >= 0 && result.length < limit; i--) {
+        try {
+          const obj = JSON.parse(lines[i]);
+          if (obj.type === "chatmsg") result.push(obj);
+        } catch { /* skip */ }
+      }
+    } catch { /* ignore */ }
+  }
+  return result.reverse(); // oldest first
+}
+
+/* ------------------------------------------------------------------ */
+/*  Douyu STT protocol helpers                                        */
+/* ------------------------------------------------------------------ */
+
+function encodeDouyuPacket(payload, msgType = 689) {
+  const payloadBuf = Buffer.from(payload + "\0", "utf-8");
+  const headerLen = 4 + 2 + 1 + 1;
+  const totalLen = headerLen + payloadBuf.length;
+  const buf = Buffer.alloc(4 + totalLen);
+  buf.writeUInt32LE(totalLen, 0);
+  buf.writeUInt32LE(totalLen, 4);
+  buf.writeUInt16LE(msgType, 8);
+  buf.writeUInt8(0, 10);
+  buf.writeUInt8(0, 11);
+  payloadBuf.copy(buf, 12);
+  return buf;
+}
+
+function decodeStt(raw) {
+  if (!raw || typeof raw !== "string") return {};
+  const result = {};
+  for (const pair of raw.split("/")) {
+    if (!pair) continue;
+    const idx = pair.indexOf("@=");
+    if (idx === -1) continue;
+    result[pair.substring(0, idx)] = pair.substring(idx + 2).replace(/@S/g, "/").replace(/@A/g, "@");
+  }
+  return result;
+}
+
+function encodeStt(obj) {
+  return Object.entries(obj).map(([k, v]) => `${k}@=${v}`).join("/") + "/";
+}
+
+/* ------------------------------------------------------------------ */
+/*  Multi-room backend connections                                    */
+/* ------------------------------------------------------------------ */
+
+/** @type {Map<string, RoomConnection>} */
+const backendRooms = new Map();
+
+/** Active SSE clients for backend mode */
+const sseClients = new Set();
+
+function broadcastToSSE(event, data) {
+  const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of sseClients) {
+    try { client.write(msg); } catch { sseClients.delete(client); }
+  }
+}
+
+function buildRoomsStatusPayload() {
+  const rooms = [];
+  for (const [rid, conn] of backendRooms) {
+    rooms.push({
+      roomId: rid,
+      status: conn.status,
+      stats: { total: conn.stats.total, triggered: conn.stats.triggered, connected_at: conn.stats.connected_at },
+      recording: !!conn.recordFile,
+      recordedCount: conn.recordedCount,
+    });
+  }
+  return rooms;
+}
+
+function broadcastRoomsStatus() {
+  broadcastToSSE("rooms", buildRoomsStatusPayload());
+}
+
+function processTriggers(danmaku, roomId) {
+  const txt = danmaku.txt || "";
+  for (const trigger of triggerConfig.triggers) {
+    if (!trigger.enabled) continue;
+    if (!txt.startsWith(trigger.pattern)) continue;
+    const content = txt.substring(trigger.pattern.length).trim();
+    if (!content) continue;
+    const conn = backendRooms.get(roomId);
+    if (conn) conn.stats.triggered++;
+    const logEntry = { triggerId: trigger.id, pattern: trigger.pattern, action: trigger.action, content, nickname: danmaku.nn, uid: danmaku.uid, fullText: txt, roomId, ts: Date.now() };
+    if (trigger.action === "log") console.log(`[danmaku-trigger] [${roomId}] ${danmaku.nn}: ${txt} → "${content}"`);
+    actionLog.push(logEntry);
+    if (actionLog.length > 500) actionLog = actionLog.slice(-500);
+    saveActionLog(actionLog);
+    broadcastToSSE("trigger", logEntry);
+
+    // Dispatch action based on trigger type
+    if (trigger.action === "song-request") {
+      const songResult = recordSongRequest(roomId, content, danmaku);
+      if (songResult) {
+        broadcastToSSE("song-request", { roomId, ...songResult });
+      }
+    }
+  }
+}
+
+function connectBackendRoom(roomId) {
+  roomId = String(roomId).trim();
+  if (!roomId || backendRooms.has(roomId)) return;
+
+  const conn = {
+    roomId,
+    status: "connecting",
+    socket: null,
+    heartbeatTimer: null,
+    reconnectTimer: null,
+    recvBuffer: Buffer.alloc(0),
+    stats: { total: 0, triggered: 0, connected_at: null },
+    recordFile: null,
+    recordedCount: 0,
+    wantConnected: true, // flag to control auto-reconnect
+  };
+  backendRooms.set(roomId, conn);
+  saveRoomsList();
+  broadcastRoomsStatus();
+
+  function processMessage(payload) {
+    const msg = decodeStt(payload);
+    if (!msg.type) return;
+    if (msg.type === "chatmsg") {
+      const danmaku = { type: "chatmsg", uid: msg.uid || "", nn: msg.nn || "", txt: msg.txt || "", level: msg.level || "", bnn: msg.bnn || "", bl: msg.bl || "", rid: msg.rid || "", ts: Date.now() };
+      conn.stats.total++;
+      broadcastToSSE("danmaku", { ...danmaku, roomId });
+      recordDanmakuForRoom(conn, danmaku);
+      processTriggers(danmaku, roomId);
+    }
+    if (msg.type === "dgb") broadcastToSSE("gift", { type: "dgb", uid: msg.uid || "", nn: msg.nn || "", gfid: msg.gfid || "", gs: msg.gs || "", roomId, ts: Date.now() });
+    if (msg.type === "uenter") broadcastToSSE("enter", { type: "uenter", uid: msg.uid || "", nn: msg.nn || "", roomId, ts: Date.now() });
+  }
+
+  function onData(chunk) {
+    conn.recvBuffer = Buffer.concat([conn.recvBuffer, chunk]);
+    while (conn.recvBuffer.length >= 12) {
+      const packetLen = conn.recvBuffer.readUInt32LE(0);
+      const totalLen = packetLen + 4;
+      if (conn.recvBuffer.length < totalLen) break;
+      let payload = conn.recvBuffer.subarray(12, totalLen).toString("utf-8");
+      if (payload.endsWith("\0")) payload = payload.slice(0, -1);
+      conn.recvBuffer = conn.recvBuffer.subarray(totalLen);
+      try { processMessage(payload); } catch (err) { console.error(`[danmaku] [${roomId}] Error:`, err.message); }
+    }
+  }
+
+  function doConnect() {
+    conn.status = "connecting";
+    conn.recvBuffer = Buffer.alloc(0);
+    broadcastRoomsStatus();
+    console.log(`[danmaku] Connecting to room ${roomId}...`);
+
+    const socket = net.createConnection({ host: "danmuproxy.douyu.com", port: 8601 });
+
+    socket.on("connect", () => {
+      console.log(`[danmaku] Connected to room ${roomId}`);
+      socket.write(encodeDouyuPacket(encodeStt({ type: "loginreq", room_id: roomId, dfl: "", username: "", uid: "", ver: "20190610", aver: "218101901", ct: "0" })));
+      socket.write(encodeDouyuPacket(encodeStt({ type: "joingroup", rid: roomId, gid: "-9999" })));
+      conn.status = "connected";
+      conn.stats.connected_at = Date.now();
+      conn.heartbeatTimer = setInterval(() => { if (socket && !socket.destroyed) socket.write(encodeDouyuPacket(encodeStt({ type: "mrkl" }))); }, 45_000);
+      startRecordingForRoom(conn);
+      broadcastRoomsStatus();
+    });
+
+    socket.on("data", onData);
+
+    socket.on("error", (err) => {
+      console.error(`[danmaku] [${roomId}] Socket error: ${err.message}`);
+      conn.status = "disconnected";
+      broadcastRoomsStatus();
+    });
+
+    socket.on("close", () => {
+      console.log(`[danmaku] [${roomId}] Socket closed`);
+      if (conn.heartbeatTimer) { clearInterval(conn.heartbeatTimer); conn.heartbeatTimer = null; }
+      stopRecordingForRoom(conn);
+      conn.socket = null;
+      conn.status = "disconnected";
+      broadcastRoomsStatus();
+      if (conn.wantConnected) {
+        console.log(`[danmaku] [${roomId}] Will reconnect in 5s...`);
+        conn.reconnectTimer = setTimeout(() => { if (conn.wantConnected && backendRooms.has(roomId)) doConnect(); }, 5000);
+      }
+    });
+
+    conn.socket = socket;
+  }
+
+  doConnect();
+}
+
+function disconnectBackendRoom(roomId) {
+  const conn = backendRooms.get(roomId);
+  if (!conn) return;
+  conn.wantConnected = false;
+  if (conn.heartbeatTimer) { clearInterval(conn.heartbeatTimer); conn.heartbeatTimer = null; }
+  if (conn.reconnectTimer) { clearTimeout(conn.reconnectTimer); conn.reconnectTimer = null; }
+  stopRecordingForRoom(conn);
+  if (conn.socket) { conn.socket.destroy(); conn.socket = null; }
+  backendRooms.delete(roomId);
+  saveRoomsList();
+  broadcastRoomsStatus();
+  console.log(`[danmaku] Removed room ${roomId}`);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Web capture — per-client TCP connections                          */
+/* ------------------------------------------------------------------ */
+
+function createWebCaptureConnection(roomId, sseRes) {
+  const ctx = { roomId, sseRes, socket: null, heartbeatTimer: null, recvBuffer: Buffer.alloc(0), stats: { total: 0, triggered: 0 }, destroyed: false };
+
+  function sendSSE(event, data) { if (ctx.destroyed) return; try { sseRes.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); } catch { /* ignore */ } }
+
+  function processMessage(payload) {
+    const msg = decodeStt(payload);
+    if (!msg.type) return;
+    if (msg.type === "chatmsg") {
+      const danmaku = { type: "chatmsg", uid: msg.uid || "", nn: msg.nn || "", txt: msg.txt || "", level: msg.level || "", ts: Date.now() };
+      ctx.stats.total++;
+      sendSSE("danmaku", danmaku);
+      const txt = danmaku.txt || "";
+      for (const trigger of triggerConfig.triggers) {
+        if (!trigger.enabled || !txt.startsWith(trigger.pattern)) continue;
+        const content = txt.substring(trigger.pattern.length).trim();
+        if (!content) continue;
+        ctx.stats.triggered++;
+        const logEntry = { triggerId: trigger.id, pattern: trigger.pattern, action: trigger.action, content, nickname: danmaku.nn, uid: danmaku.uid, fullText: txt, ts: Date.now(), source: "web" };
+        if (trigger.action === "log") console.log(`[danmaku-web-trigger] ${danmaku.nn}: ${txt} → "${content}"`);
+        actionLog.push(logEntry);
+        if (actionLog.length > 500) actionLog = actionLog.slice(-500);
+        saveActionLog(actionLog);
+        sendSSE("trigger", logEntry);
+      }
+    }
+  }
+
+  function onData(chunk) {
+    ctx.recvBuffer = Buffer.concat([ctx.recvBuffer, chunk]);
+    while (ctx.recvBuffer.length >= 12) {
+      const packetLen = ctx.recvBuffer.readUInt32LE(0);
+      const totalLen = packetLen + 4;
+      if (ctx.recvBuffer.length < totalLen) break;
+      let payload = ctx.recvBuffer.subarray(12, totalLen).toString("utf-8");
+      if (payload.endsWith("\0")) payload = payload.slice(0, -1);
+      ctx.recvBuffer = ctx.recvBuffer.subarray(totalLen);
+      try { processMessage(payload); } catch { /* ignore */ }
+    }
+  }
+
+  sendSSE("status", { status: "connecting", roomId });
+  const socket = net.createConnection({ host: "danmuproxy.douyu.com", port: 8601 });
+  socket.on("connect", () => {
+    socket.write(encodeDouyuPacket(encodeStt({ type: "loginreq", room_id: roomId, dfl: "", username: "", uid: "", ver: "20190610", aver: "218101901", ct: "0" })));
+    socket.write(encodeDouyuPacket(encodeStt({ type: "joingroup", rid: roomId, gid: "-9999" })));
+    ctx.heartbeatTimer = setInterval(() => { if (socket && !socket.destroyed) socket.write(encodeDouyuPacket(encodeStt({ type: "mrkl" }))); }, 45_000);
+    sendSSE("status", { status: "connected", roomId, stats: ctx.stats });
+  });
+  socket.on("data", onData);
+  socket.on("error", (err) => { sendSSE("status", { status: "error", roomId, error: err.message }); });
+  socket.on("close", () => { if (ctx.heartbeatTimer) { clearInterval(ctx.heartbeatTimer); ctx.heartbeatTimer = null; } if (!ctx.destroyed) sendSSE("status", { status: "disconnected", roomId }); });
+  ctx.socket = socket;
+  return ctx;
+}
+
+function destroyWebCaptureConnection(ctx) {
+  if (ctx.destroyed) return;
+  ctx.destroyed = true;
+  if (ctx.heartbeatTimer) { clearInterval(ctx.heartbeatTimer); ctx.heartbeatTimer = null; }
+  if (ctx.socket) { ctx.socket.destroy(); ctx.socket = null; }
+  ctx.recvBuffer = Buffer.alloc(0);
+}
+
+/* ------------------------------------------------------------------ */
+/*  HTTP server                                                       */
+/* ------------------------------------------------------------------ */
+
+function jsonReply(res, data, status = 200) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, X-Password" });
+  res.end(JSON.stringify(data));
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf-8"))); } catch (e) { reject(e); } });
+    req.on("error", reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  const path = url.pathname;
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, X-Password" });
+    res.end();
+    return;
+  }
+
+  // SSE endpoint — backend mode (multi-room)
+  if (path === "/events" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*" });
+    res.write(`event: rooms\ndata: ${JSON.stringify(buildRoomsStatusPayload())}\n\n`);
+    sseClients.add(res);
+    req.on("close", () => { sseClients.delete(res); });
+    return;
+  }
+
+  // SSE endpoint — web capture (per-client TCP)
+  if (path === "/web-events" && req.method === "GET") {
+    const roomId = url.searchParams.get("roomId");
+    if (!roomId) return jsonReply(res, { error: "roomId required" }, 400);
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*" });
+    const ctx = createWebCaptureConnection(roomId, res);
+    req.on("close", () => { destroyWebCaptureConnection(ctx); });
+    return;
+  }
+
+  // POST /verify-password — verify backend password
+  if (path === "/verify-password" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      return jsonReply(res, { ok: body.password === BACKEND_PASSWORD });
+    } catch { return jsonReply(res, { ok: false }, 400); }
+  }
+
+  // GET /rooms — list all backend rooms
+  if (path === "/rooms" && req.method === "GET") {
+    return jsonReply(res, { ok: true, rooms: buildRoomsStatusPayload() });
+  }
+
+  // POST /rooms — add a backend room (password required)
+  if (path === "/rooms" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      if (body.password !== BACKEND_PASSWORD) return jsonReply(res, { ok: false, error: "密码错误" }, 403);
+      const roomId = String(body.roomId || "").trim();
+      if (!roomId) return jsonReply(res, { ok: false, error: "roomId is required" }, 400);
+      if (backendRooms.has(roomId)) return jsonReply(res, { ok: false, error: "该直播间已在捕捉列表中" }, 409);
+      connectBackendRoom(roomId);
+      return jsonReply(res, { ok: true, roomId });
+    } catch (e) { return jsonReply(res, { ok: false, error: e.message }, 400); }
+  }
+
+  // DELETE /rooms/:roomId — remove a backend room (password required)
+  if (path.startsWith("/rooms/") && req.method === "DELETE") {
+    const roomId = decodeURIComponent(path.substring("/rooms/".length));
+    const pw = req.headers["x-password"] || "";
+    if (pw !== BACKEND_PASSWORD) return jsonReply(res, { ok: false, error: "密码错误" }, 403);
+    if (!backendRooms.has(roomId)) return jsonReply(res, { ok: false, error: "Room not found" }, 404);
+    disconnectBackendRoom(roomId);
+    return jsonReply(res, { ok: true });
+  }
+
+  // GET /status — overall status
+  if (path === "/status" && req.method === "GET") {
+    return jsonReply(res, { ok: true, rooms: buildRoomsStatusPayload(), sseClients: sseClients.size });
+  }
+
+  // GET /room-info/:roomId
+  if (path.startsWith("/room-info/") && req.method === "GET") {
+    const rid = path.substring("/room-info/".length);
+    const info = await fetchRoomInfo(rid);
+    if (!info) return jsonReply(res, { ok: false, error: "Failed to fetch room info" }, 502);
+    return jsonReply(res, { ok: true, info });
+  }
+
+  // GET /recordings
+  if (path === "/recordings" && req.method === "GET") {
+    return jsonReply(res, { ok: true, recordings: listRecordings(url.searchParams.get("roomId") || null) });
+  }
+
+  // GET /trigger-actions — list available action types
+  if (path === "/trigger-actions" && req.method === "GET") {
+    return jsonReply(res, { ok: true, actions: AVAILABLE_ACTIONS });
+  }
+
+  // --- Triggers ---
+  if (path === "/triggers" && req.method === "GET") return jsonReply(res, { ok: true, triggers: triggerConfig.triggers });
+  if (path === "/triggers" && req.method === "PUT") {
+    try { const body = await readBody(req); if (!Array.isArray(body.triggers)) return jsonReply(res, { ok: false, error: "triggers array required" }, 400); triggerConfig.triggers = body.triggers; saveTriggers(triggerConfig); return jsonReply(res, { ok: true, triggers: triggerConfig.triggers }); } catch (e) { return jsonReply(res, { ok: false, error: e.message }, 400); }
+  }
+  if (path === "/triggers" && req.method === "POST") {
+    try { const body = await readBody(req); const trigger = { id: body.id || `trigger_${Date.now()}`, pattern: body.pattern || "#", action: body.action || "log", enabled: body.enabled !== false, description: body.description || "" }; triggerConfig.triggers.push(trigger); saveTriggers(triggerConfig); return jsonReply(res, { ok: true, trigger }); } catch (e) { return jsonReply(res, { ok: false, error: e.message }, 400); }
+  }
+  if (path.startsWith("/triggers/") && req.method === "DELETE") {
+    const id = path.substring("/triggers/".length);
+    const idx = triggerConfig.triggers.findIndex((t) => t.id === id);
+    if (idx === -1) return jsonReply(res, { ok: false, error: "Not found" }, 404);
+    triggerConfig.triggers.splice(idx, 1); saveTriggers(triggerConfig); return jsonReply(res, { ok: true });
+  }
+
+  // --- Action log ---
+  if (path === "/action-log" && req.method === "GET") {
+    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 50));
+    return jsonReply(res, { ok: true, log: actionLog.slice(-limit).reverse(), total: actionLog.length });
+  }
+  if (path === "/action-log/clear" && req.method === "POST") { actionLog = []; saveActionLog(actionLog); return jsonReply(res, { ok: true }); }
+
+  // --- Recent danmaku ---
+  if (path.startsWith("/recent-danmaku/") && req.method === "GET") {
+    const rid = decodeURIComponent(path.substring("/recent-danmaku/".length));
+    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 100));
+    return jsonReply(res, { ok: true, messages: getRecentDanmaku(rid, limit) });
+  }
+
+  // --- Song requests ---
+  // GET /song-requests/:roomId — get all song request data
+  if (path.startsWith("/song-requests/") && !path.includes("/clear") && req.method === "GET") {
+    const rid = decodeURIComponent(path.substring("/song-requests/".length));
+    return jsonReply(res, {
+      ok: true,
+      roomId: rid,
+      timeline: loadTimeline(rid),
+      session: loadSessionStats(rid),
+      total: loadTotalStats(rid),
+    });
+  }
+  // POST /song-requests/:roomId/clear-session — clear session stats only
+  if (path.match(/^\/song-requests\/[^/]+\/clear-session$/) && req.method === "POST") {
+    const rid = decodeURIComponent(path.split("/")[2]);
+    saveSessionStats(rid, {});
+    // Also clear timeline for current session view
+    saveTimeline(rid, []);
+    return jsonReply(res, { ok: true });
+  }
+
+  jsonReply(res, { error: "Not found" }, 404);
+});
+
+server.listen(PORT, () => {
+  console.log(`[douyu-danmaku] Server listening on http://127.0.0.1:${PORT}`);
+
+  // Auto-reconnect saved backend rooms on startup
+  const savedRooms = loadSavedRooms();
+  if (savedRooms.length > 0) {
+    console.log(`[danmaku] Restoring ${savedRooms.length} saved room(s): ${savedRooms.join(", ")}`);
+    for (const rid of savedRooms) {
+      connectBackendRoom(rid);
+    }
+  }
+});
