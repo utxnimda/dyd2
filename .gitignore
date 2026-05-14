@@ -3,4 +3,6 @@ dist/
 node_modules/
 test-results/
 .env*
-__pycache__/ 
+__pycache__/
+*.log
+_dgb_*

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                             */
@@ -9,6 +9,7 @@ interface DanmakuMsg { type: string; uid: string; nn: string; txt: string; level
 interface TriggerConfig { id: string; pattern: string; action: string; enabled: boolean; description: string; roomIds?: string[]; }
 interface TriggerLogEntry { triggerId: string; pattern: string; action: string; content: string; nickname: string; uid: string; fullText: string; ts: number; source?: string; roomId?: string; }
 interface RoomInfo { room_id: number; room_name: string; owner_name: string; owner_uid: string | number; show_status: number; game_name: string; cate_name: string; online_num: number; fans_num: number; room_thumb: string; start_time: number; avatar: string; }
+interface GiftMsg { type?: string; uid?: string; nn?: string; gfid?: string; gfcnt?: string; hits?: string; gs?: string; bg?: string; bnn?: string; bl?: string; brid?: string; level?: string; ic?: string; rid?: string; roomId: string; ts: number; [key: string]: unknown; }
 interface BackendRoomStatus { roomId: string; status: string; stats: { total: number; triggered: number; connected_at: number | null }; recording: boolean; recordedCount: number; info?: RoomInfo | null; }
 
 
@@ -49,6 +50,83 @@ const backendError = ref("");
 const triggers = ref<TriggerConfig[]>([]);
 const triggerLog = ref<TriggerLogEntry[]>([]);
 let eventSource: EventSource | null = null;
+
+// Gift panel
+const showGiftPanel = ref(false);
+const giftList = ref<GiftMsg[]>([]);
+const giftAutoScroll = ref(true);
+const giftFeedRef = ref<HTMLElement | null>(null);
+const MAX_GIFT = 300;
+// Gift panel ratio: 0 (hidden) to 0.95 (max, never exceeds danmaku width)
+const giftPanelRatio = ref(0.33);
+const GIFT_RATIO_STEP = 0.1;
+const GIFT_RATIO_MIN = 0;
+const GIFT_RATIO_MAX = 0.95;
+function giftPanelWider() { giftPanelRatio.value = Math.min(GIFT_RATIO_MAX, +(giftPanelRatio.value + GIFT_RATIO_STEP).toFixed(2)); }
+function giftPanelNarrower() {
+  const next = +(giftPanelRatio.value - GIFT_RATIO_STEP).toFixed(2);
+  if (next <= 0.05) { giftPanelRatio.value = 0; showGiftPanel.value = false; }
+  else { giftPanelRatio.value = next; }
+}
+// Mobile: height ratio for vertical layout
+const giftPanelHeight = ref(200); // px
+const GIFT_HEIGHT_STEP = 50;
+const GIFT_HEIGHT_MIN = 80;
+const GIFT_HEIGHT_MAX = 500;
+function giftPanelTaller() { giftPanelHeight.value = Math.min(GIFT_HEIGHT_MAX, giftPanelHeight.value + GIFT_HEIGHT_STEP); }
+function giftPanelShorter() {
+  const next = giftPanelHeight.value - GIFT_HEIGHT_STEP;
+  if (next < GIFT_HEIGHT_MIN) { giftPanelHeight.value = GIFT_HEIGHT_MIN; showGiftPanel.value = false; }
+  else { giftPanelHeight.value = next; }
+}
+const isMobile = ref(window.innerWidth <= 600);
+if (typeof window !== 'undefined') {
+  window.addEventListener('resize', () => { isMobile.value = window.innerWidth <= 600; });
+}
+
+// Gift info mapping (loaded from Douyu API per room)
+interface GiftInfo { name: string; icon: string; cost: number; value: number; }
+const giftInfoMap = ref<Record<string, GiftInfo>>({});
+const giftInfoLoading = ref(false);
+
+// Fallback well-known gift names (used when API unavailable)
+const GIFT_NAMES_FALLBACK: Record<string, string> = {
+  "1": "鱼丸", "2": "鱼翅", "268": "赞", "519": "呵呵", "520": "稳",
+  "824": "火箭", "380": "超级火箭", "750": "办卡", "195": "飞机", "196": "跑车",
+  "4": "鱼雷", "6": "飞吻", "3": "弱鸡", "714": "怦然心动", "713": "告白",
+};
+function giftName(gfid: string): string {
+  const info = giftInfoMap.value[gfid];
+  if (info) return info.name;
+  return GIFT_NAMES_FALLBACK[gfid] || `#${gfid}`;
+}
+function giftIcon(gfid: string): string {
+  return giftInfoMap.value[gfid]?.icon || "";
+}
+async function loadGiftInfoForRoom(rid: string) {
+  giftInfoLoading.value = true;
+  try {
+    const d = await (await fetch(`${API}/gift-list/${encodeURIComponent(rid)}`)).json();
+    if (d.ok && d.gifts) giftInfoMap.value = d.gifts;
+  } catch { /* */ }
+  giftInfoLoading.value = false;
+}
+
+// Badge (fan medal) avatar cache: brid -> avatar URL
+const badgeAvatarCache = ref<Record<string, string>>({});
+async function loadBadgeAvatar(brid: string) {
+  if (!brid || badgeAvatarCache.value[brid] !== undefined) return;
+  badgeAvatarCache.value[brid] = ""; // mark as loading
+  try {
+    const d = await (await fetch(`${API}/badge-avatar/${encodeURIComponent(brid)}`)).json();
+    if (d.ok && d.avatar) badgeAvatarCache.value[brid] = d.avatar;
+  } catch { /* */ }
+}
+function badgeAvatar(brid: string): string {
+  if (!brid) return "";
+  if (badgeAvatarCache.value[brid] === undefined) loadBadgeAvatar(brid);
+  return badgeAvatarCache.value[brid] || "";
+}
 
 // Song request panel
 const showSongPanel = ref(false);
@@ -217,6 +295,16 @@ function connectSSE() {
     } catch { /* */ }
   });
   es.addEventListener("trigger", (e) => { try { const entry: TriggerLogEntry = JSON.parse(e.data); if (backendSelectedRoom.value && entry.roomId === backendSelectedRoom.value) { triggerLog.value.unshift(entry); if (triggerLog.value.length > 200) triggerLog.value = triggerLog.value.slice(0, 200); } } catch { /* */ } });
+  es.addEventListener("gift", (e) => {
+    try {
+      const msg: GiftMsg = JSON.parse(e.data);
+      if (backendSelectedRoom.value && msg.roomId === backendSelectedRoom.value) {
+        giftList.value.push(msg);
+        if (giftList.value.length > MAX_GIFT) giftList.value = giftList.value.slice(-MAX_GIFT);
+        if (giftAutoScroll.value) nextTick(() => scrollEl(giftFeedRef.value));
+      }
+    } catch { /* */ }
+  });
   es.addEventListener("song-request", (e) => {
     try {
       const d = JSON.parse(e.data);
@@ -264,6 +352,7 @@ async function backendRemoveRoom(rid: string) {
     const first = backendRooms.value.length > 0 ? backendRooms.value[0].roomId : null;
     backendSelectedRoom.value = first;
     backendDanmakuList.value = [];
+    giftList.value = [];
     if (first) onBackendRoomSelect(first);
   }
 }
@@ -272,15 +361,117 @@ async function onBackendRoomSelect(rid: string) {
   backendSelectedRoom.value = rid;
   backendDanmakuList.value = [];
   triggerLog.value = [];
+  giftList.value = [];
   // Load recent 100 danmaku from recording
   const msgs = await loadRecentDanmaku(rid);
   backendDanmakuList.value = msgs;
   nextTick(() => scrollEl(backendFeedRef.value));
   // Reload action log for this room
   loadActionLog();
+  // Load gifts for this room
+  loadGiftsForRoom(rid);
+  // Load gift info (names + icons) from Douyu API
+  loadGiftInfoForRoom(rid);
   // Fetch room info if missing
   const r = backendRooms.value.find(x => x.roomId === rid);
   if (r && !r.info) fetchRoomInfo(rid).then(info => { r.info = info; });
+}
+
+/* ------------------------------------------------------------------ */
+/*  Gift API                                                          */
+/* ------------------------------------------------------------------ */
+
+// Gift panel sub-tabs
+type GiftSubTab = 'records' | 'stats';
+const giftSubTab = ref<GiftSubTab>('records');
+
+// Gift stats
+type GiftStatsRange = 'today' | 'week' | '7days' | 'month' | '30days';
+const GIFT_STATS_RANGES: { label: string; value: GiftStatsRange }[] = [
+  { label: '今天', value: 'today' },
+  { label: '本周', value: 'week' },
+  { label: '近7天', value: '7days' },
+  { label: '本月', value: 'month' },
+  { label: '近30天', value: '30days' },
+];
+const giftStatsRange = ref<GiftStatsRange>('today');
+interface GiftStatsData {
+  totalValue: number;
+  totalCount: number;
+  byGift: Record<string, { count: number }>;
+  byUser: Record<string, { nn: string; count: number; gifts: Record<string, number> }>;
+}
+const giftStats = ref<GiftStatsData | null>(null);
+const giftStatsLoading = ref(false);
+
+async function loadGiftStats(rid: string, range: GiftStatsRange) {
+  giftStatsLoading.value = true;
+  try {
+    const d = await (await fetch(`${API}/gifts/${encodeURIComponent(rid)}/stats?range=${range}`)).json();
+    if (d.ok) giftStats.value = d.stats;
+  } catch { /* */ }
+  giftStatsLoading.value = false;
+}
+
+// Computed: sorted gift stats by value desc (value = contribution)
+const giftStatsByGiftSorted = computed(() => {
+  if (!giftStats.value) return [];
+  return Object.entries(giftStats.value.byGift)
+    .map(([gfid, v]) => {
+      const info = giftInfoMap.value[gfid];
+      return {
+        gfid, count: v.count, name: giftName(gfid), icon: giftIcon(gfid),
+        cost: (info?.cost || 0), value: (info?.value || 0),
+      };
+    })
+    .sort((a, b) => (b.value * b.count) - (a.value * a.count));
+});
+const giftStatsByUserSorted = computed(() => {
+  if (!giftStats.value) return [];
+  return Object.entries(giftStats.value.byUser)
+    .map(([uid, v]) => ({ uid, nn: v.nn, count: v.count, gifts: v.gifts }))
+    .sort((a, b) => b.count - a.count);
+});
+// Total cost (开销) and total value (价值) in 元
+const giftStatsTotalCost = computed(() => {
+  if (!giftStats.value) return 0;
+  let total = 0;
+  for (const [gfid, v] of Object.entries(giftStats.value.byGift)) {
+    const cost = giftInfoMap.value[gfid]?.cost || 0;
+    total += cost * v.count;
+  }
+  return total / 10; // 10鱼翅=1元
+});
+const giftStatsTotalValue = computed(() => {
+  if (!giftStats.value) return 0;
+  let total = 0;
+  for (const [gfid, v] of Object.entries(giftStats.value.byGift)) {
+    const value = giftInfoMap.value[gfid]?.value || 0;
+    total += value * v.count;
+  }
+  return total / 10; // 10贡献=1元
+});
+
+// Watch range change to reload stats
+watch(giftStatsRange, (r) => {
+  const rid = backendSelectedRoom.value;
+  if (rid && giftSubTab.value === 'stats') loadGiftStats(rid, r);
+});
+watch(giftSubTab, (tab) => {
+  const rid = backendSelectedRoom.value;
+  if (rid && tab === 'stats') loadGiftStats(rid, giftStatsRange.value);
+});
+
+async function loadGiftsForRoom(rid: string) {
+  try {
+    const d = await (await fetch(`${API}/gifts/${encodeURIComponent(rid)}?limit=200`)).json();
+    if (d.ok) { giftList.value = d.gifts; nextTick(() => scrollEl(giftFeedRef.value)); }
+  } catch { /* */ }
+}
+async function clearGiftsForRoom() {
+  const rid = backendSelectedRoom.value;
+  if (!rid) return;
+  try { await fetch(`${API}/gifts/${encodeURIComponent(rid)}/clear`, { method: "POST" }); giftList.value = []; } catch { /* */ }
 }
 
 /* ------------------------------------------------------------------ */
@@ -399,10 +590,116 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
           <div class="dm-feed-toolbar">
             <label class="dm-check"><input v-model="backendAutoScroll" type="checkbox" /> 自动滚动</label>
             <button class="dm-btn dm-btn--ghost dm-btn--sm" @click="backendDanmakuList = []">清空</button>
+            <span style="flex:1"></span>
+            <button class="dm-btn dm-btn--sm" :class="showGiftPanel ? 'dm-btn--primary' : 'dm-btn--ghost'" @click="showGiftPanel = !showGiftPanel">🎁 礼物 <sup v-if="giftList.length" class="dm-badge">{{ giftList.length }}</sup></button>
           </div>
-          <div ref="backendFeedRef" class="dm-feed">
-            <div v-if="backendDanmakuList.length === 0" class="dm-empty">{{ backendRooms.length === 0 ? '请添加直播间' : '点击直播间加载弹幕' }}</div>
-            <div v-for="(msg, idx) in backendDanmakuList" :key="idx" class="dm-msg" :class="{ 'dm-msg--cmd': msg.txt.startsWith('#') }"><span class="dm-time">{{ formatTime(msg.ts) }}</span><span class="dm-nick">{{ msg.nn }}</span><span class="dm-txt">{{ msg.txt }}</span></div>
+          <div class="dm-feed-split" :class="{ 'dm-feed-split--open': showGiftPanel, 'dm-feed-split--mobile': isMobile }" :style="showGiftPanel ? (isMobile ? { '--gift-height': giftPanelHeight + 'px' } : { '--gift-ratio': String(giftPanelRatio) }) : {}">
+            <!-- Left: danmaku feed -->
+            <div class="dm-feed-left">
+              <div ref="backendFeedRef" class="dm-feed">
+                <div v-if="backendDanmakuList.length === 0" class="dm-empty">{{ backendRooms.length === 0 ? '请添加直播间' : '点击直播间加载弹幕' }}</div>
+                <div v-for="(msg, idx) in backendDanmakuList" :key="idx" class="dm-msg" :class="{ 'dm-msg--cmd': msg.txt.startsWith('#') }"><span class="dm-time">{{ formatTime(msg.ts) }}</span><span class="dm-nick">{{ msg.nn }}</span><span class="dm-txt">{{ msg.txt }}</span></div>
+              </div>
+            </div>
+            <!-- Right: gift panel -->
+            <div v-if="showGiftPanel" class="dm-feed-right">
+              <div class="dm-gift-panel">
+                <div class="dm-gift-header">
+                  <div class="dm-gift-header-row1">
+                    <span class="dm-gift-header-icon">🎁</span>
+                    <nav class="dm-gift-tabs">
+                      <button :class="{ active: giftSubTab === 'records' }" @click="giftSubTab = 'records'">记录</button>
+                      <button :class="{ active: giftSubTab === 'stats' }" @click="giftSubTab = 'stats'">统计</button>
+                    </nav>
+                    <span style="flex:1"></span>
+                    <div class="dm-gift-size-group">
+                      <button class="dm-gift-size-btn" @click="isMobile ? giftPanelShorter() : giftPanelNarrower()" :title="isMobile ? '变矮' : '变窄'">{{ isMobile ? '▲' : '◀' }}</button>
+                      <button class="dm-gift-size-btn" @click="isMobile ? giftPanelTaller() : giftPanelWider()" :title="isMobile ? '变高' : '变宽'">{{ isMobile ? '▼' : '▶' }}</button>
+                    </div>
+                  </div>
+                  <!-- Records sub-header -->
+                  <div v-if="giftSubTab === 'records'" class="dm-gift-header-row2">
+                    <span v-if="giftList.length > 0" class="dm-gift-count">{{ giftList.length }}条</span>
+                    <span style="flex:1"></span>
+                    <button v-if="giftList.length > 0" class="dm-btn dm-btn--ghost dm-btn--xs" @click="clearGiftsForRoom">清空</button>
+                    <button class="dm-btn dm-btn--ghost dm-btn--xs" @click="backendSelectedRoom && loadGiftsForRoom(backendSelectedRoom)">刷新</button>
+                  </div>
+                  <!-- Stats sub-header -->
+                  <div v-if="giftSubTab === 'stats'" class="dm-gift-header-row2">
+                    <div class="dm-gift-range-group">
+                      <button v-for="r in GIFT_STATS_RANGES" :key="r.value" class="dm-gift-range-btn" :class="{ active: giftStatsRange === r.value }" @click="giftStatsRange = r.value">{{ r.label }}</button>
+                    </div>
+                    <span style="flex:1"></span>
+                    <button class="dm-btn dm-btn--ghost dm-btn--xs" @click="backendSelectedRoom && loadGiftStats(backendSelectedRoom, giftStatsRange)">刷新</button>
+                  </div>
+                </div>
+                <div class="dm-gift-body">
+                  <!-- Records view -->
+                  <div v-if="giftSubTab === 'records'" ref="giftFeedRef" class="dm-gift-feed">
+                    <div v-if="giftList.length === 0" class="dm-empty">暂无礼物记录</div>
+                    <div v-for="(g, idx) in giftList" :key="idx" class="dm-gift-item" :class="{ 'dm-gift--big': g.bg === '1' }">
+                      <img v-if="giftIcon(g.gfid || '')" :src="giftIcon(g.gfid || '')" class="dm-gift-icon" alt="" referrerpolicy="no-referrer" />
+                      <span v-else class="dm-gift-icon-placeholder">🎁</span>
+                      <span class="dm-time">{{ formatTime(g.ts) }}</span>
+                      <span class="dm-gift-nick">{{ g.nn || '' }}</span>
+                      <span v-if="g.bnn" class="dm-gift-badge">
+                        <img v-if="badgeAvatar(g.brid || '')" :src="badgeAvatar(g.brid || '')" class="dm-badge-avatar" alt="" referrerpolicy="no-referrer" />
+                        {{ g.bnn }}<span class="dm-badge-lv">{{ g.bl }}</span>
+                      </span>
+                      <span class="dm-gift-name">{{ giftName(g.gfid || '') }}</span>
+                      <span v-if="Number(g.hits) > 1" class="dm-gift-combo">×{{ g.hits }}</span>
+                      <span v-else-if="Number(g.gs) > 1" class="dm-gift-combo">×{{ g.gs }}</span>
+                      <span v-if="g.level" class="dm-gift-ulv">Lv{{ g.level }}</span>
+                    </div>
+                  </div>
+                  <!-- Stats view -->
+                  <div v-if="giftSubTab === 'stats'" class="dm-gift-stats">
+                    <div v-if="giftStatsLoading" class="dm-empty">加载中...</div>
+                    <template v-else-if="giftStats">
+                      <div class="dm-gift-stats-summary">
+                        <div class="dm-gift-stats-card">
+                          <span class="dm-gift-stats-label">总数量</span>
+                          <span class="dm-gift-stats-value">{{ giftStats.totalCount }}</span>
+                        </div>
+                        <div class="dm-gift-stats-card">
+                          <span class="dm-gift-stats-label">总开销</span>
+                          <span class="dm-gift-stats-value dm-gift-stats-value--cost">{{ giftStatsTotalCost.toFixed(1) }}元</span>
+                        </div>
+                        <div class="dm-gift-stats-card">
+                          <span class="dm-gift-stats-label">总价值</span>
+                          <span class="dm-gift-stats-value dm-gift-stats-value--gold">{{ giftStatsTotalValue.toFixed(1) }}元</span>
+                        </div>
+                        <div class="dm-gift-stats-card">
+                          <span class="dm-gift-stats-label">送礼人数</span>
+                          <span class="dm-gift-stats-value">{{ giftStatsByUserSorted.length }}</span>
+                        </div>
+                      </div>
+                      <div class="dm-gift-stats-section">
+                        <div class="dm-gift-stats-section-title">按礼物</div>
+                        <div v-for="item in giftStatsByGiftSorted" :key="item.gfid" class="dm-gift-stats-row">
+                          <img v-if="item.icon" :src="item.icon" class="dm-gift-icon-sm" alt="" referrerpolicy="no-referrer" />
+                          <span v-else class="dm-gift-icon-sm-placeholder">🎁</span>
+                          <span class="dm-gift-stats-name">{{ item.name }}</span>
+                          <span class="dm-gift-stats-cnt">×{{ item.count }}</span>
+                          <span v-if="item.value" class="dm-gift-stats-price">值{{ (item.value * item.count / 10).toFixed(1) }}元</span>
+                          <span v-if="item.cost" class="dm-gift-stats-cost">花{{ (item.cost * item.count / 10).toFixed(1) }}元</span>
+                        </div>
+                        <div v-if="giftStatsByGiftSorted.length === 0" class="dm-empty">暂无数据</div>
+                      </div>
+                      <div class="dm-gift-stats-section">
+                        <div class="dm-gift-stats-section-title">按用户</div>
+                        <div v-for="item in giftStatsByUserSorted" :key="item.uid" class="dm-gift-stats-row">
+                          <span class="dm-gift-stats-nick">{{ item.nn || item.uid }}</span>
+                          <span class="dm-gift-stats-cnt">×{{ item.count }}</span>
+                        </div>
+                        <div v-if="giftStatsByUserSorted.length === 0" class="dm-empty">暂无数据</div>
+                      </div>
+                    </template>
+                    <div v-else class="dm-empty">点击刷新加载统计</div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -795,6 +1092,36 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 .dm-feed-toolbar { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
 .dm-check { display: inline-flex; align-items: center; gap: 5px; font-size: 0.8rem; color: var(--muted); cursor: pointer; }
 .dm-check input { accent-color: var(--primary); }
+
+/* Split layout: danmaku left, gift right */
+.dm-feed-split {
+  display: flex; gap: 0.5rem; min-height: 0;
+}
+.dm-feed-split .dm-feed-left {
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+}
+.dm-feed-split--open .dm-feed-left {
+  flex: calc(1 - var(--gift-ratio, 0.333));
+}
+.dm-feed-split .dm-feed-right {
+  flex: var(--gift-ratio, 0.333); min-width: 0; display: flex; flex-direction: column;
+  transition: flex 0.2s ease;
+}
+/* Mobile vertical layout */
+.dm-feed-split--mobile {
+  flex-direction: column;
+}
+.dm-feed-split--mobile .dm-feed-left {
+  flex: 1;
+}
+.dm-feed-split--mobile.dm-feed-split--open .dm-feed-left {
+  flex: 1;
+}
+.dm-feed-split--mobile .dm-feed-right {
+  flex: none; height: var(--gift-height, 200px);
+  transition: height 0.2s ease;
+}
+
 .dm-feed {
   border-radius: 16px;
   border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
@@ -814,6 +1141,166 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 .dm-feed::-webkit-scrollbar-track { background: transparent; margin: 8px 0; }
 .dm-feed::-webkit-scrollbar-thumb { border-radius: 100px; background: color-mix(in srgb, var(--primary) 35%, var(--border)); }
 .dm-feed::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--primary) 55%, var(--border)); }
+
+/* Gift panel */
+.dm-gift-panel {
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, #fff 6%, var(--border));
+  background: color-mix(in srgb, var(--surface) 50%, transparent);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  overflow: hidden;
+  display: flex; flex-direction: column; height: 420px;
+}
+.dm-gift-header {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 0.4rem 0.6rem; user-select: none; flex-shrink: 0;
+  border-bottom: 1px solid color-mix(in srgb, #fff 4%, var(--border));
+}
+.dm-gift-header-row1 {
+  display: flex; align-items: center; gap: 5px;
+}
+.dm-gift-header-row2 {
+  display: flex; align-items: center; gap: 5px;
+}
+.dm-gift-chevron { transition: transform 0.2s; flex-shrink: 0; color: var(--muted); }
+.dm-gift-chevron.open { transform: rotate(90deg); }
+.dm-gift-header-icon { font-size: 0.9rem; }
+.dm-gift-header-title { font-size: 0.78rem; font-weight: 600; color: var(--text); }
+.dm-gift-count {
+  font-size: 0.62rem; font-weight: 700; padding: 1px 5px;
+  border-radius: 999px; background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
+}
+.dm-gift-size-group {
+  display: inline-flex; gap: 3px; margin-right: 4px;
+}
+.dm-gift-size-btn {
+  font-size: 0.7rem; padding: 2px 8px; border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  background: transparent; color: var(--muted); cursor: pointer;
+  transition: all 0.15s; line-height: 1.2; user-select: none;
+}
+.dm-gift-size-btn:hover { border-color: var(--primary); color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.dm-gift-size-btn:active { transform: scale(0.9); }
+.dm-btn--xs {
+  font-size: 0.65rem; padding: 2px 8px; border-radius: 6px;
+}
+.dm-gift-body {
+  flex: 1; min-height: 0; overflow: hidden; container-type: inline-size;
+}
+.dm-gift-feed {
+  height: 100%; overflow-y: auto; overflow-x: auto; padding: 0.35rem 0.5rem;
+  scroll-behavior: smooth;
+}
+.dm-gift-feed::-webkit-scrollbar { width: 5px; }
+.dm-gift-feed::-webkit-scrollbar-track { background: transparent; }
+.dm-gift-feed::-webkit-scrollbar-thumb { border-radius: 100px; background: color-mix(in srgb, var(--primary) 30%, var(--border)); }
+.dm-gift-item {
+  display: flex; align-items: center; gap: 0.3rem; padding: 0.2rem 0.35rem;
+  border-radius: 6px; margin-bottom: 1px; white-space: nowrap;
+  font-size: clamp(0.5rem, 3cqw, 0.72rem); transition: background 0.12s;
+  overflow: hidden; min-width: max-content;
+}
+.dm-gift-item:hover { background: color-mix(in srgb, var(--primary) 5%, var(--surface) 40%); }
+.dm-gift--big { background: color-mix(in srgb, #ffd700 6%, transparent); }
+.dm-gift--big:hover { background: color-mix(in srgb, #ffd700 12%, transparent); }
+.dm-gift-icon {
+  width: clamp(14px, 6cqw, 22px); height: clamp(14px, 6cqw, 22px); border-radius: 4px; flex-shrink: 0;
+  object-fit: contain; background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+.dm-gift-icon-placeholder {
+  width: clamp(14px, 6cqw, 22px); height: clamp(14px, 6cqw, 22px); display: flex; align-items: center; justify-content: center;
+  font-size: clamp(0.5rem, 3cqw, 0.75rem); flex-shrink: 0; border-radius: 4px;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+.dm-gift-item .dm-time { font-size: clamp(0.45rem, 2.5cqw, 0.6rem); min-width: auto; flex-shrink: 0; }
+.dm-gift-nick { color: var(--primary); font-weight: 600; font-size: clamp(0.5rem, 2.8cqw, 0.68rem); max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 1; min-width: 20px; }
+.dm-gift-badge {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: clamp(0.4rem, 2cqw, 0.52rem); padding: 1px 3px; border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent); font-weight: 500; flex-shrink: 2;
+  line-height: 1.1; overflow: hidden;
+}
+.dm-badge-avatar {
+  width: clamp(8px, 4cqw, 12px); height: clamp(8px, 4cqw, 12px); border-radius: 50%; flex-shrink: 0;
+  object-fit: cover;
+}
+.dm-badge-lv {
+  font-size: clamp(0.38rem, 1.8cqw, 0.48rem); font-weight: 700; margin-left: 1px;
+  opacity: 0.8;
+}
+.dm-gift-name {
+  font-weight: 600; color: #f0a020; font-size: clamp(0.48rem, 2.6cqw, 0.66rem); flex-shrink: 0;
+}
+.dm-gift-combo {
+  font-size: clamp(0.48rem, 2.6cqw, 0.64rem); font-weight: 700; color: var(--danger); flex-shrink: 0;
+}
+.dm-gift-ulv {
+  font-size: clamp(0.4rem, 2cqw, 0.52rem); color: var(--muted); flex-shrink: 0;
+}
+/* Gift sub-tabs */
+.dm-gift-tabs {
+  display: inline-flex; gap: 0; margin-left: 4px;
+}
+.dm-gift-tabs button {
+  font-size: 0.68rem; padding: 2px 8px; border: none; background: transparent;
+  color: var(--muted); cursor: pointer; font-weight: 500; border-radius: 4px;
+  transition: all 0.15s;
+}
+.dm-gift-tabs button.active {
+  color: var(--primary); font-weight: 700;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+.dm-gift-tabs button:hover:not(.active) { color: var(--text); }
+/* Gift stats range buttons */
+.dm-gift-range-group {
+  display: inline-flex; gap: 2px;
+}
+.dm-gift-range-btn {
+  font-size: 0.58rem; padding: 2px 6px; border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  background: transparent; color: var(--muted); cursor: pointer;
+  transition: all 0.15s; line-height: 1.2;
+}
+.dm-gift-range-btn.active {
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  border-color: var(--primary); color: var(--primary); font-weight: 600;
+}
+.dm-gift-range-btn:hover:not(.active) { border-color: var(--primary); color: var(--text); }
+/* Gift stats view */
+.dm-gift-stats {
+  height: 100%; overflow-y: auto; padding: 0.4rem 0.5rem;
+}
+.dm-gift-stats-summary {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 0.6rem;
+}
+.dm-gift-stats-card {
+  display: flex; flex-direction: column; align-items: center; padding: 6px 4px;
+  border-radius: 8px; background: color-mix(in srgb, var(--surface) 60%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
+}
+.dm-gift-stats-label { font-size: 0.55rem; color: var(--muted); }
+.dm-gift-stats-value { font-size: 0.82rem; font-weight: 700; color: var(--text); }
+.dm-gift-stats-value--gold { color: #f0a020; }
+.dm-gift-stats-value--cost { color: var(--danger); }
+.dm-gift-stats-section { margin-bottom: 0.5rem; }
+.dm-gift-stats-section-title {
+  font-size: 0.62rem; font-weight: 600; color: var(--muted); margin-bottom: 4px;
+  padding-bottom: 2px; border-bottom: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
+}
+.dm-gift-stats-row {
+  display: flex; align-items: center; gap: 0.3rem; padding: 2px 4px;
+  border-radius: 4px; font-size: 0.68rem;
+}
+.dm-gift-stats-row:hover { background: color-mix(in srgb, var(--primary) 5%, transparent); }
+.dm-gift-icon-sm { width: 16px; height: 16px; border-radius: 3px; object-fit: contain; flex-shrink: 0; }
+.dm-gift-icon-sm-placeholder { width: 16px; height: 16px; font-size: 0.6rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.dm-gift-stats-name { font-weight: 500; color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-gift-stats-nick { font-weight: 500; color: var(--primary); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dm-gift-stats-cnt { font-weight: 600; color: var(--accent); font-size: 0.65rem; flex-shrink: 0; }
+.dm-gift-stats-price { font-size: 0.58rem; color: #f0a020; font-weight: 500; flex-shrink: 0; }
+.dm-gift-stats-cost { font-size: 0.58rem; color: var(--muted); font-weight: 400; flex-shrink: 0; }
 .dm-empty { text-align: center; color: var(--muted); padding: 2.5rem 1rem; font-size: 0.85rem; }
 .dm-msg {
   display: flex; gap: 0.5rem; padding: 0.3rem 0.5rem; border-radius: 8px;
@@ -1087,5 +1574,9 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
   .dm-song-tabs { margin: 0.5rem 0.85rem 0.4rem; }
   .dm-song-toolbar { padding: 0.25rem 0.85rem 0.4rem; }
   .dm-room-card { flex-wrap: wrap; }
+  .dm-feed-split { flex-direction: column; }
+  .dm-feed-split .dm-feed-right { flex: none; height: var(--gift-height, 200px); }
+  .dm-gift-panel { height: 100%; }
+  .dm-gift-item { font-size: 0.68rem; }
 }
 </style>

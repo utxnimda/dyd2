@@ -13,7 +13,7 @@
 
 import http from "node:http";
 import net from "node:net";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -52,6 +52,91 @@ function saveRoomsList() {
 
 const roomInfoCache = new Map(); // roomId -> { data, fetchedAt }
 const ROOM_INFO_TTL = 60_000; // 1 minute cache
+
+const giftListCache = new Map(); // roomId -> { data, fetchedAt }
+const GIFT_LIST_TTL = 300_000; // 5 minutes cache
+
+// Fallback for gifts not found in API (retired/event gifts)
+const GIFT_FALLBACK = {
+  "0": { name: "未知礼物", icon: "", cost: 0, value: 0 },
+  "192": { name: "感谢有你", icon: "", cost: 100, value: 10 },
+  "519": { name: "盛典飞机", icon: "", cost: 1000, value: 100 },
+  "520": { name: "盛典火箭", icon: "", cost: 5000, value: 500 },
+  "824": { name: "火箭", icon: "", cost: 5000, value: 500 },
+  "21743": { name: "小星星", icon: "", cost: 10, value: 1 },
+  "22633": { name: "比心", icon: "", cost: 100, value: 0 },
+  "22899": { name: "小花花", icon: "", cost: 10, value: 1 },
+  "23995": { name: "打Call", icon: "", cost: 100, value: 0 },
+  "23996": { name: "干杯", icon: "", cost: 200, value: 0 },
+};
+// Alias: old/retired gift IDs -> current gift IDs (to inherit icon from current version)
+const GIFT_ALIAS = {
+  "824": "20004",   // old rocket -> current rocket
+  "519": "20004",   // event airplane -> rocket (similar icon)
+  "520": "20005",   // event rocket -> super rocket
+  "21743": "20546", // old 小星星 -> current 小星星
+};
+
+async function fetchGiftList(roomId) {
+  const cached = giftListCache.get(roomId);
+  if (cached && Date.now() - cached.fetchedAt < GIFT_LIST_TTL) return cached.data;
+  try {
+    const resp = await fetch(`https://gift.douyucdn.cn/api/gift/v3/web/list?rid=${roomId}`);
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    if (json.error !== 0 || !json.data) return null;
+    // Build a map: gfid -> { name, icon, cost, value }
+    // cost = priceInfo.price (鱼翅, 10鱼翅=1元)
+    // value = growthInfo.contribution (贡献值, 10=1元)
+    const map = {};
+    const giftGroups = json.data.giftList || json.data;
+    if (Array.isArray(giftGroups)) {
+      for (const g of giftGroups) {
+        if (g.id) {
+          const prefix = g.picUrlPrefix || "https://gfs-op.douyucdn.cn/dygift";
+          const pic = g.basicInfo?.giftPic || g.basicInfo?.sendPic || "";
+          map[String(g.id)] = {
+            name: g.name || "",
+            icon: pic ? prefix + pic : "",
+            cost: g.priceInfo?.price || 0,
+            value: g.growthInfo?.contribution || 0,
+          };
+        }
+        // Some responses nest gifts in categories
+        if (Array.isArray(g.gifts)) {
+          for (const sg of g.gifts) {
+            if (sg.id) {
+              const prefix = sg.picUrlPrefix || g.picUrlPrefix || "https://gfs-op.douyucdn.cn/dygift";
+              const pic = sg.basicInfo?.giftPic || sg.basicInfo?.sendPic || "";
+              map[String(sg.id)] = {
+                name: sg.name || "",
+                icon: pic ? prefix + pic : "",
+                cost: sg.priceInfo?.price || 0,
+                value: sg.growthInfo?.contribution || 0,
+              };
+            }
+          }
+        }
+      }
+    }
+    // Merge fallback for missing gifts, using alias to inherit icon from current version
+    for (const [id, info] of Object.entries(GIFT_FALLBACK)) {
+      if (!map[id]) {
+        const aliasId = GIFT_ALIAS[id];
+        const aliasInfo = aliasId ? map[aliasId] : null;
+        map[id] = {
+          ...info,
+          icon: info.icon || (aliasInfo ? aliasInfo.icon : ""),
+        };
+      }
+    }
+    giftListCache.set(roomId, { data: map, fetchedAt: Date.now() });
+    return map;
+  } catch (e) {
+    console.error(`[danmaku] Failed to fetch gift list for ${roomId}:`, e.message);
+    return null;
+  }
+}
 
 async function fetchRoomInfo(roomId) {
   const cached = roomInfoCache.get(roomId);
@@ -182,6 +267,92 @@ let actionLog = loadActionLog();
 
 const SONG_DIR = join(DATA_DIR, "song-requests");
 if (!existsSync(SONG_DIR)) mkdirSync(SONG_DIR, { recursive: true });
+
+const GIFT_DIR = join(DATA_DIR, "gifts");
+if (!existsSync(GIFT_DIR)) mkdirSync(GIFT_DIR, { recursive: true });
+
+/* ------------------------------------------------------------------ */
+/*  Gift tracking — per-room persistent data                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Gift storage: unlimited, auto-split into numbered files.
+ * Files: {roomId}_gifts_0.json, {roomId}_gifts_1.json, ...
+ * Each file holds up to GIFT_FILE_LIMIT entries.
+ * An index file {roomId}_gifts_index.json tracks { fileCount, totalCount }.
+ */
+const GIFT_FILE_LIMIT = 5000;
+
+function giftIndexPath(roomId) { return join(GIFT_DIR, `${roomId}_gifts_index.json`); }
+function giftChunkPath(roomId, idx) { return join(GIFT_DIR, `${roomId}_gifts_${idx}.json`); }
+
+function loadGiftIndex(roomId) {
+  return loadJsonFile(giftIndexPath(roomId), { fileCount: 0, totalCount: 0 });
+}
+function saveGiftIndex(roomId, index) { saveJsonFile(giftIndexPath(roomId), index); }
+
+// Migrate old single-file format if exists
+function migrateOldGiftFile(roomId) {
+  const oldPath = join(GIFT_DIR, `${roomId}_gifts.json`);
+  if (!existsSync(oldPath)) return;
+  try {
+    const oldData = JSON.parse(readFileSync(oldPath, "utf-8"));
+    if (Array.isArray(oldData) && oldData.length > 0) {
+      // Split into chunks
+      let fileIdx = 0;
+      for (let i = 0; i < oldData.length; i += GIFT_FILE_LIMIT) {
+        saveJsonFile(giftChunkPath(roomId, fileIdx), oldData.slice(i, i + GIFT_FILE_LIMIT));
+        fileIdx++;
+      }
+      saveGiftIndex(roomId, { fileCount: fileIdx, totalCount: oldData.length });
+    }
+    // Remove old file after migration
+    try { unlinkSync(oldPath); } catch { /* ignore */ }
+  } catch { /* ignore */ }
+}
+
+function loadGifts(roomId, limit = 200) {
+  migrateOldGiftFile(roomId);
+  const index = loadGiftIndex(roomId);
+  if (index.fileCount === 0) return [];
+  // Read from the latest chunk(s) to satisfy limit
+  const result = [];
+  for (let i = index.fileCount - 1; i >= 0 && result.length < limit; i--) {
+    const chunk = loadJsonFile(giftChunkPath(roomId, i), []);
+    result.unshift(...chunk);
+  }
+  return result.slice(-limit);
+}
+
+function recordGift(roomId, msg) {
+  // Save all available fields from the dgb message
+  const entry = { ...msg, roomId, ts: Date.now() };
+  migrateOldGiftFile(roomId);
+  const index = loadGiftIndex(roomId);
+  // Get current chunk
+  let chunkIdx = Math.max(0, index.fileCount - 1);
+  let chunk = index.fileCount > 0 ? loadJsonFile(giftChunkPath(roomId, chunkIdx), []) : [];
+  chunk.push(entry);
+  if (chunk.length > GIFT_FILE_LIMIT) {
+    // Save current full chunk and start a new one
+    saveJsonFile(giftChunkPath(roomId, chunkIdx), chunk.slice(0, GIFT_FILE_LIMIT));
+    chunkIdx++;
+    chunk = chunk.slice(GIFT_FILE_LIMIT);
+  }
+  saveJsonFile(giftChunkPath(roomId, chunkIdx), chunk);
+  index.fileCount = chunkIdx + 1;
+  index.totalCount++;
+  saveGiftIndex(roomId, index);
+  return entry;
+}
+
+function clearGifts(roomId) {
+  const index = loadGiftIndex(roomId);
+  for (let i = 0; i < index.fileCount; i++) {
+    try { writeFileSync(giftChunkPath(roomId, i), "[]"); } catch { /* ignore */ }
+  }
+  saveGiftIndex(roomId, { fileCount: 0, totalCount: 0 });
+}
 
 /**
  * Data files per room:
@@ -399,7 +570,10 @@ function connectBackendRoom(roomId) {
       recordDanmakuForRoom(conn, danmaku);
       processTriggers(danmaku, roomId);
     }
-    if (msg.type === "dgb") broadcastToSSE("gift", { type: "dgb", uid: msg.uid || "", nn: msg.nn || "", gfid: msg.gfid || "", gs: msg.gs || "", roomId, ts: Date.now() });
+    if (msg.type === "dgb") {
+      const giftEntry = recordGift(roomId, msg);
+      broadcastToSSE("gift", giftEntry);
+    }
     if (msg.type === "uenter") broadcastToSSE("enter", { type: "uenter", uid: msg.uid || "", nn: msg.nn || "", roomId, ts: Date.now() });
   }
 
@@ -700,6 +874,100 @@ const server = http.createServer(async (req, res) => {
     saveSessionStats(rid, {});
     // Also clear timeline for current session view
     saveTimeline(rid, []);
+    return jsonReply(res, { ok: true });
+  }
+
+  // --- Gifts ---
+  // GET /gift-list/:roomId — get gift name/icon mapping from Douyu API
+  if (path.match(/^\/gift-list\/[^/]+$/) && req.method === "GET") {
+    const rid = decodeURIComponent(path.split("/")[2]);
+    const list = await fetchGiftList(rid);
+    if (!list) return jsonReply(res, { ok: false, error: "Failed to fetch gift list" }, 502);
+    return jsonReply(res, { ok: true, gifts: list });
+  }
+  // GET /badge-avatar/:roomId — get streamer avatar for fan badge icon
+  if (path.match(/^\/badge-avatar\/[^/]+$/) && req.method === "GET") {
+    const rid = decodeURIComponent(path.split("/")[2]);
+    const info = await fetchRoomInfo(rid);
+    if (!info || !info.avatar) return jsonReply(res, { ok: false, error: "Not found" }, 404);
+    return jsonReply(res, { ok: true, avatar: info.avatar, ownerName: info.owner_name });
+  }
+  // GET /gifts/:roomId — get gift records for a room
+  if (path.match(/^\/gifts\/[^/]+$/) && req.method === "GET") {
+    const rid = decodeURIComponent(path.split("/")[2]);
+    const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get("limit")) || 200));
+    const gifts = loadGifts(rid, limit);
+    const index = loadGiftIndex(rid);
+    return jsonReply(res, { ok: true, gifts, totalCount: index.totalCount });
+  }
+  // GET /gifts/:roomId/stats — get gift value stats for a room within a time range
+  if (path.match(/^\/gifts\/[^/]+\/stats$/) && req.method === "GET") {
+    const rid = decodeURIComponent(path.split("/")[2]);
+    const range = url.searchParams.get("range") || "today";
+    const now = new Date();
+    let startTs;
+    switch (range) {
+      case "today": {
+        const d = new Date(now); d.setHours(0, 0, 0, 0);
+        startTs = d.getTime();
+        break;
+      }
+      case "week": {
+        const d = new Date(now); const day = d.getDay(); const diff = day === 0 ? 6 : day - 1;
+        d.setDate(d.getDate() - diff); d.setHours(0, 0, 0, 0);
+        startTs = d.getTime();
+        break;
+      }
+      case "7days": {
+        const d = new Date(now); d.setHours(24, 0, 0, 0); // end of today
+        startTs = d.getTime() - 7 * 24 * 60 * 60 * 1000;
+        break;
+      }
+      case "month": {
+        const d = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+        startTs = d.getTime();
+        break;
+      }
+      case "30days": {
+        const d = new Date(now); d.setHours(24, 0, 0, 0);
+        startTs = d.getTime() - 30 * 24 * 60 * 60 * 1000;
+        break;
+      }
+      default: {
+        const d = new Date(now); d.setHours(0, 0, 0, 0);
+        startTs = d.getTime();
+      }
+    }
+    // Load all gifts and filter by time range
+    migrateOldGiftFile(rid);
+    const index = loadGiftIndex(rid);
+    const stats = { totalValue: 0, totalCount: 0, byGift: {}, byUser: {} };
+    for (let i = 0; i < index.fileCount; i++) {
+      const chunk = loadJsonFile(giftChunkPath(rid, i), []);
+      for (const g of chunk) {
+        if ((g.ts || 0) < startTs) continue;
+        const gfid = g.gfid || "0";
+        const cnt = Number(g.gfcnt) || 1;
+        const hits = Number(g.hits) || 1;
+        const amount = Math.max(cnt, hits);
+        // byGift: { gfid: { count, name } }
+        if (!stats.byGift[gfid]) stats.byGift[gfid] = { count: 0 };
+        stats.byGift[gfid].count += amount;
+        // byUser: { uid: { nn, count, gifts: { gfid: count } } }
+        const uid = g.uid || "anon";
+        if (!stats.byUser[uid]) stats.byUser[uid] = { nn: g.nn || "", count: 0, gifts: {} };
+        stats.byUser[uid].count += amount;
+        if (!stats.byUser[uid].gifts[gfid]) stats.byUser[uid].gifts[gfid] = 0;
+        stats.byUser[uid].gifts[gfid] += amount;
+        stats.totalCount += amount;
+      }
+    }
+    return jsonReply(res, { ok: true, stats, range, startTs });
+  }
+  // POST /gifts/:roomId/clear — clear gift records for a room
+  if (path.match(/^\/gifts\/[^/]+\/clear$/) && req.method === "POST") {
+    const rid = decodeURIComponent(path.split("/")[2]);
+    clearGifts(rid);
     return jsonReply(res, { ok: true });
   }
 
