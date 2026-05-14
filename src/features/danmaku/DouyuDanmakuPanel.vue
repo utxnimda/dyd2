@@ -244,11 +244,15 @@ async function backendAddRoom() {
   const rid = backendNewRoomId.value.trim(); if (!rid) return;
   backendError.value = "";
   try {
+    // First verify the room exists on Douyu
+    const info = await fetchRoomInfo(rid);
+    if (!info) { backendError.value = `直播间 ${rid} 不存在，请检查房间号`; return; }
     const d = await (await fetch(`${API}/rooms`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roomId: rid, password: getBackendPw() }) })).json();
     if (!d.ok) { backendError.value = d.error || "添加失败"; return; }
     backendNewRoomId.value = "";
     if (!backendSelectedRoom.value) backendSelectedRoom.value = rid;
-    fetchRoomInfo(rid).then(info => { const r = backendRooms.value.find(x => x.roomId === rid); if (r) r.info = info; });
+    // Room info already fetched, apply it directly
+    const r = backendRooms.value.find(x => x.roomId === rid); if (r) r.info = info;
   } catch (e: unknown) { backendError.value = e instanceof Error ? e.message : "添加失败"; }
 }
 
@@ -376,7 +380,7 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
                 <span v-if="selectedBackendRoom.info.online_num">{{ formatNum(selectedBackendRoom.info.online_num) }} 在线</span>
               </div>
             </div>
-<button class="dm-btn dm-btn--ghost dm-btn--sm" @click="openSongPanel(selectedBackendRoom.roomId)">点歌统计</button>
+<button class="dm-btn dm-btn--outline dm-btn--sm" @click="openSongPanel(selectedBackendRoom.roomId)">🎵 点歌统计</button>
           </div>
           <div class="dm-stats-bar">
             <span>弹幕 <strong>{{ selectedBackendRoom.stats.total }}</strong></span>
@@ -596,7 +600,7 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
   display: flex; gap: 0; align-items: stretch; margin-bottom: 0.85rem;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
-  background: color-mix(in srgb, var(--surface) 45%, transparent);
+  background: color-mix(in srgb, var(--surface) 70%, var(--bg));
   backdrop-filter: blur(16px) saturate(1.2);
   -webkit-backdrop-filter: blur(16px) saturate(1.2);
   box-shadow: inset 0 1px 1px rgba(0,0,0,0.05);
@@ -611,16 +615,32 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 .dm-add-row .dm-input {
   flex: 1; min-width: 0; width: 100%; border: none; border-radius: 0;
   background: transparent; padding: 0.5rem 0.85rem; font-size: 0.84rem;
-  outline: none; box-shadow: none;
+  outline: none; box-shadow: none; color: var(--text);
 }
+.dm-add-row .dm-input::placeholder { color: var(--muted); opacity: 0.7; }
 .dm-add-row .dm-input:focus { box-shadow: none; border-color: transparent; }
 .dm-add-row .dm-btn {
-  flex-shrink: 0; border: none; border-radius: 0;
-  border-left: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
-  background: transparent; padding: 0 1rem; font-size: 0.82rem;
-  transition: background 0.15s, color 0.12s;
+  flex-shrink: 0; border: none;
+  border-radius: 0 999px 999px 0;
+  background: var(--primary) !important;
+  padding: 0 1.1rem; font-size: 0.82rem;
+  color: var(--on-primary) !important;
+  font-weight: 700; letter-spacing: 0.02em;
+  cursor: pointer; position: relative;
+  transition: background 0.18s, box-shadow 0.18s;
+  filter: none !important;
+  box-shadow: none;
 }
-.dm-add-row .dm-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary); }
+.dm-add-row .dm-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 80%, #000) !important;
+  box-shadow: 0 3px 12px color-mix(in srgb, var(--primary) 50%, transparent) !important;
+  color: #fff !important;
+  filter: none !important;
+}
+.dm-add-row .dm-btn:active:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 70%, #000) !important;
+}
+.dm-add-row .dm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* ---- Room chips ---- */
 .dm-room-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 0.85rem; }
@@ -628,7 +648,7 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
   display: inline-flex; align-items: center; gap: 6px;
   padding: 5px 12px; border-radius: 999px;
   border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
-  background: color-mix(in srgb, var(--surface) 50%, transparent);
+  background: color-mix(in srgb, var(--surface) 70%, var(--bg));
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   cursor: pointer; font-size: 0.78rem; color: var(--text);
   transition: all 0.18s; user-select: none;
@@ -699,11 +719,12 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
   padding: 0.45rem 0.75rem;
   border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
   border-radius: 10px;
-  background: color-mix(in srgb, var(--surface) 50%, transparent);
+  background: color-mix(in srgb, var(--surface) 70%, var(--bg));
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   color: var(--text); font-size: 0.85rem; outline: none; width: 140px;
   transition: border-color 0.18s, box-shadow 0.18s;
 }
+.dm-input::placeholder { color: var(--muted); opacity: 0.7; }
 .dm-input:focus {
   border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
@@ -732,6 +753,17 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 .dm-btn--primary:hover { filter: brightness(1.1); color: var(--on-primary); }
 .dm-btn--ghost { border-color: transparent; background: transparent; backdrop-filter: none; }
 .dm-btn--ghost:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.dm-btn--outline {
+  border: 1.5px solid color-mix(in srgb, var(--primary) 50%, var(--border));
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+  color: var(--primary); font-weight: 600; backdrop-filter: none;
+}
+.dm-btn--outline:hover {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
+  box-shadow: 0 1px 6px color-mix(in srgb, var(--primary) 20%, transparent);
+}
 .dm-btn--sm { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
 .dm-error { color: var(--danger, #ff6b6b); font-size: 0.8rem; margin: 0.35rem 0; }
 
