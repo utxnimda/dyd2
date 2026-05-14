@@ -25,6 +25,23 @@ if (!existsSync(DATA_DIR)) {
   mkdirSync(DATA_DIR, { recursive: true });
 }
 
+function buildChatmsgDanmaku(msg) {
+  return {
+    type: "chatmsg",
+    uid: msg.uid || "",
+    nn: msg.nn || "",
+    txt: msg.txt || "",
+    level: msg.level || "",
+    bnn: msg.bnn || "",
+    bl: msg.bl || "",
+    rid: msg.rid || "",
+    brid: msg.brid || "",
+    ts: Date.now(),
+    ic: msg.ic || "",
+    photo: msg.photo || "",
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Password configuration                                           */
 /* ------------------------------------------------------------------ */
@@ -53,8 +70,146 @@ function saveRoomsList() {
 const roomInfoCache = new Map(); // roomId -> { data, fetchedAt }
 const ROOM_INFO_TTL = 60_000; // 1 minute cache
 
-const giftListCache = new Map(); // roomId -> { data, fetchedAt }
+const giftListCache = new Map(); // roomId -> { data: fetchGiftPayload, fetchedAt }
 const GIFT_LIST_TTL = 300_000; // 5 minutes cache
+
+/** 斗鱼 webconf 静态 JSON：背包 / 道具礼（全局，与直播间无关）；JSONP:`DYConfigCallback({...})` */
+const PROP_GIFT_CONFIG_URL =
+  "https://webconf.douyucdn.cn/resource/common/prop_gift_list/prop_gift_config.json";
+const PROP_GIFT_CONFIG_TTL = 3_600_000; // 1h
+const propGiftConfigState = {
+  /** @type {Record<string, { name: string, pc: number, devote: number, type: number|null, icon: string, raw: object|null }>|null} */
+  map: null,
+  totalKeys: 0,
+  fetchedAt: 0,
+  fetchOk: false,
+};
+
+/**
+ * Parse `DYConfigCallback({ ... })` into a JSON root object (handles quotes / escapes in payload).
+ */
+function parseDouyuConfigJsonpPayload(text, callbackName = "DYConfigCallback") {
+  const trimmed = String(text || "").trim();
+  const p = `${callbackName}(`;
+  const ia = trimmed.indexOf(p);
+  if (ia < 0) return null;
+  const jsonStart = trimmed.indexOf("{", ia + p.length);
+  if (jsonStart < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = jsonStart; i < trimmed.length; i++) {
+    const c = trimmed[i];
+    if (esc) {
+      esc = false;
+      continue;
+    }
+    if (inStr) {
+      if (c === "\\") esc = true;
+      else if (c === "\"") inStr = false;
+      continue;
+    }
+    if (c === "\"") {
+      inStr = true;
+      continue;
+    }
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(trimmed.slice(jsonStart, i + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function pickPropGiftIcon(blob) {
+  const s = blob?.cimg || blob?.himg || blob?.bimg || "";
+  return typeof s === "string" ? s : "";
+}
+
+/** Deep clone CDN gift fragment for debug (JSON-serializable). */
+function cloneGiftListRawChunk(obj) {
+  if (obj == null || typeof obj !== "object") return obj;
+  try {
+    return JSON.parse(JSON.stringify(obj));
+  } catch {
+    return { _serializeError: true };
+  }
+}
+
+/**
+ * Normalize prop_gift_config.data[giftId].
+ * @returns {{ name: string, pc: number, devote: number, type: number|null, icon: string, raw: object|null }}
+ */
+function normalizePropGiftEntry(blob) {
+  const pcRaw = blob?.pc;
+  const devoteRaw = blob?.devote;
+  const typeRaw = blob?.type;
+  const pc = Number.isFinite(Number(pcRaw)) ? Number(pcRaw) : 0;
+  const devote = Number.isFinite(Number(devoteRaw)) ? Number(devoteRaw) : 0;
+  const tn = Number(typeRaw);
+  return {
+    name: typeof blob?.name === "string" ? blob.name : "",
+    pc,
+    devote,
+    type: Number.isFinite(tn) ? tn : null,
+    icon: pickPropGiftIcon(blob),
+    raw: cloneGiftListRawChunk(blob),
+  };
+}
+
+async function getPropGiftConfigMapFresh() {
+  const resp = await fetch(PROP_GIFT_CONFIG_URL);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const text = await resp.text();
+  const root = parseDouyuConfigJsonpPayload(text);
+  if (!root || Number(root.error) !== 0 || root.data == null || typeof root.data !== "object") {
+    throw new Error("unexpected prop JSON");
+  }
+  /** @type {Record<string, ReturnType<typeof normalizePropGiftEntry>>} */
+  const out = {};
+  for (const [id, blob] of Object.entries(root.data)) {
+    out[id] = normalizePropGiftEntry(blob);
+  }
+  propGiftConfigState.map = out;
+  propGiftConfigState.totalKeys = Object.keys(out).length;
+  propGiftConfigState.fetchedAt = Date.now();
+  propGiftConfigState.fetchOk = true;
+  return propGiftConfigState;
+}
+
+/** Global prop config (cached). On failure retains last-good map when present. */
+async function getPropGiftConfigMapCached() {
+  if (
+    propGiftConfigState.map &&
+    propGiftConfigState.fetchOk &&
+    Date.now() - propGiftConfigState.fetchedAt < PROP_GIFT_CONFIG_TTL
+  ) {
+    return propGiftConfigState;
+  }
+  try {
+    return await getPropGiftConfigMapFresh();
+  } catch (e) {
+    console.error(`[danmaku] Failed to fetch prop_gift_config: ${e.message}`);
+    if (propGiftConfigState.map) {
+      return propGiftConfigState;
+    }
+    propGiftConfigState.fetchOk = false;
+    return { ...propGiftConfigState, map: null, totalKeys: 0 };
+  }
+}
+
+/** CDN「礼物」条目：from 为 2 时表示背包礼物，其余视为 1 直接礼物（缺字段默认直连）。 */
+function douyuGiftListFrom(o) {
+  const n = Number(o?.from);
+  return n === 2 ? 2 : 1;
+}
 
 // Fallback for gifts not found in API (retired/event gifts)
 const GIFT_FALLBACK = {
@@ -77,17 +232,23 @@ const GIFT_ALIAS = {
   "21743": "20546", // old 小星星 -> current 小星星
 };
 
-async function fetchGiftList(roomId) {
+/**
+ * Room gift CDN + global prop/backpack calibration.
+ * Returns { gifts, backpackCatalog (debug: only CDN from=2 rows), backpackCatalogStats } or null if v3 list fails.
+ */
+async function fetchGiftListPayload(roomId) {
   const cached = giftListCache.get(roomId);
   if (cached && Date.now() - cached.fetchedAt < GIFT_LIST_TTL) return cached.data;
   try {
+    const propCfg = await getPropGiftConfigMapCached();
+    const propMap = propCfg.map;
+
     const resp = await fetch(`https://gift.douyucdn.cn/api/gift/v3/web/list?rid=${roomId}`);
     if (!resp.ok) return null;
     const json = await resp.json();
     if (json.error !== 0 || !json.data) return null;
-    // Build a map: gfid -> { name, icon, cost, value }
-    // cost = priceInfo.price (鱼翅, 10鱼翅=1元)
-    // value = growthInfo.contribution (贡献值, 10=1元)
+
+    /** @type {Record<string, { name: string, icon: string, cost: number, value: number, from: number, raw: object|null, propRaw?: object|null }>} */
     const map = {};
     const giftGroups = json.data.giftList || json.data;
     if (Array.isArray(giftGroups)) {
@@ -100,9 +261,10 @@ async function fetchGiftList(roomId) {
             icon: pic ? prefix + pic : "",
             cost: g.priceInfo?.price || 0,
             value: g.growthInfo?.contribution || 0,
+            from: douyuGiftListFrom(g),
+            raw: cloneGiftListRawChunk(g),
           };
         }
-        // Some responses nest gifts in categories
         if (Array.isArray(g.gifts)) {
           for (const sg of g.gifts) {
             if (sg.id) {
@@ -113,13 +275,15 @@ async function fetchGiftList(roomId) {
                 icon: pic ? prefix + pic : "",
                 cost: sg.priceInfo?.price || 0,
                 value: sg.growthInfo?.contribution || 0,
+                from: douyuGiftListFrom(sg),
+                raw: cloneGiftListRawChunk(sg),
               };
             }
           }
         }
       }
     }
-    // Merge fallback for missing gifts, using alias to inherit icon from current version
+
     for (const [id, info] of Object.entries(GIFT_FALLBACK)) {
       if (!map[id]) {
         const aliasId = GIFT_ALIAS[id];
@@ -127,11 +291,52 @@ async function fetchGiftList(roomId) {
         map[id] = {
           ...info,
           icon: info.icon || (aliasInfo ? aliasInfo.icon : ""),
+          from: 1,
+          raw: null,
         };
       }
     }
-    giftListCache.set(roomId, { data: map, fetchedAt: Date.now() });
-    return map;
+
+    const backpackSparse = {};
+    let roomBackpackGiftIds = 0;
+    let overlaidFromPropCount = 0;
+
+    for (const [idStr, ge] of Object.entries(map)) {
+      const isBk = Number(ge.from) === 2;
+      if (!isBk) continue;
+      roomBackpackGiftIds++;
+      const pv = propMap ? propMap[idStr] : null;
+      if (pv && typeof pv === "object") {
+        if (pv.pc !== undefined && Number.isFinite(Number(pv.pc))) ge.cost = Number(pv.pc);
+        if (pv.devote !== undefined && Number.isFinite(Number(pv.devote))) ge.value = Number(pv.devote);
+        if ((!String(ge.icon || "").trim()) && pv.icon) ge.icon = pv.icon;
+        if ((!String(ge.name || "").trim()) && pv.name) ge.name = pv.name;
+        ge.propRaw = pv.raw ?? null;
+        overlaidFromPropCount++;
+      } else {
+        ge.propRaw = null;
+      }
+      backpackSparse[idStr] = {
+        name: (pv?.name || ge.name) || "",
+        pc: pv?.pc ?? ge.cost ?? 0,
+        devote: pv?.devote ?? ge.value ?? 0,
+        type: pv?.type ?? null,
+        icon: (pv?.icon || ge.icon || "").trim(),
+        raw: pv?.raw ?? null,
+        overlaidFromProp: Boolean(pv),
+      };
+    }
+
+    const backpackCatalogStats = {
+      totalPropKeys: Number(propCfg.totalKeys) || 0,
+      roomBackpackGiftIds,
+      overlaidFromPropCount,
+      propConfigOk: Boolean(propMap),
+    };
+
+    const pack = { gifts: map, backpackCatalog: backpackSparse, backpackCatalogStats };
+    giftListCache.set(roomId, { data: pack, fetchedAt: Date.now() });
+    return pack;
   } catch (e) {
     console.error(`[danmaku] Failed to fetch gift list for ${roomId}:`, e.message);
     return null;
@@ -322,6 +527,16 @@ function loadGifts(roomId, limit = 200) {
     result.unshift(...chunk);
   }
   return result.slice(-limit);
+}
+
+/**
+ * Douyu type=dgb 礼物：归档「件数」仅当下行中的当次个数 `gfcnt`（不乘 hits / gs）。
+ * 缺失或非法时按 1 计，与前端调试列一致。
+ */
+function giftPiecesFromStoredRecord(g) {
+  const cntRaw = Number(g.gfcnt);
+  if (Number.isFinite(cntRaw) && cntRaw > 0) return Math.floor(cntRaw);
+  return 1;
 }
 
 function recordGift(roomId, msg) {
@@ -564,7 +779,7 @@ function connectBackendRoom(roomId) {
     const msg = decodeStt(payload);
     if (!msg.type) return;
     if (msg.type === "chatmsg") {
-      const danmaku = { type: "chatmsg", uid: msg.uid || "", nn: msg.nn || "", txt: msg.txt || "", level: msg.level || "", bnn: msg.bnn || "", bl: msg.bl || "", rid: msg.rid || "", ts: Date.now() };
+      const danmaku = buildChatmsgDanmaku(msg);
       conn.stats.total++;
       broadcastToSSE("danmaku", { ...danmaku, roomId });
       recordDanmakuForRoom(conn, danmaku);
@@ -663,7 +878,7 @@ function createWebCaptureConnection(roomId, sseRes) {
     const msg = decodeStt(payload);
     if (!msg.type) return;
     if (msg.type === "chatmsg") {
-      const danmaku = { type: "chatmsg", uid: msg.uid || "", nn: msg.nn || "", txt: msg.txt || "", level: msg.level || "", ts: Date.now() };
+      const danmaku = buildChatmsgDanmaku(msg);
       ctx.stats.total++;
       sendSSE("danmaku", danmaku);
       const txt = danmaku.txt || "";
@@ -881,9 +1096,14 @@ const server = http.createServer(async (req, res) => {
   // GET /gift-list/:roomId — get gift name/icon mapping from Douyu API
   if (path.match(/^\/gift-list\/[^/]+$/) && req.method === "GET") {
     const rid = decodeURIComponent(path.split("/")[2]);
-    const list = await fetchGiftList(rid);
-    if (!list) return jsonReply(res, { ok: false, error: "Failed to fetch gift list" }, 502);
-    return jsonReply(res, { ok: true, gifts: list });
+    const payload = await fetchGiftListPayload(rid);
+    if (!payload?.gifts) return jsonReply(res, { ok: false, error: "Failed to fetch gift list" }, 502);
+    return jsonReply(res, {
+      ok: true,
+      gifts: payload.gifts,
+      backpackCatalog: payload.backpackCatalog,
+      backpackCatalogStats: payload.backpackCatalogStats,
+    });
   }
   // GET /badge-avatar/:roomId — get streamer avatar for fan badge icon
   if (path.match(/^\/badge-avatar\/[^/]+$/) && req.method === "GET") {
@@ -947,9 +1167,7 @@ const server = http.createServer(async (req, res) => {
       for (const g of chunk) {
         if ((g.ts || 0) < startTs) continue;
         const gfid = g.gfid || "0";
-        const cnt = Number(g.gfcnt) || 1;
-        const hits = Number(g.hits) || 1;
-        const amount = Math.max(cnt, hits);
+        const amount = giftPiecesFromStoredRecord(g);
         // byGift: { gfid: { count, name } }
         if (!stats.byGift[gfid]) stats.byGift[gfid] = { count: 0 };
         stats.byGift[gfid].count += amount;
