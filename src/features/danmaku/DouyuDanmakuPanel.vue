@@ -1,16 +1,17 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                             */
 /* ------------------------------------------------------------------ */
 
 interface DanmakuMsg { type: string; uid: string; nn: string; txt: string; level: string; ts: number; roomId?: string; }
-interface TriggerConfig { id: string; pattern: string; action: string; enabled: boolean; description: string; }
+interface TriggerConfig { id: string; pattern: string; action: string; enabled: boolean; description: string; roomIds?: string[]; }
 interface TriggerLogEntry { triggerId: string; pattern: string; action: string; content: string; nickname: string; uid: string; fullText: string; ts: number; source?: string; roomId?: string; }
 interface RoomInfo { room_id: number; room_name: string; owner_name: string; owner_uid: string | number; show_status: number; game_name: string; cate_name: string; online_num: number; fans_num: number; room_thumb: string; start_time: number; avatar: string; }
 interface BackendRoomStatus { roomId: string; status: string; stats: { total: number; triggered: number; connected_at: number | null }; recording: boolean; recordedCount: number; info?: RoomInfo | null; }
-interface WebRoom { roomId: string; status: "disconnected" | "connecting" | "connected"; eventSource: EventSource | null; danmakuList: DanmakuMsg[]; stats: { total: number; triggered: number }; info: RoomInfo | null; error: string; }
+
+
 
 // Song request panel (replaces old cmd stats)
 interface SongTimelineEntry { song: string; artist: string; ts: number; uid: string; nn: string; }
@@ -22,26 +23,18 @@ interface SongStatEntry { count: number; requesters: SongRequester[]; }
 /* ------------------------------------------------------------------ */
 
 const API = "/__fmz_danmaku";
-const FRONTEND_PASSWORD = "lsydsb";
 const MAX_DANMAKU = 300;
 
-type CaptureMode = "web" | "backend";
-const captureMode = ref<CaptureMode>("web");
+
 type SubTab = "danmaku" | "triggers" | "log";
 const activeSubTab = ref<SubTab>("danmaku");
 
 // Password
 const backendUnlocked = ref(!!localStorage.getItem("dm_backend_unlocked"));
-const webUnlocked = ref(!!localStorage.getItem("dm_web_unlocked"));
 const passwordInput = ref("");
 const passwordError = ref("");
 
-// Web capture
-const webRooms = ref<WebRoom[]>([]);
-const webNewRoomId = ref("");
-const webAutoScroll = ref(true);
-const webSelectedRoom = ref<string | null>(null);
-const webFeedRef = ref<HTMLElement | null>(null);
+
 
 // Backend capture
 const backendRooms = ref<BackendRoomStatus[]>([]);
@@ -69,8 +62,7 @@ type SongPanelTab = "timeline" | "session" | "total";
 const songPanelTab = ref<SongPanelTab>("timeline");
 const songTimelineOrder = ref<"desc" | "asc">("desc"); // desc = newest first
 
-function saveWebRoomsToStorage() { localStorage.setItem("dm_web_rooms", JSON.stringify(webRooms.value.map(r => r.roomId))); }
-function loadWebRoomsFromStorage(): string[] { try { return JSON.parse(localStorage.getItem("dm_web_rooms") || "[]"); } catch { return []; } }
+
 
 /* ------------------------------------------------------------------ */
 /*  Password                                                          */
@@ -84,11 +76,7 @@ async function unlockBackend() {
     else passwordError.value = "密码错误";
   } catch { passwordError.value = "验证失败"; }
 }
-function unlockWeb() {
-  passwordError.value = "";
-  if (passwordInput.value === FRONTEND_PASSWORD) { webUnlocked.value = true; localStorage.setItem("dm_web_unlocked", "1"); passwordInput.value = ""; }
-  else passwordError.value = "密码错误";
-}
+
 function getBackendPw(): string { return localStorage.getItem("dm_backend_pw") || ""; }
 
 /* ------------------------------------------------------------------ */
@@ -204,38 +192,6 @@ function openSongPanel(roomId: string) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Web capture                                                       */
-/* ------------------------------------------------------------------ */
-
-function webAddRoom() {
-  const rid = webNewRoomId.value.trim(); if (!rid) return;
-  if (webRooms.value.some(r => r.roomId === rid)) return;
-  const room: WebRoom = { roomId: rid, status: "disconnected", eventSource: null, danmakuList: [], stats: { total: 0, triggered: 0 }, info: null, error: "" };
-  webRooms.value.push(room); webNewRoomId.value = ""; saveWebRoomsToStorage();
-  webConnectRoom(room);
-  if (!webSelectedRoom.value) webSelectedRoom.value = rid;
-}
-function webRemoveRoom(rid: string) {
-  const idx = webRooms.value.findIndex(r => r.roomId === rid); if (idx === -1) return;
-  const room = webRooms.value[idx];
-  if (room.eventSource) { room.eventSource.close(); room.eventSource = null; }
-  webRooms.value.splice(idx, 1); saveWebRoomsToStorage();
-  if (webSelectedRoom.value === rid) webSelectedRoom.value = webRooms.value.length > 0 ? webRooms.value[0].roomId : null;
-}
-function webConnectRoom(room: WebRoom) {
-  if (room.eventSource) { room.eventSource.close(); room.eventSource = null; }
-  room.status = "connecting"; room.error = ""; room.danmakuList = []; room.stats = { total: 0, triggered: 0 };
-  const es = new EventSource(`${API}/web-events?roomId=${encodeURIComponent(room.roomId)}`);
-  es.addEventListener("status", (e) => { try { const d = JSON.parse(e.data); room.status = d.status === "connected" ? "connected" : d.status === "connecting" ? "connecting" : "disconnected"; if (d.error) room.error = d.error; } catch { /* */ } });
-  es.addEventListener("danmaku", (e) => { try { const msg: DanmakuMsg = JSON.parse(e.data); room.danmakuList.push(msg); if (room.danmakuList.length > MAX_DANMAKU) room.danmakuList = room.danmakuList.slice(-MAX_DANMAKU); room.stats.total++; if (webAutoScroll.value && webSelectedRoom.value === room.roomId) nextTick(() => scrollEl(webFeedRef.value)); } catch { /* */ } });
-  es.addEventListener("trigger", (e) => { try { const entry: TriggerLogEntry = JSON.parse(e.data); triggerLog.value.unshift(entry); if (triggerLog.value.length > 200) triggerLog.value = triggerLog.value.slice(0, 200); room.stats.triggered++; } catch { /* */ } });
-  es.onerror = () => { if (room.status === "connecting") { room.error = "连接失败"; room.status = "disconnected"; } };
-  room.eventSource = es;
-  fetchRoomInfo(room.roomId).then(info => { room.info = info; });
-}
-const selectedWebRoom = computed(() => webRooms.value.find(r => r.roomId === webSelectedRoom.value) || null);
-
-/* ------------------------------------------------------------------ */
 /*  Backend capture                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -256,11 +212,11 @@ function connectSSE() {
       if (backendSelectedRoom.value && msg.roomId === backendSelectedRoom.value) {
         backendDanmakuList.value.push(msg);
         if (backendDanmakuList.value.length > MAX_DANMAKU) backendDanmakuList.value = backendDanmakuList.value.slice(-MAX_DANMAKU);
-        if (backendAutoScroll.value && captureMode.value === "backend") nextTick(() => scrollEl(backendFeedRef.value));
+        if (backendAutoScroll.value) nextTick(() => scrollEl(backendFeedRef.value));
       }
     } catch { /* */ }
   });
-  es.addEventListener("trigger", (e) => { try { const entry: TriggerLogEntry = JSON.parse(e.data); triggerLog.value.unshift(entry); if (triggerLog.value.length > 200) triggerLog.value = triggerLog.value.slice(0, 200); } catch { /* */ } });
+  es.addEventListener("trigger", (e) => { try { const entry: TriggerLogEntry = JSON.parse(e.data); if (backendSelectedRoom.value && entry.roomId === backendSelectedRoom.value) { triggerLog.value.unshift(entry); if (triggerLog.value.length > 200) triggerLog.value = triggerLog.value.slice(0, 200); } } catch { /* */ } });
   es.addEventListener("song-request", (e) => {
     try {
       const d = JSON.parse(e.data);
@@ -298,16 +254,26 @@ async function backendAddRoom() {
 
 async function backendRemoveRoom(rid: string) {
   try { await fetch(`${API}/rooms/${encodeURIComponent(rid)}`, { method: "DELETE", headers: { "X-Password": getBackendPw() } }); } catch { /* */ }
-  if (backendSelectedRoom.value === rid) { const rem = backendRooms.value.filter(r => r.roomId !== rid); backendSelectedRoom.value = rem.length > 0 ? rem[0].roomId : null; }
+  // Immediately remove from local list and switch selection
+  backendRooms.value = backendRooms.value.filter(r => r.roomId !== rid);
+  if (backendSelectedRoom.value === rid) {
+    const first = backendRooms.value.length > 0 ? backendRooms.value[0].roomId : null;
+    backendSelectedRoom.value = first;
+    backendDanmakuList.value = [];
+    if (first) onBackendRoomSelect(first);
+  }
 }
 
 async function onBackendRoomSelect(rid: string) {
   backendSelectedRoom.value = rid;
   backendDanmakuList.value = [];
+  triggerLog.value = [];
   // Load recent 100 danmaku from recording
   const msgs = await loadRecentDanmaku(rid);
   backendDanmakuList.value = msgs;
   nextTick(() => scrollEl(backendFeedRef.value));
+  // Reload action log for this room
+  loadActionLog();
   // Fetch room info if missing
   const r = backendRooms.value.find(x => x.roomId === rid);
   if (r && !r.info) fetchRoomInfo(rid).then(info => { r.info = info; });
@@ -329,10 +295,14 @@ const ACTION_OPTIONS: { id: string; label: string }[] = [
 function actionLabel(actionId: string): string {
   return ACTION_OPTIONS.find(a => a.id === actionId)?.label || actionId;
 }
-async function addTrigger() { const p = newTriggerPattern.value.trim(); if (!p) return; try { const d = await (await fetch(`${API}/triggers`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pattern: p, action: newTriggerAction.value, description: newTriggerDesc.value.trim(), enabled: true }) })).json(); if (d.ok) { triggers.value.push(d.trigger); newTriggerPattern.value = "#"; newTriggerDesc.value = ""; newTriggerAction.value = "log"; } } catch { /* */ } }
+const newTriggerRoomIds = ref<string[]>([]);
+function roomLabel(rid: string): string { const r = backendRooms.value.find(x => x.roomId === rid); return r?.info?.owner_name || rid; }
+function toggleRoomForTrigger(t: TriggerConfig, rid: string) { if (!t.roomIds) t.roomIds = []; const idx = t.roomIds.indexOf(rid); if (idx >= 0) t.roomIds.splice(idx, 1); else t.roomIds.push(rid); saveTriggers(); }
+function toggleNewTriggerRoom(rid: string) { const idx = newTriggerRoomIds.value.indexOf(rid); if (idx >= 0) newTriggerRoomIds.value.splice(idx, 1); else newTriggerRoomIds.value.push(rid); }
+async function addTrigger() { const p = newTriggerPattern.value.trim(); if (!p) return; try { const d = await (await fetch(`${API}/triggers`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pattern: p, action: newTriggerAction.value, description: newTriggerDesc.value.trim(), enabled: true, roomIds: newTriggerRoomIds.value.length > 0 ? [...newTriggerRoomIds.value] : [] }) })).json(); if (d.ok) { triggers.value.push(d.trigger); newTriggerPattern.value = "#"; newTriggerDesc.value = ""; newTriggerAction.value = "log"; newTriggerRoomIds.value = []; } } catch { /* */ } }
 async function deleteTrigger(id: string) { try { await fetch(`${API}/triggers/${encodeURIComponent(id)}`, { method: "DELETE" }); triggers.value = triggers.value.filter(t => t.id !== id); } catch { /* */ } }
 async function toggleTrigger(t: TriggerConfig) { t.enabled = !t.enabled; await saveTriggers(); }
-async function loadActionLog() { try { const d = await (await fetch(`${API}/action-log?limit=100`)).json(); if (d.ok) triggerLog.value = d.log; } catch { /* */ } }
+async function loadActionLog() { try { const roomParam = backendSelectedRoom.value ? `&roomId=${encodeURIComponent(backendSelectedRoom.value)}` : ''; const d = await (await fetch(`${API}/action-log?limit=100${roomParam}`)).json(); if (d.ok) triggerLog.value = d.log; } catch { /* */ } }
 async function clearActionLog() { try { await fetch(`${API}/action-log/clear`, { method: "POST" }); triggerLog.value = []; } catch { /* */ } }
 
 /* ------------------------------------------------------------------ */
@@ -352,18 +322,10 @@ const selectedBackendRoom = computed(() => backendRooms.value.find(r => r.roomId
 
 onMounted(() => {
   connectSSE(); loadTriggers(); loadActionLog();
-  const savedIds = loadWebRoomsFromStorage();
-  for (const rid of savedIds) {
-    const room: WebRoom = { roomId: rid, status: "disconnected", eventSource: null, danmakuList: [], stats: { total: 0, triggered: 0 }, info: null, error: "" };
-    webRooms.value.push(room);
-    if (webUnlocked.value) webConnectRoom(room);
-  }
-  if (webRooms.value.length > 0) webSelectedRoom.value = webRooms.value[0].roomId;
 });
 
 onUnmounted(() => {
   if (eventSource) { eventSource.close(); eventSource = null; }
-  for (const room of webRooms.value) { if (room.eventSource) { room.eventSource.close(); room.eventSource = null; } }
 });
 
 defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
@@ -371,109 +333,10 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 
 <template>
   <section class="dm-panel">
-    <!-- Mode tabs -->
-    <nav class="dm-mode-tabs">
-      <button :class="{ active: captureMode === 'web' }" @click="captureMode = 'web'">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-        网页直捕
-      </button>
-      <button :class="{ active: captureMode === 'backend' }" @click="captureMode = 'backend'">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
-        后台捕捉
-      </button>
-    </nav>
 
-    <!-- ==================== Web capture ==================== -->
-    <div v-if="captureMode === 'web'" class="dm-mode-content">
-      <div v-if="!webUnlocked" class="dm-lock">
-        <div class="dm-lock-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
-        <p>输入密码解锁网页直捕</p>
-        <div class="dm-lock-row"><input v-model="passwordInput" class="dm-input" type="password" placeholder="密码" @keydown.enter="unlockWeb" /><button class="dm-btn dm-btn--primary" @click="unlockWeb">解锁</button></div>
-        <div v-if="passwordError" class="dm-error">{{ passwordError }}</div>
-      </div>
-      <template v-else>
-        <div class="dm-add-row">
-          <input v-model="webNewRoomId" class="dm-input" type="text" placeholder="直播间号" @keydown.enter="webAddRoom" />
-          <button class="dm-btn dm-btn--primary" :disabled="!webNewRoomId.trim()" @click="webAddRoom">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
-            添加
-          </button>
-        </div>
-        <div v-if="webRooms.length > 0" class="dm-room-list">
-          <div v-for="room in webRooms" :key="room.roomId" class="dm-room-chip" :class="{ selected: webSelectedRoom === room.roomId }" @click="webSelectedRoom = room.roomId">
-            <span class="dm-chip-dot" :class="room.status"></span>
-            <span class="dm-chip-name">{{ room.info?.owner_name || room.roomId }}</span>
-            <span v-if="room.info?.show_status === 1" class="dm-chip-live">LIVE</span>
-            <span class="dm-chip-count">{{ room.stats.total }}</span>
-            <button class="dm-chip-close" @click.stop="webRemoveRoom(room.roomId)">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"/></svg>
-            </button>
-          </div>
-        </div>
-        <div v-if="selectedWebRoom?.info" class="dm-room-card">
-          <img v-if="selectedWebRoom.info.avatar" :src="selectedWebRoom.info.avatar" class="dm-room-avatar" alt="" referrerpolicy="no-referrer" />
-          <div class="dm-room-body">
-            <div class="dm-room-title">{{ selectedWebRoom.info.room_name }}</div>
-            <div class="dm-room-meta">
-              <span>{{ selectedWebRoom.info.owner_name }}</span>
-              <span v-if="selectedWebRoom.info.game_name" class="dm-meta-tag">{{ selectedWebRoom.info.game_name }}</span>
-              <span v-if="selectedWebRoom.info.show_status === 1" class="dm-meta-live">● LIVE</span>
-              <span v-if="selectedWebRoom.info.online_num">{{ formatNum(selectedWebRoom.info.online_num) }} 在线</span>
-            </div>
-          </div>
-<button class="dm-btn dm-btn--ghost dm-btn--sm" @click="openSongPanel(selectedWebRoom.roomId)">点歌统计</button>
-        </div>
-        <div v-if="selectedWebRoom?.error" class="dm-error">{{ selectedWebRoom.error }}</div>
-
-        <nav class="dm-tabs">
-          <button :class="{ active: activeSubTab === 'danmaku' }" @click="activeSubTab = 'danmaku'">弹幕流</button>
-          <button :class="{ active: activeSubTab === 'triggers' }" @click="activeSubTab = 'triggers'">触发器</button>
-          <button :class="{ active: activeSubTab === 'log' }" @click="activeSubTab = 'log'">日志 <sup v-if="triggerLog.length" class="dm-badge">{{ triggerLog.length }}</sup></button>
-        </nav>
-
-        <div v-if="activeSubTab === 'danmaku'" class="dm-feed-section">
-          <div class="dm-feed-toolbar">
-            <label class="dm-check"><input v-model="webAutoScroll" type="checkbox" /> 自动滚动</label>
-            <button v-if="selectedWebRoom" class="dm-btn dm-btn--ghost dm-btn--sm" @click="selectedWebRoom.danmakuList = []">清空</button>
-          </div>
-          <div ref="webFeedRef" class="dm-feed">
-            <div v-if="!selectedWebRoom || selectedWebRoom.danmakuList.length === 0" class="dm-empty">{{ !selectedWebRoom ? '请添加直播间' : selectedWebRoom.status === 'connected' ? '等待弹幕…' : '连接中…' }}</div>
-            <template v-else><div v-for="(msg, idx) in selectedWebRoom.danmakuList" :key="idx" class="dm-msg" :class="{ 'dm-msg--cmd': msg.txt.startsWith('#') }"><span class="dm-time">{{ formatTime(msg.ts) }}</span><span class="dm-nick">{{ msg.nn }}</span><span class="dm-txt">{{ msg.txt }}</span></div></template>
-          </div>
-        </div>
-
-        <div v-if="activeSubTab === 'triggers'" class="dm-trigger-section">
-          <div class="dm-trigger-info">触发器匹配弹幕前缀，提取指令内容。格式：<code>#cmd 参数内容</code>，空格后的内容作为参数传入对应功能。</div>
-          <div class="dm-trigger-add">
-            <input v-model="newTriggerPattern" class="dm-input dm-input--sm" placeholder="前缀" style="width:80px" />
-            <select v-model="newTriggerAction" class="dm-select dm-select--sm">
-              <option v-for="opt in ACTION_OPTIONS" :key="opt.id" :value="opt.id">{{ opt.label }}</option>
-            </select>
-            <input v-model="newTriggerDesc" class="dm-input dm-input--sm" placeholder="描述" style="flex:1" />
-            <button class="dm-btn dm-btn--primary dm-btn--sm" @click="addTrigger">添加</button>
-          </div>
-          <div class="dm-trigger-list">
-            <div v-if="triggers.length === 0" class="dm-empty">暂无触发器</div>
-            <div v-for="t in triggers" :key="t.id" class="dm-trigger-item" :class="{ disabled: !t.enabled }">
-              <button class="dm-toggle" @click="toggleTrigger(t)"><span :class="t.enabled ? 'toggle-on' : 'toggle-off'"></span></button>
-              <div class="dm-trigger-body"><code class="dm-pattern">{{ t.pattern }}</code><span class="dm-action-tag" :class="'dm-action--' + t.action">{{ actionLabel(t.action) }}</span><span v-if="t.description" class="dm-trigger-desc">{{ t.description }}</span></div>
-              <button class="dm-btn dm-btn--ghost dm-btn--sm" @click="deleteTrigger(t.id)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="activeSubTab === 'log'" class="dm-log-section">
-          <div class="dm-log-toolbar"><span class="dm-log-count">{{ triggerLog.length }} 条</span><button class="dm-btn dm-btn--ghost dm-btn--sm" @click="clearActionLog">清空</button><button class="dm-btn dm-btn--ghost dm-btn--sm" @click="loadActionLog">刷新</button></div>
-          <div class="dm-log-list">
-            <div v-if="triggerLog.length === 0" class="dm-empty">暂无记录</div>
-            <div v-for="(entry, idx) in triggerLog" :key="idx" class="dm-log-item"><span class="dm-time">{{ formatTime(entry.ts) }}</span><span class="dm-nick">{{ entry.nickname }}</span><code class="dm-pattern">{{ entry.pattern }}</code><span class="dm-log-text">{{ entry.content }}</span></div>
-          </div>
-        </div>
-      </template>
-    </div>
 
     <!-- ==================== Backend capture ==================== -->
-    <div v-if="captureMode === 'backend'" class="dm-mode-content">
+    <div class="dm-mode-content">
       <div v-if="!backendUnlocked" class="dm-lock">
         <div class="dm-lock-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
         <p>输入密码解锁后台捕捉</p>
@@ -549,11 +412,27 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
             <input v-model="newTriggerDesc" class="dm-input dm-input--sm" placeholder="描述" style="flex:1" />
             <button class="dm-btn dm-btn--primary dm-btn--sm" @click="addTrigger">添加</button>
           </div>
+          <div v-if="backendRooms.length > 0" class="dm-trigger-rooms-row">
+            <span class="dm-trigger-rooms-label">绑定直播间：</span>
+            <span v-for="room in backendRooms" :key="room.roomId" class="dm-trigger-room-chip" :class="{ active: newTriggerRoomIds.includes(room.roomId) }" @click="toggleNewTriggerRoom(room.roomId)">{{ room.info?.owner_name || room.roomId }}</span>
+            <span v-if="newTriggerRoomIds.length === 0" class="dm-trigger-rooms-hint">不选则全部生效</span>
+          </div>
           <div class="dm-trigger-list">
             <div v-if="triggers.length === 0" class="dm-empty">暂无触发器</div>
             <div v-for="t in triggers" :key="t.id" class="dm-trigger-item" :class="{ disabled: !t.enabled }">
               <button class="dm-toggle" @click="toggleTrigger(t)"><span :class="t.enabled ? 'toggle-on' : 'toggle-off'"></span></button>
-              <div class="dm-trigger-body"><code class="dm-pattern">{{ t.pattern }}</code><span class="dm-action-tag" :class="'dm-action--' + t.action">{{ actionLabel(t.action) }}</span><span v-if="t.description" class="dm-trigger-desc">{{ t.description }}</span></div>
+              <div class="dm-trigger-body">
+                <code class="dm-pattern">{{ t.pattern }}</code>
+                <span class="dm-action-tag" :class="'dm-action--' + t.action">{{ actionLabel(t.action) }}</span>
+                <span v-if="t.description" class="dm-trigger-desc">{{ t.description }}</span>
+                <span v-if="t.roomIds && t.roomIds.length > 0" class="dm-trigger-bound-rooms">
+                  <span v-for="rid in t.roomIds" :key="rid" class="dm-trigger-bound-chip" @click.stop="toggleRoomForTrigger(t, rid)">{{ roomLabel(rid) }} ×</span>
+                </span>
+                <span v-else class="dm-trigger-bound-all">全部直播间</span>
+              </div>
+              <div v-if="backendRooms.length > 0" class="dm-trigger-room-edit">
+                <span v-for="room in backendRooms" :key="room.roomId" class="dm-trigger-room-chip dm-trigger-room-chip--sm" :class="{ active: t.roomIds && t.roomIds.includes(room.roomId) }" @click.stop="toggleRoomForTrigger(t, room.roomId)">{{ room.info?.owner_name || room.roomId }}</span>
+              </div>
               <button class="dm-btn dm-btn--ghost dm-btn--sm" @click="deleteTrigger(t.id)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
             </div>
           </div>
@@ -699,27 +578,6 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
   margin: 0 auto;
 }
 
-/* ---- Mode tabs (pill switcher) ---- */
-.dm-mode-tabs {
-  display: inline-flex; gap: 4px; margin-bottom: 1.15rem;
-  padding: 3px; border-radius: 12px;
-  background: color-mix(in srgb, var(--text) 5%, transparent);
-  border: 1px solid color-mix(in srgb, #fff 6%, var(--border));
-  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-}
-.dm-mode-tabs button {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 0.45rem 1.15rem; border: none; background: transparent;
-  color: var(--muted); cursor: pointer; font-size: 0.82rem; font-weight: 600;
-  border-radius: 9px; transition: all 0.2s;
-}
-.dm-mode-tabs button.active {
-  background: var(--surface); color: var(--text);
-  box-shadow: 0 1px 4px rgba(0,0,0,0.1), 0 0 0 1px color-mix(in srgb, #fff 8%, var(--border));
-}
-.dm-mode-tabs button:hover:not(.active) { color: var(--text); background: color-mix(in srgb, #fff 4%, transparent); }
-.dm-mode-tabs button svg { opacity: 0.65; }
-
 /* ---- Lock screen ---- */
 .dm-lock {
   text-align: center; padding: 3.5rem 1rem; color: var(--muted);
@@ -827,7 +685,7 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
   padding: 1px 6px; border-radius: 4px;
   border: 1px solid color-mix(in srgb, #fff 6%, var(--border));
 }
-.dm-meta-live { color: #22c55e; font-weight: 700; font-size: 0.72rem; }
+.dm-meta-live { color: var(--accent); font-weight: 700; font-size: 0.72rem; }
 
 /* ---- Stats bar ---- */
 .dm-stats-bar {
@@ -868,10 +726,10 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 .dm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .dm-btn--primary {
   background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary) 80%, #000));
-  color: #fff; border-color: color-mix(in srgb, #fff 15%, var(--primary));
+  color: var(--on-primary); border-color: color-mix(in srgb, #fff 15%, var(--primary));
   box-shadow: 0 2px 8px color-mix(in srgb, var(--primary) 30%, transparent);
 }
-.dm-btn--primary:hover { filter: brightness(1.1); color: #fff; }
+.dm-btn--primary:hover { filter: brightness(1.1); color: var(--on-primary); }
 .dm-btn--ghost { border-color: transparent; background: transparent; backdrop-filter: none; }
 .dm-btn--ghost:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
 .dm-btn--sm { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
@@ -895,7 +753,7 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 }
 .dm-tabs button:hover:not(.active) { color: var(--text); background: color-mix(in srgb, #fff 3%, transparent); }
 .dm-badge {
-  font-size: 0.56rem; font-weight: 700; color: #fff;
+  font-size: 0.56rem; font-weight: 700; color: var(--on-primary);
   background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary) 70%, #000));
   border-radius: 6px; padding: 1px 5px; margin-left: 3px; vertical-align: super;
 }
@@ -932,8 +790,8 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 }
 .dm-msg:hover { background: color-mix(in srgb, var(--primary) 5%, var(--surface) 40%); }
 .dm-msg--cmd {
-  background: color-mix(in srgb, #f59e0b 6%, transparent);
-  border-left: 2.5px solid #f59e0b;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-left: 2.5px solid var(--accent);
 }
 .dm-time { color: var(--muted); font-size: 0.7rem; flex-shrink: 0; min-width: 58px; font-variant-numeric: tabular-nums; }
 .dm-nick { color: var(--primary); font-weight: 600; flex-shrink: 0; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -951,7 +809,7 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 .dm-trigger-add { display: flex; gap: 0.5rem; align-items: center; }
 .dm-trigger-list { display: flex; flex-direction: column; gap: 6px; }
 .dm-trigger-item {
-  display: flex; align-items: center; gap: 0.6rem;
+  display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
   padding: 0.55rem 0.75rem; border-radius: 12px;
   background: color-mix(in srgb, var(--surface) 50%, transparent);
   border: 1px solid color-mix(in srgb, #fff 6%, var(--border));
@@ -971,16 +829,46 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 .toggle-off::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
 .dm-trigger-body { flex: 1; min-width: 0; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .dm-pattern {
-  background: color-mix(in srgb, #fff 5%, transparent);
-  border: 1px solid color-mix(in srgb, #fff 6%, var(--border));
-  padding: 2px 8px; border-radius: 6px; font-size: 0.82rem; font-weight: 600; color: #f59e0b;
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--primary) 15%, var(--border));
+  padding: 2px 8px; border-radius: 6px; font-size: 0.82rem; font-weight: 600; color: var(--primary);
 }
 .dm-action-tag { font-size: 0.65rem; padding: 2px 7px; border-radius: 5px; font-weight: 600; }
-.dm-action--log { background: #22c55e18; color: #22c55e; }
-.dm-action--song-request { background: #f59e0b18; color: #f59e0b; }
+.dm-action--log { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+.dm-action--song-request { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
 .dm-trigger-desc { font-size: 0.75rem; color: var(--muted); }
 
-/* Select dropdown */
+/* Trigger room binding */
+.dm-trigger-rooms-row {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 0.35rem 0; font-size: 0.75rem;
+}
+.dm-trigger-rooms-label { color: var(--muted); font-weight: 500; flex-shrink: 0; }
+.dm-trigger-rooms-hint { color: var(--muted); font-size: 0.68rem; opacity: 0.7; font-style: italic; }
+.dm-trigger-room-chip {
+  display: inline-flex; align-items: center; padding: 2px 8px;
+  border-radius: 999px; font-size: 0.68rem; font-weight: 500;
+  border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
+  background: color-mix(in srgb, var(--surface) 50%, transparent);
+  color: var(--muted); cursor: pointer; transition: all 0.15s; user-select: none;
+}
+.dm-trigger-room-chip:hover { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); color: var(--text); }
+.dm-trigger-room-chip.active {
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+  color: var(--primary); font-weight: 600;
+}
+.dm-trigger-room-chip--sm { font-size: 0.62rem; padding: 1px 6px; }
+.dm-trigger-room-edit { display: flex; gap: 4px; flex-wrap: wrap; margin-left: auto; flex-shrink: 0; }
+.dm-trigger-bound-rooms { display: inline-flex; gap: 3px; flex-wrap: wrap; }
+.dm-trigger-bound-chip {
+  display: inline-flex; align-items: center; padding: 1px 6px;
+  border-radius: 999px; font-size: 0.62rem; font-weight: 600;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: var(--primary); cursor: pointer; transition: all 0.15s;
+}
+.dm-trigger-bound-chip:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.dm-trigger-bound-all { font-size: 0.65rem; color: var(--muted); opacity: 0.7; font-style: italic; }
 .dm-select {
   padding: 0.35rem 0.5rem;
   border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
@@ -1016,7 +904,7 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
   font-size: 0.8rem;
 }
 .dm-log-item:last-child { border-bottom: none; }
-.dm-log-text { color: #f59e0b; font-weight: 600; word-break: break-all; }
+.dm-log-text { color: var(--accent); font-weight: 600; word-break: break-all; }
 
 /* Song panel overlay — frosted glass (modern music app style) */
 .dm-overlay {
@@ -1119,7 +1007,7 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 .dm-stats-cell--key { flex: 1; min-width: 0; }
 .dm-stats-cell--key code { background: color-mix(in srgb, var(--primary) 8%, var(--bg)); padding: 2px 8px; border-radius: 5px; font-size: 0.82rem; font-weight: 600; color: var(--primary); }
 .dm-stats-cell--count { width: 60px; flex-shrink: 0; text-align: right; font-variant-numeric: tabular-nums; }
-.dm-stats-cell--count strong { color: #f59e0b; }
+.dm-stats-cell--count strong { color: var(--primary); }
 .dm-stats-cell--time { width: 70px; flex-shrink: 0; text-align: right; color: var(--muted); font-size: 0.72rem; font-variant-numeric: tabular-nums; }
 
 /* Song-specific cells */
@@ -1128,7 +1016,7 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
 .dm-stats-cell--song strong { color: var(--primary); font-weight: 600; }
 .dm-stats-cell--artist { width: 90px; flex-shrink: 0; color: var(--muted); text-align: center; font-size: 0.78rem; }
 .dm-stats-cell--count2 { width: 50px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
-.dm-stats-cell--count2 strong { color: #f59e0b; font-size: 0.92rem; font-weight: 700; }
+.dm-stats-cell--count2 strong { color: var(--primary); font-size: 0.92rem; font-weight: 700; }
 
 /* Requester column & dropdown */
 .dm-stats-cell--requester { width: 90px; flex-shrink: 0; text-align: center; font-size: 0.75rem; color: var(--muted); }
@@ -1163,7 +1051,6 @@ defineExpose({ reload: () => { loadTriggers(); loadActionLog(); } });
   .dm-input { width: 100px; font-size: 0.8rem; }
   .dm-feed { height: 300px; font-size: 0.72rem; }
   .dm-tabs button { padding: 0.4rem 0.65rem; font-size: 0.78rem; }
-  .dm-mode-tabs button { padding: 0.4rem 0.8rem; font-size: 0.8rem; }
   .dm-stats-panel { width: 96vw; max-width: 96vw; border-radius: 14px; }
   .dm-song-tabs { margin: 0.5rem 0.85rem 0.4rem; }
   .dm-song-toolbar { padding: 0.25rem 0.85rem 0.4rem; }

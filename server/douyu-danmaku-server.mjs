@@ -345,6 +345,8 @@ function processTriggers(danmaku, roomId) {
   const txt = danmaku.txt || "";
   for (const trigger of triggerConfig.triggers) {
     if (!trigger.enabled) continue;
+    // Check room binding: if roomIds is set and non-empty, only match specified rooms
+    if (trigger.roomIds && trigger.roomIds.length > 0 && !trigger.roomIds.includes(roomId)) continue;
     if (!txt.startsWith(trigger.pattern)) continue;
     const content = txt.substring(trigger.pattern.length).trim();
     if (!content) continue;
@@ -654,7 +656,7 @@ const server = http.createServer(async (req, res) => {
     try { const body = await readBody(req); if (!Array.isArray(body.triggers)) return jsonReply(res, { ok: false, error: "triggers array required" }, 400); triggerConfig.triggers = body.triggers; saveTriggers(triggerConfig); return jsonReply(res, { ok: true, triggers: triggerConfig.triggers }); } catch (e) { return jsonReply(res, { ok: false, error: e.message }, 400); }
   }
   if (path === "/triggers" && req.method === "POST") {
-    try { const body = await readBody(req); const trigger = { id: body.id || `trigger_${Date.now()}`, pattern: body.pattern || "#", action: body.action || "log", enabled: body.enabled !== false, description: body.description || "" }; triggerConfig.triggers.push(trigger); saveTriggers(triggerConfig); return jsonReply(res, { ok: true, trigger }); } catch (e) { return jsonReply(res, { ok: false, error: e.message }, 400); }
+    try { const body = await readBody(req); const trigger = { id: body.id || `trigger_${Date.now()}`, pattern: body.pattern || "#", action: body.action || "log", enabled: body.enabled !== false, description: body.description || "", roomIds: Array.isArray(body.roomIds) ? body.roomIds : [] }; triggerConfig.triggers.push(trigger); saveTriggers(triggerConfig); return jsonReply(res, { ok: true, trigger }); } catch (e) { return jsonReply(res, { ok: false, error: e.message }, 400); }
   }
   if (path.startsWith("/triggers/") && req.method === "DELETE") {
     const id = path.substring("/triggers/".length);
@@ -666,7 +668,10 @@ const server = http.createServer(async (req, res) => {
   // --- Action log ---
   if (path === "/action-log" && req.method === "GET") {
     const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 50));
-    return jsonReply(res, { ok: true, log: actionLog.slice(-limit).reverse(), total: actionLog.length });
+    const roomId = url.searchParams.get("roomId") || null;
+    let filtered = actionLog;
+    if (roomId) filtered = actionLog.filter(e => e.roomId === roomId);
+    return jsonReply(res, { ok: true, log: filtered.slice(-limit).reverse(), total: filtered.length });
   }
   if (path === "/action-log/clear" && req.method === "POST") { actionLog = []; saveActionLog(actionLog); return jsonReply(res, { ok: true }); }
 
