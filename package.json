@@ -1,8 +1,8 @@
 {
   "name": "fmz-dashboard",
   "private": true,
-  "version": "1.1.12",
-  "fmzReleaseLabel": "v1.1.12",
+  "version": "1.1.14",
+  "fmzReleaseLabel": "v1.1.14",
   "fmzFeatures": {
     "sanguo": true,
     "sanguoUi": false,
