@@ -1,16 +1,16 @@
 # fmz-dashboard：版本发布与远端部署（供维护者 / AI 参考）
 
-本文描述从改版本号到静态资源上线、以及赞踩服务自检的固定流程。细节 SSH 与密钥路径见同目录 **`连接服务器与部署步骤.txt`**。
+本文描述从打包到静态资源上线、以及各后端服务部署的固定流程。SSH 密钥与连接信息见本文末尾附录 A。
 
 ---
 
 ## 1. 版本号与构建标签
 
-- 编辑仓库根目录 **`package.json`**：
-  - **`version`**：语义化版本，如 `0.4.0`。
-  - **`fmzReleaseLabel`**：界面与归档目录名，如 `v0.71`（可与 `version` 的展示约定一致，见下文示例）。
-- 同步根目录 **`package-lock.json`** 顶层 `"version"` 及 `packages[""].version`（与 `package.json` 的 `version` 一致）。
-- 构建时 **`vite.config.ts`** 会把 `version` / `fmzReleaseLabel` 注入为全局常量，并写入 **`index.html`** 的 `data-fmz-version`、`data-fmz-label`。
+版本号由 **`scripts/bump-patch.mjs`** 在每次 `npm run pack` 时**自动递增** patch 位（如 `1.1.11` → `1.1.12`），并同步 `fmzReleaseLabel` 为 `v<version>`。**无需手动编辑 `package.json` 的版本号**。
+
+如需跳过自动递增（如大版本升级 `1.1.x` → `1.2.0`），先手动修改 `package.json` 的 `version` 和 `fmzReleaseLabel`，再执行 `npm run pack`（bump-patch 会在新版本基础上 +1 patch）。
+
+构建时 **`vite.config.ts`** 会把 `version` / `fmzReleaseLabel` 注入为全局常量，并写入 **`index.html`** 的 `data-fmz-version`、`data-fmz-label`。
 
 自检本地构建结果：
 
@@ -18,7 +18,7 @@
 dist/index.html 或 release/<fmzReleaseLabel>/index.html
 ```
 
-应含例如：`data-fmz-version="0.7.1"`、`data-fmz-label="v0.71"`。
+应含例如：`data-fmz-version="1.1.12"`、`data-fmz-label="v1.1.12"`。
 
 ---
 
@@ -225,8 +225,10 @@ node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
 
 ## 9. 与本仓库其它文档的关系
 
-- **`连接服务器与部署步骤.txt`**：SSH、密钥权限、**`tencent-cloud-setup.sh`** 用法。
-- **`nginx-fmz-dashboard.conf`**：完整站点与反代片段，部署前替换 **`YOUR_DOMAIN_OR_IP`**。
+- **`tencent-cdn-plan2-8443-origin.md`**：CDN 回源配置（控制台手动操作指南）。
+- **`nginx-fmz-dashboard.conf`** + **`nginx-fmz-dashboard-locations.inc`**：完整站点与反代片段。
+- **`tencent-cloud-setup.sh`**：服务器首次初始化脚本。
+- SSH 密钥与连接方式见本文 **附录 A**。
 
 ---
 
@@ -461,3 +463,140 @@ root@[YOUR_SERVER_IP]:/opt/fmz-audio-server/data/audio/
 ## 12. 大陆环境 HTTPS（直连 443 异常、8443 可访问：走 CDN）
 
 部分网络下访客 **直连 CVM `443`** 可能被链路干扰，但 **`8443`** 正常。在用户侧仍以 **`https://www.域名`** 访问时，需要在 **腾讯云控制台** 配置 **CDN（或 EdgeOne）**：边缘 **443**，**HTTPS 回源到 `服务器IP:8443`**；并在 DNS 把 **`www` 改为 CDN 分配的 CNAME**。**无法通过本仓库脚本或远端 SSH 代你登录控制台完成**。详细点击顺序、`/__fmz_*` 勿缓存、`dianfanbao.net` apex 的处理，见：**`deploy/tencent-cdn-plan2-8443-origin.md`**。
+
+---
+
+## 13. 弹幕捕捉服务（douyu-danmaku-server）部署
+
+弹幕捕捉（`🎯 窃听宝语` Tab）依赖后端 **`douyu-danmaku-server.mjs`**（端口 **8791**）提供弹幕 SSE 推送、触发器管理和点歌统计。
+
+### 13.1 Feature Flag
+
+`package.json` 中 `fmzFeatures.douyuDanmaku` 必须为 **`true`**。
+
+### 13.2 服务器端部署
+
+#### 安装目录
+
+```bash
+mkdir -p /opt/fmz-danmaku-server
+scp -i "KEY" server/douyu-danmaku-server.mjs root@SERVER:/opt/fmz-danmaku-server/
+```
+
+#### systemd 服务
+
+创建 **`/etc/systemd/system/fmz-danmaku.service`**：
+
+```ini
+[Unit]
+Description=FMZ Douyu Danmaku Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/fmz-danmaku-server
+ExecStart=/usr/bin/node /opt/fmz-danmaku-server/douyu-danmaku-server.mjs
+Restart=always
+RestartSec=5
+Environment=PORT=8791
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用并启动：
+
+```bash
+systemctl daemon-reload
+systemctl enable fmz-danmaku
+systemctl start fmz-danmaku
+systemctl status fmz-danmaku
+```
+
+#### Nginx 反代
+
+已在 **`nginx-fmz-dashboard-locations.inc`** 中配置：
+
+```nginx
+location /__fmz_danmaku/ {
+    proxy_pass http://127.0.0.1:8791/;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 86400s;
+    proxy_send_timeout 86400s;
+    chunked_transfer_encoding on;
+}
+```
+
+**注意**：SSE 需要 `proxy_buffering off` 和长超时。
+
+### 13.3 数据持久化
+
+服务运行时数据存储在 **`/opt/fmz-danmaku-server/data/danmaku/`**：
+
+- `backend-rooms.json`：已添加的直播间列表（服务重启后自动恢复连接）
+- `triggers.json`：触发器配置
+- `action-log.json`：触发日志
+- `song-requests/`：各直播间点歌统计
+- `records/`：弹幕录制文件
+
+### 13.4 自检
+
+```bash
+# 检查服务是否运行
+curl http://127.0.0.1:8791/triggers
+# 期望：{"ok":true,"triggers":[...]}
+
+# 经 Nginx 反代检查
+curl -sk https://www.dianfanbao.net/__fmz_danmaku/triggers
+```
+
+### 13.5 更新流程
+
+弹幕服务脚本变更后：
+
+```bash
+scp -i "KEY" server/douyu-danmaku-server.mjs root@SERVER:/opt/fmz-danmaku-server/
+ssh -i "KEY" root@SERVER "systemctl restart fmz-danmaku"
+```
+
+**无需重新打包前端**（除非前端也有变更）。
+
+---
+
+## 附录 A：SSH 连接与密钥
+
+### 服务器信息
+
+| 项目 | 值 |
+|------|-----|
+| 公网 IP | `118.195.150.4` |
+| 用户名 | `root` |
+| 密钥文件（本机） | `E:\Workspace\pem\nimda_tencent.pem` |
+| Web 根目录 | `/var/www/fmz-dashboard/` |
+
+### 连接命令
+
+```powershell
+ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4
+```
+
+### 密钥权限（Windows）
+
+首次使用需设置仅当前用户可读，否则 OpenSSH 报 `Permissions too open`：
+
+```powershell
+icacls "E:\Workspace\pem\nimda_tencent.pem" /inheritance:r
+icacls "E:\Workspace\pem\nimda_tencent.pem" /grant:r "%USERDOMAIN%\%USERNAME%:(R)"
+```
+
+### 安全组入站规则
+
+TCP 22（SSH）、80、443、8443 放行。
+
+### 安全提醒
+
+- 不要把 `.pem` 内容粘贴到聊天或提交到 Git。
+- 若私钥曾泄露，请在腾讯云控制台「更换/作废」密钥并重新绑定。
+

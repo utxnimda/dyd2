@@ -30,4 +30,16 @@ if (pkg.fmzFeatures) {
 }
 
 writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf-8");
+
+// Sync package-lock.json top-level version and packages[""].version
+const lockPath = join(root, "package-lock.json");
+try {
+  const lock = JSON.parse(readFileSync(lockPath, "utf-8"));
+  lock.version = newVersion;
+  if (lock.packages && lock.packages[""]) {
+    lock.packages[""].version = newVersion;
+  }
+  writeFileSync(lockPath, JSON.stringify(lock, null, 2) + "\n", "utf-8");
+} catch { /* package-lock.json may not exist */ }
+
 console.log(`版本号已自动递增: ${parts.map((v, i) => i === 2 ? v - 1 : v).join(".")} → ${newVersion}`);
