@@ -59,8 +59,8 @@ const LS_DM_GIFT_LAYOUT = "fmz_dm_gift_col_layout_v2";
 const LS_DM_DANMAKU_FREE_RECT = "fmz_dm_danmaku_free_rect";
 const LS_DM_GIFT_FREE_RECT = "fmz_dm_gift_free_rect";
 
-/** 生产构建：礼物栏暂不开放（开发环境 `npm run dev` 仍可使用） */
-const RELEASE_GIFT_PANEL_DISABLED = import.meta.env.PROD;
+/** 礼物栏已开放（之前仅限开发环境） */
+const RELEASE_GIFT_PANEL_DISABLED = false;
 
 /** 弹幕/礼物筛选与布局持久化就绪后再写入 localStorage，避免 hydration 抖动 */
 let dmPanelPrefsHydrated = false;
