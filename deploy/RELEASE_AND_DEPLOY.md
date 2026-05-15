@@ -89,9 +89,9 @@ npm run build
 2. **打包**：执行 `npm run pack`（自动递增版本号 → 构建 → 归档，含模块确认）。
 3. **提交版本号变更**：`git add -A && git commit -m "chore: bump version to x.x.x"`。
 4. **推送到远端**：`git push origin main`。
-5. **上传前端**：`scp` 上传 `release/<label>/` 下的 `assets/`、`index.html`、`BUILD_INFO.txt` 到 `/var/www/fmz-dashboard/`。
+5. **上传前端**：`npm run deploy`（自动 SCP 上传 + 清理远端旧 assets 文件 + 验证版本）。
 6. **上传后端服务**（如有变更）：`scp` 上传变更的 server 脚本 + `systemctl restart`。
-7. **验证**：SSH 到服务器确认 `BUILD_INFO.txt` 版本号和服务状态。
+7. **验证**：SSH 到服务器确认 `BUILD_INFO.txt` 版本号和服务状态（`npm run deploy` 已自动执行此步）。
 
 示例：
 
@@ -110,8 +110,8 @@ git commit -m "chore: bump version to 1.1.15"
 # 4. 推送
 git push origin main
 
-# 5. 上传前端
-scp -i "E:\Workspace\pem\nimda_tencent.pem" -r release/v1.1.15/assets release/v1.1.15/index.html release/v1.1.15/BUILD_INFO.txt root@118.195.150.4:/var/www/fmz-dashboard/
+# 5. 上传前端（自动上传 + 清理旧 assets + 验证）
+npm run deploy
 
 # 6. 上传弹幕服务（如有变更）并重启
 scp -i "E:\Workspace\pem\nimda_tencent.pem" server/douyu-danmaku-server.mjs root@118.195.150.4:/opt/fmz-danmaku-server/
@@ -129,11 +129,27 @@ ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "systemctl is-act
 - **上传对象**：`release/<fmzReleaseLabel>/` 下的 **`index.html`**、**`assets/`**、**`BUILD_INFO.txt`**
 - **SSH 私钥与服务器信息**：见附录 A
 
-**Windows PowerShell 示例：**
+**推荐方式（自动上传 + 清理旧 assets + 验证）：**
+
+```bash
+npm run deploy
+```
+
+该命令执行 `scripts/deploy.mjs`，自动完成：
+1. 读取 `package.json` 确定当前 release label
+2. SCP 上传 `assets/`、`index.html`、`BUILD_INFO.txt` 到远端
+3. **自动清理远端旧版本残留的 assets 文件**（对比本地 release 与远端，删除不再需要的文件）
+4. 验证远端 `BUILD_INFO.txt` 和 assets 文件数一致性
+
+也可指定特定版本部署：`node scripts/deploy.mjs v1.1.20`
+
+**手动方式（不推荐）：**
 
 ```powershell
 scp -i "E:\Workspace\pem\nimda_tencent.pem" -r release/v1.1.15/assets release/v1.1.15/index.html release/v1.1.15/BUILD_INFO.txt root@118.195.150.4:/var/www/fmz-dashboard/
 ```
+
+⚠️ 手动 SCP 不会清理旧 assets，多次发布后远端会堆积大量无用文件。
 
 上传后 **无需** 为纯静态文件重启 Nginx（除非改了 Nginx 配置本身）。
 
@@ -202,7 +218,7 @@ node scripts/check-reactions.mjs https://www.dianfanbao.net/__fmz_reactions
 | 打包 | `npm run pack` |
 | 提交版本号 | `git add -A && git commit -m "chore: bump version"` |
 | 推送 | `git push origin main` |
-| 上传前端 | `scp` assets + index.html + BUILD_INFO.txt 到 `/var/www/fmz-dashboard/` |
+| 上传前端 | `npm run deploy`（自动上传 + 清理旧 assets + 验证） |
 | 上传弹幕服务 | `scp douyu-danmaku-server.mjs` → `/opt/fmz-danmaku-server/` + `systemctl restart fmz-danmaku` |
 | 同步歌曲 | `rsync --exclude='source.*'` 到 `/opt/fmz-audio-server/data/audio/`（§11） |
 | 验前端 | SSH 查看 `BUILD_INFO.txt` 或浏览器检查 `data-fmz-version` |

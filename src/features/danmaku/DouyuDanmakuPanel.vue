@@ -2164,6 +2164,7 @@ async function onBackendRoomSelect(rid: string) {
   backendDanmakuList.value = [];
   triggerLog.value = [];
   giftList.value = [];
+  giftStats.value = null;
   // Load recent 100 danmaku from recording
   const msgs = await loadRecentDanmaku(ridNorm);
   backendDanmakuList.value = msgs;
@@ -2174,6 +2175,8 @@ async function onBackendRoomSelect(rid: string) {
   loadGiftsForRoom(ridNorm);
   // Load gift info (names + icons) from Douyu API
   loadGiftInfoForRoom(ridNorm);
+  // Reload gift stats if currently on stats tab
+  if (giftSubTab.value === 'stats') loadGiftStats(ridNorm, giftStatsRange.value);
   // Fetch room info if missing
   const r = backendRooms.value.find((x) => sameDouyuRoomId(x.roomId, ridNorm));
   if (r && !r.info) fetchRoomInfo(ridNorm).then(info => { r.info = info; });
