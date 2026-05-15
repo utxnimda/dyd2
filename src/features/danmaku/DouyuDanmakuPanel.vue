@@ -1801,11 +1801,11 @@ function openBridRoom(brid: string | undefined): void {
   window.open(`https://www.douyu.com/${rid}`, "_blank");
 }
 
-/** Open doseeing fan data page for the given nickname */
-function openUserPage(nn: string | undefined): void {
-  const name = String(nn ?? "").trim();
-  if (!name) return;
-  window.open(`https://www.doseeing.com/data/fan/${encodeURIComponent(name)}`, "_blank");
+/** Open doseeing fan data page for the given uid */
+function openUserPage(uid: string | undefined): void {
+  const id = String(uid ?? "").trim();
+  if (!id) return;
+  window.open(`https://www.doseeing.com/data/fan/${encodeURIComponent(id)}`, "_blank");
 }
 
 /** 解析斗鱼弹幕里的头像/ic 字段；若为 6 位色值则视作等级色而非头像 */
@@ -2649,7 +2649,7 @@ function hideUidTooltip() {
                       </span>
                     </span>
                     <span class="dm-chat-ident">
-                      <span class="dm-chat-nick" @mouseenter="showUidTooltip($event, msg.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(msg.nn)">{{ msg.nn }}</span>
+                      <span class="dm-chat-nick" @mouseenter="showUidTooltip($event, msg.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(msg.uid)">{{ msg.nn }}</span>
                     </span>
                     <span class="dm-chat-colon">：</span><span class="dm-chat-txt">{{ msg.txt }}</span>
                   </div>
@@ -2779,7 +2779,7 @@ function hideUidTooltip() {
                           <span class="dm-chat-pill-bnn">{{ g.bnn }}</span>
                         </span>
                       </span>
-<span class="dm-gift-nick" @mouseenter="showUidTooltip($event, g.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(g.nn)">{{ g.nn || '' }}</span>
+<span class="dm-gift-nick" @mouseenter="showUidTooltip($event, g.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(g.uid)">{{ g.nn || '' }}</span>
                       <span class="dm-gift-name">{{ giftRowDisplayName(g) }}</span>
                       <span class="dm-gift-cnt">×{{ giftPiecesAggregateCount(g) }}</span>
                     </div>
@@ -2843,7 +2843,7 @@ function hideUidTooltip() {
                               >
                                 <span class="dm-chat-pill-ulv-num">{{ item.level }}</span>
                               </span>
-<span class="dm-gift-stats-user-nick" @mouseenter="showUidTooltip($event, item.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(item.nn || item.uid)">{{ item.nn || item.uid }}</span>
+<span class="dm-gift-stats-user-nick" @mouseenter="showUidTooltip($event, item.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(item.uid)">{{ item.nn || item.uid }}</span>
                             </span>
                             <span class="dm-gift-stats-utd dm-gift-stats-utd--revenue">{{ item.totalValue ? item.totalValue.toFixed(1) : '-' }}</span>
                             <span class="dm-gift-stats-utd dm-gift-stats-utd--cost">{{ item.totalCost ? item.totalCost.toFixed(1) : '-' }}</span>
@@ -3109,7 +3109,7 @@ function hideUidTooltip() {
                         </span>
                       </span>
                       <span class="dm-chat-ident">
-                      <span class="dm-chat-nick" @mouseenter="showUidTooltip($event, msg.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(msg.nn)">{{ msg.nn }}</span>
+                      <span class="dm-chat-nick" @mouseenter="showUidTooltip($event, msg.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(msg.uid)">{{ msg.nn }}</span>
                       </span>
                       <span class="dm-chat-colon">：</span><span class="dm-chat-txt">{{ msg.txt }}</span>
                     </div>
@@ -3231,7 +3231,7 @@ function hideUidTooltip() {
                       <span v-if="g.level != null && String(g.level).trim() !== ''" class="dm-chat-pill dm-ulv-el" :class="userLevelQualityClass(String(g.level))">
                         <span class="dm-chat-pill-ulv-num">{{ g.level }}</span>
                       </span>
-<span class="dm-gift-nick" @mouseenter="showUidTooltip($event, g.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(g.nn)">{{ g.nn || '' }}</span>
+<span class="dm-gift-nick" @mouseenter="showUidTooltip($event, g.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(g.uid)">{{ g.nn || '' }}</span>
                       <span class="dm-gift-name">{{ giftRowDisplayName(g) }}</span>
                       <span class="dm-gift-cnt">×{{ giftPiecesAggregateCount(g) }}</span>
                     </div>
@@ -3565,7 +3565,7 @@ function hideUidTooltip() {
                     </span>
                   </span>
                   <span class="dm-chat-ident">
-                      <span class="dm-chat-nick" @mouseenter="showUidTooltip($event, msg.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(msg.nn)">{{ msg.nn }}</span>
+                      <span class="dm-chat-nick" @mouseenter="showUidTooltip($event, msg.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(msg.uid)">{{ msg.nn }}</span>
                   </span>
                   <span class="dm-chat-colon">：</span><span class="dm-chat-txt">{{ msg.txt }}</span>
                 </div>
@@ -3712,7 +3712,7 @@ function hideUidTooltip() {
                         <span class="dm-chat-pill-bnn">{{ g.bnn }}</span>
                       </span>
                     </span>
-<span class="dm-gift-nick" @mouseenter="showUidTooltip($event, g.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(g.nn)">{{ g.nn || '' }}</span>
+<span class="dm-gift-nick" @mouseenter="showUidTooltip($event, g.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(g.uid)">{{ g.nn || '' }}</span>
                       <span class="dm-gift-name">{{ giftRowDisplayName(g) }}</span>
                     <span class="dm-gift-cnt">×{{ giftPiecesAggregateCount(g) }}</span>
                   </div>
@@ -3775,7 +3775,7 @@ function hideUidTooltip() {
                             >
                               <span class="dm-chat-pill-ulv-num">{{ item.level }}</span>
                             </span>
-<span class="dm-gift-stats-user-nick" @mouseenter="showUidTooltip($event, item.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(item.nn || item.uid)">{{ item.nn || item.uid }}</span>
+<span class="dm-gift-stats-user-nick" @mouseenter="showUidTooltip($event, item.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(item.uid)">{{ item.nn || item.uid }}</span>
                           </span>
                           <span class="dm-gift-stats-utd dm-gift-stats-utd--revenue">{{ item.totalValue ? item.totalValue.toFixed(1) : '-' }}</span>
                           <span class="dm-gift-stats-utd dm-gift-stats-utd--cost">{{ item.totalCost ? item.totalCost.toFixed(1) : '-' }}</span>
@@ -4011,7 +4011,7 @@ function hideUidTooltip() {
           <div class="dm-log-toolbar"><span class="dm-log-count">{{ triggerLog.length }} 条</span><button class="dm-btn dm-btn--ghost dm-btn--sm" @click="clearActionLog">清空</button><button class="dm-btn dm-btn--ghost dm-btn--sm" @click="loadActionLog">刷新</button></div>
           <div class="dm-log-list">
             <div v-if="triggerLog.length === 0" class="dm-empty">暂无记录</div>
-            <div v-for="(entry, idx) in triggerLog" :key="idx" class="dm-log-item"><span class="dm-time">{{ formatTime(entry.ts) }}</span><span class="dm-nick" @click="openUserPage(entry.nickname)">{{ entry.nickname }}</span><code class="dm-pattern">{{ entry.pattern }}</code><span class="dm-log-text">{{ entry.content }}</span></div>
+            <div v-for="(entry, idx) in triggerLog" :key="idx" class="dm-log-item"><span class="dm-time">{{ formatTime(entry.ts) }}</span><span class="dm-nick" @click="openUserPage(entry.uid)">{{ entry.nickname }}</span><code class="dm-pattern">{{ entry.pattern }}</code><span class="dm-log-text">{{ entry.content }}</span></div>
           </div>
         </div>
       </template>

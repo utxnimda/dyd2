@@ -27,6 +27,7 @@ const metaPath = join(target, "BUILD_INFO.txt");
 /* ------------------------------------------------------------------ */
 const FEATURE_LABELS = {
   sanguo:      "三国守塔",
+  sanguoUi:    "三国守塔 UI（仅本地）",
   baobao:      "百宝箱（B站搜索）",
   audio:        "🎶 忽闻宝声 / 曲库与播放（及拾观宝片、遥忆宝章提取链路）",
   audioPlugin:  "音频提取插件（仅本地）",

@@ -100,10 +100,8 @@ npm run build
 git add -A
 git commit -m "feat: some feature"
 
-# 2. 打包（自动 bump + build + pack）
-node scripts/bump-patch.mjs
-npx vite build
-node scripts/pack-release.mjs
+# 2. 打包（自动 bump + build + pack + 模块确认）
+npm run pack
 
 # 3. 提交版本号
 git add -A
@@ -177,15 +175,15 @@ ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "cat /var/www/fmz
 # 本机直连 Node
 node scripts/check-reactions.mjs http://127.0.0.1:8787
 
-# 经 Nginx 同源路径（替换为你的域名或 IP）
-node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
+# 经 Nginx 同源路径
+node scripts/check-reactions.mjs https://www.dianfanbao.net/__fmz_reactions
 ```
 
 **自签 HTTPS** 时 Node 可能校验证书失败，仅用于排查时可临时：
 
 ```powershell
 $env:NODE_TLS_REJECT_UNAUTHORIZED='0'
-node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
+node scripts/check-reactions.mjs https://www.dianfanbao.net/__fmz_reactions
 ```
 
 **期望**：三步均为 JSON、`POST` 的 `code === 0`。
@@ -201,7 +199,7 @@ node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
 | 步骤 | 命令或操作 |
 |------|------------|
 | 提交代码 | `git add -A && git commit` |
-| 打包 | `node scripts/bump-patch.mjs && npx vite build && node scripts/pack-release.mjs` |
+| 打包 | `npm run pack` |
 | 提交版本号 | `git add -A && git commit -m "chore: bump version"` |
 | 推送 | `git push origin main` |
 | 上传前端 | `scp` assets + index.html + BUILD_INFO.txt 到 `/var/www/fmz-dashboard/` |
@@ -242,7 +240,6 @@ node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
 
 - **`tencent-cdn-plan2-8443-origin.md`**：CDN 回源配置（控制台手动操作指南）。
 - **`nginx-fmz-dashboard.conf`** + **`nginx-fmz-dashboard-locations.inc`**：完整站点与反代片段。
-- **`tencent-cloud-setup.sh`**：服务器首次初始化脚本。
 - SSH 密钥与连接方式见本文 **附录 A**。
 
 ---
@@ -256,7 +253,7 @@ node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
 3. **编译 `better-sqlite3`**：系统默认 **g++** 可能不支持 **C++20**。需安装 **`gcc-toolset-12`**，并在 **`npm ci` 前执行**：`source /opt/rh/gcc-toolset-12/enable`（仅编译时需要；运行期不需要）。
 4. **安装目录示例**：`/opt/fmz-reactions-server`（内含 **`reactions-server.mjs`**、`package.json`、`package-lock.json`，以及 **`npm ci`** 后的 **`node_modules`**）。数据库默认在同级 **`data/reactions.db`**。
 5. **systemd**：单元示例见远端 **`/etc/systemd/system/fmz-reactions.service`**——**`WorkingDirectory`**指向上述目录，**`ExecStart=/usr/bin/node .../reactions-server.mjs`**，**`Environment=PORT=8787`**。修改单元后 **`systemctl daemon-reload && systemctl restart fmz-reactions`**。
-6. **自检**：`node scripts/check-reactions.mjs https://服务器/__fmz_reactions`（自签证书见上文 **`NODE_TLS_REJECT_UNAUTHORIZED`**）。
+6. **自检**：`node scripts/check-reactions.mjs https://www.dianfanbao.net/__fmz_reactions`（自签证书见上文 **`NODE_TLS_REJECT_UNAUTHORIZED`**）。
 
 ---
 
@@ -313,7 +310,7 @@ server/data/audio/
 ```bash
 mkdir -p /opt/fmz-audio-server
 # 从本地上传服务端脚本
-scp -i KEY server/audio-extractor-server.mjs root@SERVER:/opt/fmz-audio-server/
+scp -i "E:\Workspace\pem\nimda_tencent.pem" server/audio-extractor-server.mjs root@118.195.150.4:/opt/fmz-audio-server/
 ```
 
 #### 11.3.2 歌曲数据同步
@@ -324,13 +321,13 @@ scp -i KEY server/audio-extractor-server.mjs root@SERVER:/opt/fmz-audio-server/
 
 ```powershell
 # 同步所有歌曲数据（含 source.mp3，完整但体积大）
-scp -i "[YOUR_KEY_PATH]" -o StrictHostKeyChecking=accept-new `
+scp -i "E:\Workspace\pem\nimda_tencent.pem" -o StrictHostKeyChecking=accept-new `
   -r .\server\data\audio\ `
-  root@[YOUR_SERVER_IP]:/opt/fmz-audio-server/data/audio/
+  root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 
 # 仅同步歌曲文件（排除 source.mp3，节省带宽）
 # 需要在服务器上使用 rsync：
-# rsync -avz --exclude='source.*' -e "ssh -i KEY" ./server/data/audio/ root@SERVER:/opt/fmz-audio-server/data/audio/
+# rsync -avz --exclude='source.*' -e "ssh -i E:\Workspace\pem\nimda_tencent.pem" ./server/data/audio/ root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 ```
 
 **Linux / WSL 示例（推荐，支持增量 + 排除）：**
@@ -338,9 +335,9 @@ scp -i "[YOUR_KEY_PATH]" -o StrictHostKeyChecking=accept-new `
 ```bash
 rsync -avz --progress \
   --exclude='source.*' \
-  -e "ssh -i [YOUR_KEY_PATH]" \
+  -e "ssh -i E:\Workspace\pem\nimda_tencent.pem" \
   ./server/data/audio/ \
-  root@[YOUR_SERVER_IP]:/opt/fmz-audio-server/data/audio/
+  root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 ```
 
 #### 11.3.3 环境变量
@@ -466,9 +463,9 @@ curl -sk https://www.dianfanbao.net/__fmz_audio/library
 ```bash
 # 增量同步新歌曲（rsync 只传输新增/变更的文件）
 rsync -avz --progress --exclude='source.*' \
--e "ssh -i [YOUR_KEY_PATH]" \
+  -e "ssh -i E:\Workspace\pem\nimda_tencent.pem" \
   ./server/data/audio/ \
-root@[YOUR_SERVER_IP]:/opt/fmz-audio-server/data/audio/
+  root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 ```
 
 歌曲库前端会自动从 `/library` API 获取最新列表，无需任何额外操作。
@@ -495,7 +492,7 @@ root@[YOUR_SERVER_IP]:/opt/fmz-audio-server/data/audio/
 
 ```bash
 mkdir -p /opt/fmz-danmaku-server
-scp -i "KEY" server/douyu-danmaku-server.mjs root@SERVER:/opt/fmz-danmaku-server/
+scp -i "E:\Workspace\pem\nimda_tencent.pem" server/douyu-danmaku-server.mjs root@118.195.150.4:/opt/fmz-danmaku-server/
 ```
 
 #### systemd 服务
@@ -572,8 +569,8 @@ curl -sk https://www.dianfanbao.net/__fmz_danmaku/triggers
 弹幕服务脚本变更后：
 
 ```bash
-scp -i "KEY" server/douyu-danmaku-server.mjs root@SERVER:/opt/fmz-danmaku-server/
-ssh -i "KEY" root@SERVER "systemctl restart fmz-danmaku"
+scp -i "E:\Workspace\pem\nimda_tencent.pem" server/douyu-danmaku-server.mjs root@118.195.150.4:/opt/fmz-danmaku-server/
+ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "systemctl restart fmz-danmaku"
 ```
 
 **无需重新打包前端**（除非前端也有变更）。
