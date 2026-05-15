@@ -8,14 +8,15 @@
     "sanguoUi": false,
     "baobao": true,
     "audio": true,
-    "audioPlugin": false,
+    "audioPlugin": "local",
     "battle": false,
     "treasury": false,
     "preliminary": false,
     "users": false,
     "quota": false,
     "crimes": true,
-    "douyuDanmaku": true
+    "douyuDanmaku": true,
+    "aiAgent": "local"
   },
   "type": "module",
   "scripts": {
@@ -27,6 +28,7 @@
     "audio-server": "node server/audio-extractor-server.mjs",
     "crimes-server": "node server/crimes-server.mjs",
     "danmaku-server": "node server/douyu-danmaku-server.mjs",
+    "ai-agent-server": "node server/ai-agent-server.mjs",
     "quota-server": "node server/quota-server.cjs",
     "check:reactions": "node scripts/check-reactions.mjs",
     "pack": "node scripts/bump-patch.mjs && vite build && node scripts/pack-release.mjs",

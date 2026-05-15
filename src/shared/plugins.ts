@@ -14,6 +14,12 @@ export interface PluginDescriptor {
   component: Component | null;
   /** Build-time feature flag — when false the plugin is completely excluded */
   enabled: boolean;
+  /**
+   * Panel display mode:
+   * - "float" (default): draggable floating window
+   * - "side": right-side slide-out panel (full height, like ChatGPT)
+   */
+  panelMode?: "float" | "side";
 }
 
 /**
@@ -34,6 +40,20 @@ export const ALL_PLUGINS: PluginDescriptor[] = [
           )
         : null,
     enabled: __FEATURE_AUDIO__ && __FEATURE_AUDIO_PLUGIN__,
+  },
+  {
+    id: "ai-agent",
+    label: "AI 分析",
+    icon: "🤖",
+    description: "将弹幕数据发送给 AI 进行智能分析",
+    component:
+      __FEATURE_AI_AGENT__
+        ? defineAsyncComponent(
+            () => import("../features/ai-agent/AiAgentPanel.vue"),
+          )
+        : null,
+    enabled: __FEATURE_AI_AGENT__,
+    panelMode: "side",
   },
 ];
 

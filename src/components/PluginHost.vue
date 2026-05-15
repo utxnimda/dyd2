@@ -10,6 +10,11 @@ import {
 
 const plugins = getEnabledPlugins();
 
+/** Plugins that use floating panel mode */
+const floatPlugins = computed(() => plugins.filter((p) => (p.panelMode || "float") === "float"));
+/** Plugins that use side panel mode */
+const sidePlugins = computed(() => plugins.filter((p) => p.panelMode === "side"));
+
 /** Which plugins are currently activated (panel visible) */
 const activePlugins = reactive<Set<string>>(new Set());
 
@@ -134,12 +139,46 @@ onUnmounted(() => {
 
 const hasPlugins = computed(() => plugins.length > 0);
 
-const activeList = computed(() =>
-  plugins.filter((p) => activePlugins.has(p.id)),
+/** Dedicated AI Agent plugin (for the standalone AI button) */
+const aiAgentPlugin = computed(() => plugins.find((p) => p.id === "ai-agent") || null);
+const isAiAgentActive = computed(() => activePlugins.has("ai-agent"));
+/** Whether the AI side panel is currently open (rendered in App.vue) */
+const isAiSidePanelOpen = computed(() =>
+  isAiAgentActive.value && aiAgentPlugin.value?.panelMode === "side",
 );
+
+function openAiSidePanel() {
+  if (!isAiSidePanelOpen.value) {
+    // Ensure AI agent is active first (it should be, since button is only shown when active)
+    if (!activePlugins.has("ai-agent")) activePlugins.add("ai-agent");
+  }
+}
+
+const activeFloatList = computed(() =>
+  floatPlugins.value.filter((p) => activePlugins.has(p.id)),
+);
+
+const activeSidePlugin = computed<PluginDescriptor | null>(() =>
+  sidePlugins.value.find((p) => activePlugins.has(p.id)) || null,
+);
+
+/** Expose side panel state so App.vue can render it inline */
+defineExpose({ activeSidePlugin, closePlugin });
 </script>
 
 <template>
+  <!-- Standalone AI Agent circle button (only shown when AI plugin is toggled ON in plugin menu) -->
+  <button
+    v-if="isAiAgentActive"
+    type="button"
+    class="ai-circle-btn"
+    :class="{ open: isAiSidePanelOpen }"
+    title="打开 AI 助手面板"
+    @click="openAiSidePanel"
+  >
+    AI
+  </button>
+
   <!-- Plugin trigger button (sits in header bar) -->
   <div v-if="hasPlugins" ref="menuRef" class="plugin-wrapper">
     <button
@@ -190,9 +229,9 @@ const activeList = computed(() =>
       </button>
     </div>
 
-    <!-- Active floating panels -->
+    <!-- Active floating panels (float mode) -->
     <Transition
-      v-for="p in activeList"
+      v-for="p in activeFloatList"
       :key="p.id"
       name="pfloat"
     >
@@ -202,7 +241,7 @@ const activeList = computed(() =>
         :style="{
           left: (positions[p.id]?.x ?? 100) + 'px',
           top: (positions[p.id]?.y ?? 80) + 'px',
-      width: (sizes[p.id]?.w ?? 480) + 'px',
+          width: (sizes[p.id]?.w ?? 480) + 'px',
         }"
       >
         <div class="plugin-float-header" @mousedown="onDragStart($event, p.id)">
@@ -223,10 +262,49 @@ const activeList = computed(() =>
         </div>
       </div>
     </Transition>
+
   </Teleport>
 </template>
 
 <style scoped>
+/* ---- Standalone AI circle button ---- */
+.ai-circle-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid rgba(124, 77, 255, 0.5);
+  background: linear-gradient(135deg, rgba(124, 77, 255, 0.12) 0%, rgba(77, 171, 255, 0.12) 100%);
+  color: #a78bfa;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  position: relative;
+  flex-shrink: 0;
+}
+.ai-circle-btn:hover {
+  border-color: rgba(124, 77, 255, 0.8);
+  background: linear-gradient(135deg, rgba(124, 77, 255, 0.22) 0%, rgba(77, 171, 255, 0.22) 100%);
+  color: #c4b5fd;
+  transform: scale(1.08);
+  box-shadow: 0 0 12px rgba(124, 77, 255, 0.3);
+}
+.ai-circle-btn.open {
+  background: linear-gradient(135deg, #7c4dff 0%, #4dabff 100%);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 0 14px rgba(124, 77, 255, 0.4);
+}
+.ai-circle-btn.open:hover {
+  color: #fff;
+  box-shadow: 0 0 18px rgba(124, 77, 255, 0.55);
+  transform: scale(1.08);
+}
+
 /* ---- Trigger button (same style as gear button) ---- */
 .plugin-wrapper {
   position: relative;
@@ -452,6 +530,8 @@ const activeList = computed(() =>
   opacity: 0;
   transform: scale(0.95) translateY(4px);
 }
+
+
 
 /* ---- Minimised pills ---- */
 .plugin-minimised-bar {

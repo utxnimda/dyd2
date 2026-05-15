@@ -257,6 +257,37 @@ const douyuRef = ref<any>(null);
 const crimesRef = ref<any>(null);
 const danmakuRef = ref<any>(null);
 
+/** PluginHost ref to access side panel state */
+const pluginHostRef = ref<InstanceType<typeof PluginHost> | null>(null);
+const sidePlugin = computed(() => pluginHostRef.value?.activeSidePlugin ?? null);
+function closeSidePlugin() {
+  if (sidePlugin.value) pluginHostRef.value?.closePlugin(sidePlugin.value.id);
+}
+
+/* ---- Side panel resize drag ---- */
+const sidePanelWidth = ref(420);
+const isResizing = ref(false);
+
+function onResizeStart(e: MouseEvent) {
+  e.preventDefault();
+  isResizing.value = true;
+  const startX = e.clientX;
+  const startW = sidePanelWidth.value;
+
+  function onMove(ev: MouseEvent) {
+    // Dragging left increases width, dragging right decreases
+    const delta = startX - ev.clientX;
+    sidePanelWidth.value = Math.max(280, Math.min(startW + delta, 800));
+  }
+  function onUp() {
+    isResizing.value = false;
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+  }
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+}
+
 /** Reload the currently active panel (shared by onApply / loadActivePanel / tab-switch). */
 function reloadPanel(t: MainTab) {
   if (__FEATURE_PRELIMINARY__ && t === "pre") preRef.value?.load();
@@ -373,9 +404,11 @@ watch(showBaobao, (visible) => {
   <template v-else>
   <SettingsBar v-model="settings" @apply="onApply">
     <template #extra-actions>
-      <PluginHost />
+      <PluginHost ref="pluginHostRef" />
     </template>
   </SettingsBar>
+  <div class="app-body" :class="{ 'has-side-panel': !!sidePlugin, 'is-resizing': isResizing }">
+  <div class="app-main">
   <nav class="nav" aria-label="主导航">
     <button v-if="F_PRELIMINARY" :class="{ on: tab === 'pre' }" type="button" @click="selectTab('pre')">预赛数据</button>
     <button v-if="F_USERS" :class="{ on: tab === 'users' }" type="button" @click="selectTab('users')">用户积分</button>
@@ -446,16 +479,90 @@ watch(showBaobao, (visible) => {
   </main>
   <!-- Global floating audio player (always available when audio feature is on) -->
   <GlobalAudioPlayer v-if="F_AUDIO && GlobalAudioPlayer" />
+  </div><!-- /.app-main -->
+
+  <!-- Side panel (inline, same level as main content) -->
+  <Transition name="side-slide">
+    <aside v-if="sidePlugin" class="app-side-panel" :style="{ width: sidePanelWidth + 'px', minWidth: sidePanelWidth + 'px' }">
+      <div class="side-panel-resize-handle" @mousedown="onResizeStart" />
+      <div class="side-panel-body">
+        <component :is="sidePlugin.component!" />
+      </div>
+    </aside>
+  </Transition>
+  </div><!-- /.app-body -->
   </template>
 </template>
 
 <style scoped>
+/* ---- Flex layout: main + side panel ---- */
+.app-body {
+  display: flex;
+  height: calc(100vh - 60px); /* subtract header height */
+  overflow: hidden;
+}
+.app-body.is-resizing {
+  user-select: none;
+  cursor: col-resize;
+}
+.app-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- Side panel (same level as main) ---- */
+.app-side-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: row;
+  background: var(--surface);
+  overflow: hidden;
+  position: relative;
+}
+.side-panel-resize-handle {
+  width: 4px;
+  cursor: col-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.side-panel-resize-handle:hover,
+.side-panel-resize-handle:active {
+  background: var(--primary);
+}
+.side-panel-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Side panel slide transition */
+.side-slide-enter-active {
+  transition: width 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+}
+.side-slide-leave-active {
+  transition: width 0.2s ease, opacity 0.2s ease;
+}
+.side-slide-enter-from,
+.side-slide-leave-to {
+  width: 0;
+  min-width: 0;
+  opacity: 0;
+}
+
+/* ---- Nav ---- */
 .nav {
   display: flex;
   gap: 0.25rem;
   padding: 0.75rem 1.25rem;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
+  flex-shrink: 0;
 }
 .nav button {
   padding: 0.5rem 1.1rem;
@@ -475,6 +582,7 @@ watch(showBaobao, (visible) => {
 main {
   max-width: 1200px;
   margin: 0 auto;
+  flex: 1;
 }
 .panel-hud {
   margin: 0.75rem 1.25rem 0;

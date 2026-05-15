@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, reactive, onMounted, onUnmounted, nextTick, watch } from "vue";
 import DmToolbarMenuSelect from "./DmToolbarMenuSelect.vue";
+import { requestPluginOpen } from "../../shared/plugins";
+
+/** AI Agent plugin feature flag (exposed to template) */
+const F_AI_AGENT = typeof __FEATURE_AI_AGENT__ !== "undefined" && __FEATURE_AI_AGENT__;
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                             */
@@ -1808,6 +1812,21 @@ function openUserPage(uid: string | undefined): void {
   window.open(`https://www.doseeing.com/data/fan/${encodeURIComponent(id)}`, "_blank");
 }
 
+/** Send current danmaku data to AI Agent plugin for analysis */
+function sendToAiAgent(): void {
+  const list = backendDanmakuList.value;
+  if (list.length === 0) return;
+  const text = list.map((m) => {
+    const time = new Date(m.ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return `[${time}] ${m.nn}: ${m.txt}`;
+  }).join("\n");
+  requestPluginOpen("ai-agent", {
+    danmakuText: text,
+    danmakuCount: list.length,
+    roomId: backendSelectedRoom.value || "",
+  });
+}
+
 /** 解析斗鱼弹幕里的头像/ic 字段；若为 6 位色值则视作等级色而非头像 */
 function normalizeDouyuUserAvatarHref(raw: string): string {
   const t = String(raw || "").trim();
@@ -2585,7 +2604,8 @@ function hideUidTooltip() {
                         </div>
                         <div class="dm-toolbar-mode-cluster">
                           <div class="dm-toolbar-mode-cluster-actions">
-                            <button type="button" class="dm-toolbar-soft-btn" title="清空当前弹幕列表" @click="backendDanmakuList = []">清空</button>
+            <button type="button" class="dm-toolbar-soft-btn" title="清空当前弹幕列表" @click="backendDanmakuList = []">清空</button>
+                            <button v-if="F_AI_AGENT" type="button" class="dm-toolbar-soft-btn dm-toolbar-ai-btn" title="将当前弹幕发送到 AI 分析" @click="sendToAiAgent">🤖 AI</button>
                           </div>
                           <div v-if="!isMobile" class="dm-toolbar-layout-slot">
                             <DmToolbarMenuSelect
@@ -3059,7 +3079,8 @@ function hideUidTooltip() {
                         </div>
                         <div class="dm-toolbar-mode-cluster">
                           <div class="dm-toolbar-mode-cluster-actions">
-                            <button type="button" class="dm-toolbar-soft-btn" title="清空当前弹幕列表" @click="backendDanmakuList = []">清空</button>
+            <button type="button" class="dm-toolbar-soft-btn" title="清空当前弹幕列表" @click="backendDanmakuList = []">清空</button>
+                            <button v-if="F_AI_AGENT" type="button" class="dm-toolbar-soft-btn dm-toolbar-ai-btn" title="将当前弹幕发送到 AI 分析" @click="sendToAiAgent">🤖 AI</button>
                           </div>
                           <div class="dm-toolbar-layout-slot">
                             <DmToolbarMenuSelect
@@ -3501,9 +3522,10 @@ function hideUidTooltip() {
                     </div>
                     <div class="dm-toolbar-mode-cluster">
                       <div class="dm-toolbar-mode-cluster-actions">
-                        <button type="button" class="dm-toolbar-soft-btn" title="清空当前弹幕列表" @click="backendDanmakuList = []">清空</button>
-                      </div>
-                      <div class="dm-toolbar-layout-slot">
+            <button type="button" class="dm-toolbar-soft-btn" title="清空当前弹幕列表" @click="backendDanmakuList = []">清空</button>
+                            <button v-if="F_AI_AGENT" type="button" class="dm-toolbar-soft-btn dm-toolbar-ai-btn" title="将当前弹幕发送到 AI 分析" @click="sendToAiAgent">🤖 AI</button>
+                          </div>
+                          <div class="dm-toolbar-layout-slot">
                         <DmToolbarMenuSelect
                           :model-value="danmakuColumnMode"
                           variant="layout"
@@ -4986,6 +5008,16 @@ function hideUidTooltip() {
   box-shadow:
     0 0 0 2px color-mix(in srgb, var(--primary) 40%, transparent),
     0 0 0 3px color-mix(in srgb, var(--primary) 24%, transparent);
+}
+
+.dm-toolbar-ai-btn {
+  color: #8b5cf6;
+  font-weight: 700;
+}
+.dm-toolbar-ai-btn:hover {
+  color: #7c3aed;
+  background: rgba(139, 92, 246, 0.1);
+  text-decoration-color: rgba(139, 92, 246, 0.5);
 }
 
 .dm-toolbar-mode-cluster .dm-toolbar-layout-slot {
