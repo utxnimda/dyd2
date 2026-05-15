@@ -81,46 +81,60 @@ npm run build
 
 ---
 
-## 3. 发布流程（推荐顺序：先入库，再推送）
+## 3. 发布流程（推荐顺序）
 
-静态站点**不会**在 `git push` 后自动更新；**源码与文档**仍需先进入版本库并推送到远端，便于备份与协作。建议按下面顺序操作（与 §4的服务器同步相互独立）：
+静态站点**不会**在 `git push` 后自动更新；**源码与文档**仍需先进入版本库并推送到远端，便于备份与协作。建议按下面顺序操作：
 
-1. **改版本号**：完成 §1（`package.json`、`package-lock.json` 顶层版本与 `fmzReleaseLabel`）。
-2. **本地打包自检**：执行 §2 的 `npm run pack`，打开 `release/<fmzReleaseLabel>/index.html` 或检查其中 `data-fmz-version` / `data-fmz-label` 是否为预期。
-3. **入库（Git 提交）**：提交本次发布相关的**源码与文档**（含 `package.json` / `package-lock.json`、`deploy/RELEASE_AND_DEPLOY.md` 等）。**不要**提交 `dist/`、`release/`（已在 `.gitignore`）。
-4. **推送到远端**：`git push` 到约定分支（如 `main`）。
+1. **提交代码**：`git add -A && git commit`（提交功能代码变更）。
+2. **打包**：执行 `npm run pack`（自动递增版本号 → 构建 → 归档，含模块确认）。
+3. **提交版本号变更**：`git add -A && git commit -m "chore: bump version to x.x.x"`。
+4. **推送到远端**：`git push origin main`。
+5. **上传前端**：`scp` 上传 `release/<label>/` 下的 `assets/`、`index.html`、`BUILD_INFO.txt` 到 `/var/www/fmz-dashboard/`。
+6. **上传后端服务**（如有变更）：`scp` 上传变更的 server 脚本 + `systemctl restart`。
+7. **验证**：SSH 到服务器确认 `BUILD_INFO.txt` 版本号和服务状态。
 
-示例（分支名按仓库实际为准）：
+示例：
 
 ```bash
+# 1. 提交代码
 git add -A
-git status
-git commit -m "release: fmz-dashboard v0.7.1 (v0.71)"
-git push origin main
-```
+git commit -m "feat: some feature"
 
-完成后再按 §4 将本机 **`release/<fmzReleaseLabel>/`** 同步到 Web 服务器。
+# 2. 打包（自动 bump + build + pack）
+node scripts/bump-patch.mjs
+npx vite build
+node scripts/pack-release.mjs
+
+# 3. 提交版本号
+git add -A
+git commit -m "chore: bump version to 1.1.15"
+
+# 4. 推送
+git push origin main
+
+# 5. 上传前端
+scp -i "E:\Workspace\pem\nimda_tencent.pem" -r release/v1.1.15/assets release/v1.1.15/index.html release/v1.1.15/BUILD_INFO.txt root@118.195.150.4:/var/www/fmz-dashboard/
+
+# 6. 上传弹幕服务（如有变更）并重启
+scp -i "E:\Workspace\pem\nimda_tencent.pem" server/douyu-danmaku-server.mjs root@118.195.150.4:/opt/fmz-danmaku-server/
+ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "systemctl restart fmz-danmaku"
+
+# 7. 验证
+ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "systemctl is-active fmz-danmaku && cat /var/www/fmz-dashboard/BUILD_INFO.txt"
+```
 
 ---
 
-## 4. 远端静态资源部署（腾讯云示例）
-
-目标主机、用户与 Web 根目录以实际环境为准；示例与 **`连接服务器与部署步骤.txt`** 一致：
+## 4. 远端静态资源部署
 
 - **Web 根目录**：`/var/www/fmz-dashboard/`
-- **上传对象**：优先 **`release/<fmzReleaseLabel>/`** 下的 **`index.html`**、**`assets/`**、（可选）**`BUILD_INFO.txt`**
-- **SSH 私钥（本机路径）**：以 **`deploy/连接服务器与部署步骤.txt`** 为准；当前环境常用 **[YOUR_KEY_PATH]**（须为下载的 `.pem` 文件，不是控制台里的密钥 ID）。
+- **上传对象**：`release/<fmzReleaseLabel>/` 下的 **`index.html`**、**`assets/`**、**`BUILD_INFO.txt`**
+- **SSH 私钥与服务器信息**：见附录 A
 
-**Windows PowerShell（OpenSSH `scp`）示例：**
+**Windows PowerShell 示例：**
 
 ```powershell
-Set-Location "D:\path\to\fmz-dashboard"
-npm run pack
-scp -i "[YOUR_KEY_PATH]" -o StrictHostKeyChecking=accept-new `
-  -r .\release\v0.71\assets `
-  .\release\v0.71\index.html `
-  .\release\v0.71\BUILD_INFO.txt `
-  root@YOUR_SERVER_IP:/var/www/fmz-dashboard/
+scp -i "E:\Workspace\pem\nimda_tencent.pem" -r release/v1.1.15/assets release/v1.1.15/index.html release/v1.1.15/BUILD_INFO.txt root@118.195.150.4:/var/www/fmz-dashboard/
 ```
 
 上传后 **无需** 为纯静态文件重启 Nginx（除非改了 Nginx 配置本身）。
@@ -129,15 +143,13 @@ scp -i "[YOUR_KEY_PATH]" -o StrictHostKeyChecking=accept-new `
 
 ## 5. 验证前端版本是否已生效
 
-用 **HTTPS** 拉首页（自签证书需 **`curl -k`**）：
-
 ```bash
-curl -sk "https://YOUR_SERVER_IP/" | findstr /i "data-fmz"
+ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "cat /var/www/fmz-dashboard/BUILD_INFO.txt"
 ```
 
-或浏览器「查看网页源代码」，应看到当前 **`data-fmz-version`** / **`data-fmz-label`**，且 **`/assets/index-*.js`** 哈希与本地 **`release/.../index.html`** 一致。
+或浏览器访问 `https://www.dianfanbao.net/`，「查看网页源代码」应看到当前 **`data-fmz-version`** / **`data-fmz-label`**，且 **`/assets/index-*.js`** 哈希与本地 **`release/.../index.html`** 一致。
 
-若仍为旧哈希或无 `data-fmz-*`，说明 **SCP 未执行、路径不对或浏览器 CDN缓存**（可强刷或无痕）。
+若仍为旧哈希或无 `data-fmz-*`，说明 **SCP 未执行、路径不对或浏览器 CDN 缓存**（可强刷或无痕）。
 
 ---
 
@@ -188,16 +200,17 @@ node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
 
 | 步骤 | 命令或操作 |
 |------|------------|
-| 改版本 | 编辑 `package.json` + `package-lock.json` 顶层版本 |
-| 打包 | `npm run pack` → `release/<fmzReleaseLabel>/` |
-| 入库 | `git add` / `git commit`（勿提交 `release/`、`dist/`） |
-| 推送 | `git push origin main`（分支按实际） |
-| 上传静态 | `scp` 到 `/var/www/fmz-dashboard/` |
+| 提交代码 | `git add -A && git commit` |
+| 打包 | `node scripts/bump-patch.mjs && npx vite build && node scripts/pack-release.mjs` |
+| 提交版本号 | `git add -A && git commit -m "chore: bump version"` |
+| 推送 | `git push origin main` |
+| 上传前端 | `scp` assets + index.html + BUILD_INFO.txt 到 `/var/www/fmz-dashboard/` |
+| 上传弹幕服务 | `scp douyu-danmaku-server.mjs` → `/opt/fmz-danmaku-server/` + `systemctl restart fmz-danmaku` |
 | 同步歌曲 | `rsync --exclude='source.*'` 到 `/opt/fmz-audio-server/data/audio/`（§11） |
-| 验前端 | `curl -sk https://.../` 看 `data-fmz-version` |
+| 验前端 | SSH 查看 `BUILD_INFO.txt` 或浏览器检查 `data-fmz-version` |
 | 验赞踩 | `node scripts/check-reactions.mjs https://.../__fmz_reactions` |
-| 验歌曲 | `curl -sk https://.../__fmz_audio/library` 看歌曲列表 |
-| 服务端 | Nginx `location /__fmz_reactions/` + `/__fmz_audio/` + 对应进程 |
+| 验歌曲 | `curl -sk https://.../__fmz_audio/library` |
+| 验弹幕 | `curl -sk https://.../__fmz_danmaku/triggers` |
 
 ---
 
@@ -217,6 +230,8 @@ node scripts/check-reactions.mjs https://YOUR_SERVER_IP/__fmz_reactions
 | `.../#/battle` | 战斗爽（与顶栏同级） |
 | `.../#/treasury` | 团员金库 |
 | `.../#/songs` | 🎶 歌曲库 |
+| `.../#/crimes` | 🎵 细数宝罪 |
+| `.../#/danmaku` | 🎯 窃听宝语（弹幕捕捉） |
 | `.../#captain-hud` 或 `.../#/captain-hud` | 仅战斗爽全屏（无顶栏，适合 OBS） |
 
 切换标签或预赛子页时，地址栏会 **`replaceState`** 同步（不刷屏历史条目）。
