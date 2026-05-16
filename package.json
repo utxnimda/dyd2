@@ -1,14 +1,14 @@
 {
   "name": "fmz-dashboard",
   "private": true,
-  "version": "1.1.24",
-  "fmzReleaseLabel": "v1.1.24",
+  "version": "1.1.25",
+  "fmzReleaseLabel": "v1.1.25",
   "fmzFeatures": {
     "sanguo": true,
     "sanguoUi": false,
     "baobao": true,
     "audio": true,
-    "audioPlugin": "local",
+    "audioPlugin": false,
     "battle": false,
     "treasury": false,
     "preliminary": false,
@@ -16,7 +16,7 @@
     "quota": false,
     "crimes": true,
     "douyuDanmaku": true,
-    "aiAgent": "local"
+    "aiAgent": false
   },
   "type": "module",
   "scripts": {
