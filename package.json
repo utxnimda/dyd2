@@ -17,7 +17,7 @@
     "crimes": true,
     "douyuDanmaku": true,
     "aiAgent": true,
-    "ruinsRebuild": false
+    "ruinsRebuild": "local"
   },
   "type": "module",
   "scripts": {
