@@ -1463,7 +1463,8 @@ function formatGiftRankDigestForAi(roomId, startTs, endTs, catalogMap) {
 
 /**
  * 触发器日报/周报的 modelId 与 ai-agent-server /chat 一致。
- * 未设置 FMZ_TRIGGER_AI_MODEL 时，运行时从 GET /models 拉取当前已配置密钥的全部模型并按顺序降级；显式指定时仅使用该列表顺序。
+ * 未设置 FMZ_TRIGGER_AI_MODEL 时，运行时从 GET /models 拉取顺序（已与心跳可达性、Gemini/Qwen 优先级对齐）并降级；
+ * 显式指定时仅保留仍出现在 /models 中的 id（与后台屏蔽一致）；若与可达列表无交集则回退为整条 /models 链。
  */
 
 /**
@@ -1484,11 +1485,16 @@ function parseExplicitTriggerAiModelIdsFromEnv() {
 }
 
 const FALLBACK_AI_MODEL_IDS_WHEN_AGENT_LIST_EMPTY = [
+  "gemini-3-flash-preview",
   "gemini-2.5-flash",
-  "gemini-flash-latest",
   "gemini-2.5-flash-lite",
+  "gemini-flash-latest",
   "gemini-2.0-flash-lite",
   "gemini-2.0-flash",
+  "qwen-max",
+  "qwen-plus",
+  "qwen-long",
+  "qwen-turbo",
 ];
 
 /** 剔除 Google 列出但仅以 AUDIO/TTS 为输出模态的 Gemini，避免周报等文本任务先试到不可用的模型 */
@@ -1518,24 +1524,39 @@ async function fetchAiAgentListedModelIdsFresh() {
 
 async function resolveAiAgentTriggerModelCandidates() {
   const explicit = parseExplicitTriggerAiModelIdsFromEnv();
-  if (explicit?.length) return explicit;
-
   const now = Date.now();
   const { ids: cachedIds, fetchedAt } = aiAgentListedModelIdsCache;
-  if (cachedIds.length > 0 && now - fetchedAt < AI_AGENT_MODEL_IDS_CACHE_TTL_MS) {
-    return coerceAiTriggerCandidateModelIds(cachedIds);
+
+  let listed = [];
+  const cacheFresh = cachedIds.length > 0 && now - fetchedAt < AI_AGENT_MODEL_IDS_CACHE_TTL_MS;
+  if (cacheFresh) {
+    listed = [...cachedIds];
+  } else {
+    try {
+      const raw = await fetchAiAgentListedModelIdsFresh();
+      if (raw.length) {
+        const coerced = coerceAiTriggerCandidateModelIds(raw);
+        aiAgentListedModelIdsCache = { ids: coerced, fetchedAt: now };
+        listed = coerced;
+      }
+    } catch {
+      listed = [];
+    }
   }
 
-  try {
-    const ids = await fetchAiAgentListedModelIdsFresh();
-    if (ids.length) {
-      const coerced = coerceAiTriggerCandidateModelIds(ids);
-      aiAgentListedModelIdsCache = { ids: coerced, fetchedAt: now };
-      return coerced;
+  if (explicit?.length) {
+    if (listed.length) {
+      const filtered = explicit.filter((id) => listed.includes(id));
+      if (filtered.length) return coerceAiTriggerCandidateModelIds(filtered);
+      console.warn(
+        "[ai-report] FMZ_TRIGGER_AI_MODEL 与 ai-agent 当前可达模型列表无交集，改用 /models 顺序（均已纳入心跳屏蔽策略）",
+      );
+    } else {
+      return coerceAiTriggerCandidateModelIds(explicit);
     }
-  } catch {
-    /* 使用缓存或内置 */
   }
+
+  if (listed.length) return listed;
 
   return cachedIds.length ? coerceAiTriggerCandidateModelIds(cachedIds) : [...FALLBACK_AI_MODEL_IDS_WHEN_AGENT_LIST_EMPTY];
 }

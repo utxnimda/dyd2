@@ -2,8 +2,8 @@
  * AI Agent Proxy Server
  * Holds API keys server-side; frontend only selects model ID.
  * Exposes:
- *   GET  /models  — list available models
- *   POST /chat    — proxy chat completion (streaming SSE)
+ *   GET  /models  — list available models（仅含当前可达、且已配置密钥的条目；meta.reachability 为心跳状态）
+ *   POST /chat    — proxy chat completion (streaming SSE)（不可达模型返回 404）
  */
 
 import http from "node:http";
@@ -236,15 +236,19 @@ function parseDisabledGeminiModelIds() {
 const DISABLED_GEMINI_MODEL_IDS = parseDisabledGeminiModelIds();
 
 /**
- * Gemini — OpenAI 兼容 Chat；顺序影响前端首次默认选中项。
- * 2.0 常与免费档「input token」额度冲突，置于列表后部。
+ * Gemini — OpenAI 兼容 Chat（静态回退清单）。
+ * 优先级策略见 geminiPreferenceRank：3 Flash → 2.5 Flash → 2.5 Flash Lite → 2.0 / 1.5 等。
+ * 若某 id 在当前 Key 下不可用，定时心跳探测会将其移出 /models 直至恢复。
  */
 const GEMINI_VARIANTS_ALL = [
-  { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash", model: "gemini-1.5-flash" },
-  { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash‑8B", model: "gemini-1.5-flash-8b" },
-  { id: "gemini-1.5-pro", label: "Gemini 1.5 Pro", model: "gemini-1.5-pro" },
-  { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash‑Lite", model: "gemini-2.0-flash-lite" },
+  { id: "gemini-3-flash-preview", label: "Gemini 3 Flash（预览）", model: "gemini-3-flash-preview" },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", model: "gemini-2.5-flash" },
+  { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash‑Lite", model: "gemini-2.5-flash-lite" },
   { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", model: "gemini-2.0-flash" },
+  { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash‑Lite", model: "gemini-2.0-flash-lite" },
+  { id: "gemini-1.5-pro", label: "Gemini 1.5 Pro", model: "gemini-1.5-pro" },
+  { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash‑8B", model: "gemini-1.5-flash-8b" },
+  { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash", model: "gemini-1.5-flash" },
 ];
 
 const GEMINI_VARIANTS = GEMINI_VARIANTS_ALL.filter((v) => !DISABLED_GEMINI_MODEL_IDS.has(v.id));
@@ -283,12 +287,12 @@ const OPENAI_VARIANTS = [
   { id: "gpt-3.5-turbo", label: "GPT-3.5 Turbo · OpenAI", model: "gpt-3.5-turbo" },
 ];
 
-/** 通义千问（DashScope 兼容 OpenAI）；model 与控制台一致时可自行改清单 */
+/** 通义千问（DashScope 兼容 OpenAI）；降级顺序：Max → Plus → Long → Turbo */
 const QWEN_VARIANTS = [
   { id: "qwen-max", label: "通义千问 Max · DashScope", model: "qwen-max" },
   { id: "qwen-plus", label: "通义千问 Plus · DashScope", model: "qwen-plus" },
-  { id: "qwen-turbo", label: "通义千问 Turbo · DashScope", model: "qwen-turbo" },
   { id: "qwen-long", label: "通义千问 Long · DashScope", model: "qwen-long" },
+  { id: "qwen-turbo", label: "通义千问 Turbo · DashScope", model: "qwen-turbo" },
 ];
 
 /** OpenAI：`Authorization: Bearer` + 官方 /v1/chat/completions；无密钥则不注册 */
@@ -333,8 +337,81 @@ function buildQwenProviders() {
 
 function finalizeProvidersFromGeminiList(geminiList) {
   const merged = [...geminiList, ...buildOpenAiProviders(), ...buildQwenProviders()];
-  sortModelProviders(merged);
-  return merged;
+  const deduped = dedupeProvidersById(merged);
+  sortProvidersByFmzPolicy(deduped);
+  return deduped;
+}
+
+function providerFamilyOrder(providerName) {
+  const p = String(providerName || "");
+  if (p === "Google") return 0;
+  if (p === "Qwen") return 1;
+  if (p === "OpenAI") return 2;
+  return 3;
+}
+
+/** 数字越小越优先（Gemini 3 Flash → 2.5 Flash → 2.5 Flash Lite → …） */
+function geminiPreferenceRank(id) {
+  const s = String(id || "").toLowerCase();
+  if (/gemini[-_]3/.test(s) && /flash/.test(s) && !/lite/.test(s)) return 0;
+  if (/gemini[-_]3/.test(s) && /flash/.test(s)) return 1;
+  if (/2[._]5/.test(s) && /flash/.test(s) && !/lite/.test(s) && !/flash[-_]?lite/.test(s)) return 10;
+  if (/2[._]5/.test(s) && (/flash[-_]?lite|flashlite/).test(s)) return 11;
+  if (/2[._]0/.test(s) && /flash/.test(s) && !/lite/.test(s) && !/flash[-_]?lite/.test(s)) return 20;
+  if (/2[._]0/.test(s) && (/flash[-_]?lite|flashlite/).test(s)) return 21;
+  if (/1[._]5/.test(s) && /pro/.test(s)) return 30;
+  if (/1[._]5/.test(s) && /8b/.test(s)) return 31;
+  if (/1[._]5/.test(s) && /flash/.test(s)) return 32;
+  return 80;
+}
+
+function qwenPreferenceRank(id) {
+  const s = String(id || "").toLowerCase();
+  if (s.includes("qwen-max")) return 0;
+  if (s.includes("qwen-plus")) return 1;
+  if (s.includes("qwen-long")) return 2;
+  if (s.includes("qwen-turbo")) return 3;
+  return 50;
+}
+
+function openAiPreferenceRank(id) {
+  const order = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"];
+  const i = order.indexOf(String(id));
+  return i === -1 ? 40 : i;
+}
+
+function sortProvidersByFmzPolicy(arr) {
+  arr.sort((a, b) => {
+    const pf = providerFamilyOrder(a.provider) - providerFamilyOrder(b.provider);
+    if (pf !== 0) return pf;
+    if (a.provider === "Google") {
+      const d = geminiPreferenceRank(a.id) - geminiPreferenceRank(b.id);
+      return d !== 0 ? d : a.id.localeCompare(b.id);
+    }
+    if (a.provider === "Qwen") {
+      const d = qwenPreferenceRank(a.id) - qwenPreferenceRank(b.id);
+      return d !== 0 ? d : a.id.localeCompare(b.id);
+    }
+    if (a.provider === "OpenAI") {
+      const d = openAiPreferenceRank(a.id) - openAiPreferenceRank(b.id);
+      return d !== 0 ? d : a.id.localeCompare(b.id);
+    }
+    return a.id.localeCompare(b.id);
+  });
+}
+
+function dedupeProvidersById(arr) {
+  const seen = new Set();
+  return arr.filter((p) => {
+    if (!p?.id || seen.has(p.id)) return false;
+    seen.add(p.id);
+    return true;
+  });
+}
+
+/** 仅含 Google 条目时使用（动态 list 拉回后、与 OpenAI/Qwen 合并前） */
+function sortGeminiProvidersFromGoogleList(arr) {
+  sortProvidersByFmzPolicy(arr);
 }
 
 /** list models 不返回剩余额度；仅作说明给前端 */
@@ -386,20 +463,6 @@ async function fetchAllGeminiModelsPaged(apiKey) {
   return collected;
 }
 
-function tierOrderForSort(id) {
-  if (/2\.5|2-5/.test(id)) return 0;
-  if (/1\.5|1-5/.test(id)) return 1;
-  if (/2\.0|2-0/.test(id)) return 2;
-  return 3;
-}
-
-function sortModelProviders(arr) {
-  arr.sort((a, b) => {
-    const d = tierOrderForSort(a.id) - tierOrderForSort(b.id);
-    return d !== 0 ? d : a.id.localeCompare(b.id);
-  });
-}
-
 function googleListItemToProvider(m, apiKey) {
   const full = typeof m.name === "string" ? m.name : "";
   const id = full.replace(/^models\//, "");
@@ -446,7 +509,7 @@ async function refreshModelProvidersFromGoogle() {
       modelsListMeta.source = "static_fallback_empty_api";
       return;
     }
-    sortModelProviders(providers);
+    sortGeminiProvidersFromGoogleList(providers);
     MODEL_PROVIDERS = finalizeProvidersFromGeminiList(providers);
     modelsListMeta.source = "google_list_models";
     console.log(`[ai-agent] 已从 Google GET /v1beta/models 加载 ${providers.length} 个模型`);
@@ -462,9 +525,130 @@ function hasUsableApiKey(m) {
   return typeof m.apiKey === "string" && m.apiKey.trim().length > 0;
 }
 
-/** Only expose models that have a valid API key configured */
+function probeDisabled() {
+  return /^1|true|yes$/i.test(String(process.env.FMZ_AI_AGENT_PROBE_DISABLED || "").trim());
+}
+
+function probeIntervalMs() {
+  const n = parseInt(String(process.env.FMZ_AI_AGENT_PROBE_INTERVAL_MS || "300000"), 10);
+  return Number.isFinite(n) && n >= 60_000 ? n : 300_000;
+}
+
+function probeTimeoutMs() {
+  const n = parseInt(String(process.env.FMZ_AI_AGENT_PROBE_TIMEOUT_MS || "22000"), 10);
+  return Number.isFinite(n) && n >= 3000 ? n : 22_000;
+}
+
+function probeStaggerMs() {
+  const n = parseInt(String(process.env.FMZ_AI_AGENT_PROBE_STAGGER_MS || "450"), 10);
+  return Number.isFinite(n) && n >= 0 ? n : 450;
+}
+
+/** 最近一次心跳判定为不可达的 modelId（不出现在 /models，且 POST /chat 拒绝） */
+const modelUnreachable = new Set();
+let lastReachabilityProbeAt = 0;
+let reachabilityProbeRunning = false;
+
+function isModelReachable(id) {
+  if (probeDisabled()) return true;
+  return !modelUnreachable.has(String(id));
+}
+
+function pruneUnreachableToKnownProviders() {
+  const ids = new Set(MODEL_PROVIDERS.map((p) => p.id));
+  for (const x of modelUnreachable) {
+    if (!ids.has(x)) modelUnreachable.delete(x);
+  }
+}
+
+async function probeProviderReachability(provider) {
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${provider.apiKey}`,
+  };
+  const tMs = probeTimeoutMs();
+  const payloadBase = {
+    model: provider.model,
+    messages: [{ role: "user", content: "ping" }],
+    max_tokens: 4,
+  };
+  try {
+    const res = await fetch(provider.apiUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...payloadBase, stream: false }),
+      signal: AbortSignal.timeout(tMs),
+    });
+    const _txt = await res.text();
+    if (res.ok) return;
+  } catch (e) {
+    if (e?.name === "AbortError" || e?.name === "TimeoutError") throw new Error("probe timeout");
+  }
+
+  const res2 = await fetch(provider.apiUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ ...payloadBase, max_tokens: 8, stream: true }),
+    signal: AbortSignal.timeout(tMs),
+  });
+  if (!res2.ok) {
+    const t = await res2.text().catch(() => "");
+    throw new Error(`HTTP ${res2.status}: ${t.slice(0, 280)}`);
+  }
+  const reader = res2.body?.getReader();
+  if (!reader) throw new Error("no stream body");
+  const decoder = new TextDecoder();
+  let ok = false;
+  for (let n = 0; n < 500; n++) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (decoder.decode(value, { stream: true }).includes("data:")) {
+      ok = true;
+      break;
+    }
+  }
+  try {
+    await reader.cancel();
+  } catch {
+    /* ignore */
+  }
+  if (!ok) throw new Error("stream produced no tokens");
+}
+
+async function runReachabilityProbeRound() {
+  if (probeDisabled()) return;
+  if (reachabilityProbeRunning) return;
+  reachabilityProbeRunning = true;
+  pruneUnreachableToKnownProviders();
+  const targets = MODEL_PROVIDERS.filter(hasUsableApiKey);
+  const delayMs = probeStaggerMs();
+  if (targets.length) {
+    console.log(`[ai-agent] 模型可达性探测开始（${targets.length} 个，超时 ${probeTimeoutMs()}ms）…`);
+  }
+  for (const p of targets) {
+    try {
+      await probeProviderReachability(p);
+      modelUnreachable.delete(p.id);
+    } catch (err) {
+      const msg = err?.message || String(err);
+      modelUnreachable.add(p.id);
+      console.warn(`[ai-agent] reachability ✗ ${p.id}: ${msg.slice(0, 220)}`);
+    }
+    if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  lastReachabilityProbeAt = Date.now();
+  reachabilityProbeRunning = false;
+  const bad = [...modelUnreachable].sort();
+  if (bad.length) {
+    console.warn(`[ai-agent] 当前不可达已屏蔽（${bad.length}）：${bad.join(", ")}`);
+  } else if (targets.length) {
+    console.log("[ai-agent] 模型可达性探测完成：均可达");
+  }
+}
+
+/** Only expose models that have a valid API key configured and passed reachability */
 function getAvailableModels() {
-  return MODEL_PROVIDERS.filter(hasUsableApiKey).map((m) => ({
+  return MODEL_PROVIDERS.filter((m) => hasUsableApiKey(m) && isModelReachable(m.id)).map((m) => ({
     id: m.id,
     label: m.label,
     provider: m.provider,
@@ -472,7 +656,7 @@ function getAvailableModels() {
 }
 
 function findModel(id) {
-  return MODEL_PROVIDERS.find((m) => m.id === id && hasUsableApiKey(m));
+  return MODEL_PROVIDERS.find((m) => m.id === id && hasUsableApiKey(m) && isModelReachable(id));
 }
 
 function buildModelsJsonPayload() {
@@ -484,6 +668,13 @@ function buildModelsJsonPayload() {
       listModelsReference:
         "GET https://generativelanguage.googleapis.com/v1beta/models（x-goog-api-key，与 chat 相同 Key）；不返回剩余配额。",
       ...(modelsListMeta.lastRemoteError ? { listModelsError: modelsListMeta.lastRemoteError } : {}),
+      reachability: {
+        disabled: probeDisabled(),
+        intervalMs: probeIntervalMs(),
+        lastRoundAt: lastReachabilityProbeAt || null,
+        probing: reachabilityProbeRunning,
+        unreachableIds: [...modelUnreachable].sort(),
+      },
     },
   };
 }
@@ -530,6 +721,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && url.pathname === "/models") {
     if (url.searchParams.get("refresh") === "1") {
       await refreshModelProvidersFromGoogle();
+      if (!probeDisabled()) void runReachabilityProbeRound();
     }
     return sendJson(res, 200, buildModelsJsonPayload());
   }
@@ -651,6 +843,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (modelsListMeta.lastRemoteError) {
       console.warn(`[ai-agent]    list models 未成功（已回退静态）: ${modelsListMeta.lastRemoteError}`);
+    }
+    if (!probeDisabled()) {
+      console.log(
+        `[ai-agent]    可达性心跳：每 ${Math.round(probeIntervalMs() / 1000)}s 探测；跳过不可达模型直至恢复。禁用：FMZ_AI_AGENT_PROBE_DISABLED=1`,
+      );
+      void runReachabilityProbeRound();
+      setInterval(() => void runReachabilityProbeRound(), probeIntervalMs());
     }
   });
 })();

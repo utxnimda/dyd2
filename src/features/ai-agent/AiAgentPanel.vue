@@ -102,6 +102,8 @@ const availableModels = ref<ModelOption[]>([]);
 const modelsLoading = ref(false);
 /** 拉取模型列表失败，或服务器未配置密钥时用于说明 */
 const modelsHint = ref("");
+/** 同步 /models 可达性状态（与 ai-agent 心跳一致） */
+let modelsPollTimer: ReturnType<typeof setInterval> | undefined;
 
 async function fetchModels() {
   const url = `${AI_AGENT_BASE}/models`;
@@ -127,7 +129,17 @@ async function fetchModels() {
         availableModels.value = [];
         return "done";
       }
-      let data: { models?: ModelOption[] };
+      let data: {
+        models?: ModelOption[];
+        meta?: {
+          reachability?: {
+            disabled?: boolean;
+            intervalMs?: number;
+            lastRoundAt?: number | null;
+            unreachableIds?: string[];
+          };
+        };
+      };
       try {
         data = JSON.parse(raw);
       } catch {
@@ -137,8 +149,21 @@ async function fetchModels() {
       }
       availableModels.value = data.models || [];
       if (availableModels.value.length === 0) {
-        modelsHint.value =
-          "服务器未配置任何可用密钥（列表为空）：请在环境变量或 server/data/ai-agent-keys.json 中至少配置一种：GEMINI/gemini、OPENAI/openai、千问 DASHSCOPE_API_KEY 或 QWEN_API_KEY / qwen；保存为 UTF-8 后重启 npm run dev:all。";
+        const reach = data.meta?.reachability;
+        if (reach && !reach.disabled && (reach.lastRoundAt || (reach.unreachableIds && reach.unreachableIds.length > 0))) {
+          modelsHint.value =
+            "当前没有在探测中可达的模型（上游网络/密钥问题或全部被心跳暂时屏蔽）；约下一轮探测后自动恢复条目。";
+        } else {
+          modelsHint.value =
+            "服务器未配置任何可用密钥（列表为空）：请在环境变量或 server/data/ai-agent-keys.json 中至少配置一种：GEMINI/gemini、OPENAI/openai、千问 DASHSCOPE_API_KEY 或 QWEN_API_KEY / qwen；保存为 UTF-8 后重启 npm run dev:all。";
+        }
+      } else {
+        const reach = data.meta?.reachability;
+        if (reach && !reach.disabled && typeof reach.intervalMs === "number") {
+          modelsHint.value =
+            modelsHint.value
+            || `列表仅含当前上游可达的模型（后台约每 ${Math.max(1, Math.round(reach.intervalMs / 1000))}s 探测；不可达则暂时隐藏）。`;
+        }
       }
       if (availableModels.value.length > 0 && !availableModels.value.find((m) => m.id === selectedModel.value)) {
         selectedModel.value = availableModels.value[0].id;
@@ -415,6 +440,7 @@ onMounted(() => {
   handlePayload();
   setTimeout(handlePayload, 50);
   fetchModels();
+  modelsPollTimer = setInterval(() => void fetchModels(), 180_000);
   void refreshStreamerAvatar9046690();
   void refreshMonitoredRooms();
 });
@@ -458,14 +484,20 @@ const modelsGrouped = computed(() => {
     if (!map.has(cat)) map.set(cat, []);
     map.get(cat)!.push(m);
   }
+  const catalogOrder = (c: string) => {
+    if (c === "Gemini") return 0;
+    if (c === "Qwen") return 1;
+    if (c === "OpenAI") return 2;
+    return 3;
+  };
   const rows = [...map.entries()].map(([catalog, models]) => ({
     catalog,
-    models: models.slice().sort((a, b) => {
-      const c = a.label.localeCompare(b.label, "zh-Hans-CN");
-      return c !== 0 ? c : a.id.localeCompare(b.id);
-    }),
+    models,
   }));
-  rows.sort((a, b) => a.catalog.localeCompare(b.catalog, "zh-Hans-CN"));
+  rows.sort((a, b) => {
+    const d = catalogOrder(a.catalog) - catalogOrder(b.catalog);
+    return d !== 0 ? d : a.catalog.localeCompare(b.catalog, "zh-Hans-CN");
+  });
   return rows;
 });
 
@@ -519,6 +551,10 @@ watch(modelPickerOpen, (open) => {
 onBeforeUnmount(() => {
   document.removeEventListener("keydown", onEscapeCloseModelMenu, true);
   document.removeEventListener("pointerdown", docPointerMaybeClose, true);
+  if (modelsPollTimer !== undefined) {
+    clearInterval(modelsPollTimer);
+    modelsPollTimer = undefined;
+  }
 });
 
 function toggleModelPicker() {
