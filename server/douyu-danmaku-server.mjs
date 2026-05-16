@@ -1598,8 +1598,10 @@ async function chatAiAgentAccumulateFirstAvailable(modelIds, messages) {
   for (let i = 0; i < modelIds.length; i++) {
     const modelId = modelIds[i];
     try {
+      console.log(`[ai-report] 尝试模型 ${modelId}（${i + 1}/${modelIds.length}）`);
       const text = await chatAiAgentAccumulate(modelId, messages);
       if (i > 0) console.log(`[ai-report] 使用备选模型 ${modelId} 生成成功`);
+      else console.log(`[ai-report] 模型 ${modelId} 生成成功`);
       return text;
     } catch (e) {
       lastErr = e;
