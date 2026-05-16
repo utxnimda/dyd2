@@ -1,0 +1,15 @@
+[Unit]
+Description=FMZ AI Agent proxy server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/fmz-ai-agent-server
+ExecStart=/usr/bin/node /opt/fmz-ai-agent-server/ai-agent-server.mjs
+Restart=always
+RestartSec=5
+Environment=AI_AGENT_PORT=8792
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

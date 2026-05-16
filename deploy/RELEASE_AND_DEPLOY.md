@@ -30,7 +30,7 @@ dist/index.html 或 release/<fmzReleaseLabel>/index.html
 npm run pack
 ```
 
-等价于 **`vite build`** 后再执行 **`scripts/pack-release.mjs`**，将 **`dist/`** 复制到 **`release/<fmzReleaseLabel>/`**，并生成 **`BUILD_INFO.txt`**（时间戳与版本元数据）。同一归档内还会按**实际发布**的模块，把本机 **`server/data/`** 的对应子路径复制到 **`release/<fmzReleaseLabel>/server/data/`**（如歌曲库 → `audio/`，赞踩相关 → `reactions.db`；**不含** `defense_tower.db`，该库由服务在线拉取/生成，不随包分发）；若本地无该路径则提示跳过。可选： **`--skip-data`** 只打前端不打数据；**`--exclude-audio-source`** 归档 `audio` 时排除各 BV 下的 `source.*` 大文件（与 §11.3.2 的增量策略一致）。**`BUILD_INFO.txt`** 中 **`archivedServerData`** 会列出本次纳入的相对路径。
+等价于 **`vite build`** 后再执行 **`scripts/pack-release.mjs`**，将 **`dist/`** 复制到 **`release/<fmzReleaseLabel>/`**，并生成 **`BUILD_INFO.txt`**（时间戳与版本元数据）。同一归档内还会按**实际发布**的模块，把本机 **`server/data/`** 的对应子路径复制到 **`release/<fmzReleaseLabel>/server/data/`**（如歌曲库 → `audio/`，赞踩相关 → `reactions.db`；**不含** `defense_tower.db`，该库由服务在线拉取/生成，不随包分发）；若本地无该路径则提示跳过。另有 **`release/<label>/opt/<fmz-*-server>/`**，镜像 **CVM `/opt/`** 下各 Node 服务的入口脚本（弹幕、AI、音频、细数宝罪、三国守塔、赞踩等，**不含** `ai-agent-keys.json` 等密钥）。可选： **`--skip-data`**；**`--exclude-audio-source`**（与 §11.3.2 一致）；**`--skip-opt`** 不纳入后端镜像。**`BUILD_INFO.txt`** 中 **`archivedServerData`** / **`archivedOptServices`** 为本次归档清单。
 
 ### 2.1 发布模块强制确认（⚠️ 强制规则）
 
@@ -89,9 +89,9 @@ npm run build
 2. **打包**：执行 `npm run pack`（自动递增版本号 → 构建 → 归档，含模块确认）。
 3. **提交版本号变更**：`git add -A && git commit -m "chore: bump version to x.x.x"`。
 4. **推送到远端**：`git push origin main`。
-5. **上传前端**：`npm run deploy`（自动 SCP 上传 + 清理远端旧 assets 文件 + 验证版本）。
-6. **上传后端服务**（如有变更）：`scp` 上传变更的 server 脚本 + `systemctl restart`。
-7. **验证**：SSH 到服务器确认 `BUILD_INFO.txt` 版本号和服务状态（`npm run deploy` 已自动执行此步）。
+5. **上传前端 + 同步后端（与包内 `release/<label>/opt/` 一致）**：`npm run deploy`（静态资源 SCP + 旧 assets 清理 + **若本地存在 `opt/`**：同步到远端 `/opt/<...>/`，`fmz-ai-agent-server` 会 `npm install --omit=dev`，并对映射到的单元 `systemctl restart` + 验证 `BUILD_INFO.txt`）。若**只需静态**、暂不动后端：可设置环境变量 **`FMZ_DEPLOY_SKIP_BACKEND=1`**。
+6. **手动兜底**（极少用）：若某环境未走 `pack-release` 的 `opt/` 或需改 unit，可仍按旧方式单独 `scp` + `systemctl restart`。
+7. **验证**：SSH 到服务器确认 `BUILD_INFO.txt` 版本号和服务状态；抽查关键 API（如弹幕、AI `/models`）。
 
 示例：
 

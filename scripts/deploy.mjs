@@ -14,14 +14,20 @@
  *   3. SCP upload assets/, index.html, BUILD_INFO.txt to remote
  *   4. SSH to remote: list assets/ files, diff against local release,
  *      delete any files not present in the current release
- *   5. SSH verify BUILD_INFO.txt on remote
+ *   5. 若 release/<label>/opt/ 存在：将各子目录同步到远端 /opt/<同名>/，
+ *      对需依赖的目录执行 npm install --omit=dev，并 systemctl restart 对应单元
+ *   6. 若 FMZ_DEPLOY_SYNC_NGINX=1 且存在 release/config/nginx：上传到远端 conf.d 并 nginx reload
+ *   7. SSH verify BUILD_INFO.txt on remote
  *
  * SSH/远端路径可由环境变量覆盖（与 deploy/deploy.local.env.example 一致；
  * PowerShell 可先执行 . ./deploy/load-deploy-env.ps1 加载 deploy.local.env）：
  *   FMZ_DEPLOY_SSH_KEY、FMZ_DEPLOY_SSH_USER、FMZ_DEPLOY_SSH_HOST、FMZ_DEPLOY_WEB_ROOT
+ * 仅发布静态、不同步后端：FMZ_DEPLOY_SKIP_BACKEND=1
+ * 同步 Nginx 片段至远端（覆盖 /etc/nginx/conf.d 下同名文件）：FMZ_DEPLOY_SYNC_NGINX=1
+ * 远端 conf.d 目录（可选）：FMZ_DEPLOY_NGINX_CONF_D=/etc/nginx/conf.d
  */
 import { execSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,7 +45,28 @@ const REMOTE_WEB_ROOT = (process.env.FMZ_DEPLOY_WEB_ROOT || "/var/www/fmz-dashbo
 );
 const SSH_CMD = `ssh -i "${SSH_KEY}" ${REMOTE_USER}@${REMOTE_HOST}`;
 const SCP_CMD = `scp -i "${SSH_KEY}"`;
+const SKIP_BACKEND =
+  process.env.FMZ_DEPLOY_SKIP_BACKEND === "1" || /^true$/i.test(process.env.FMZ_DEPLOY_SKIP_BACKEND || "");
+const SYNC_NGINX =
+  process.env.FMZ_DEPLOY_SYNC_NGINX === "1" || /^true$/i.test(process.env.FMZ_DEPLOY_SYNC_NGINX || "");
+const REMOTE_NGINX_CONF_D = (process.env.FMZ_DEPLOY_NGINX_CONF_D || "/etc/nginx/conf.d").replace(/\/+$/, "");
 
+/** release/opt/<dir>/ → 远端 /opt/<dir>/ ；与 pack-release.mjs OPT_RELEASE_BUNDLES.remoteName 一致 */
+const OPT_TO_SYSTEMD = {
+  "fmz-danmaku-server": "fmz-danmaku",
+  "fmz-ai-agent-server": "fmz-ai-agent",
+  "fmz-audio-server": "fmz-audio",
+  "fmz-crimes-server": "fmz-crimes",
+  "fmz-defense-server": "fmz-defense",
+  "fmz-reactions-server": "fmz-reactions",
+};
+
+/** 同步后需在远端安装原生/依赖模块的服务目录 */
+const OPT_NEEDS_NPM = new Set([
+  "fmz-ai-agent-server",
+  "fmz-reactions-server",
+  "fmz-defense-server",
+]);
 if (!existsSync(SSH_KEY)) {
   console.error(`❌ SSH 私钥不存在: ${SSH_KEY}`);
   console.error(
@@ -177,7 +204,83 @@ if (!remoteListRaw) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Step 3: Verify remote BUILD_INFO.txt                               */
+/*  Step 3: Sync release/opt → remote /opt (后端脚本，与版本同发)         */
+/* ------------------------------------------------------------------ */
+const optLocalRoot = join(releaseDir, "opt");
+if (!SKIP_BACKEND && existsSync(optLocalRoot)) {
+  const optDirs = readdirSync(optLocalRoot).filter((name) => {
+    try {
+      return statSync(join(optLocalRoot, name)).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+
+  if (optDirs.length > 0) {
+    console.log("🖥️  同步 release/opt 后端到远端 /opt/ ...");
+    const units = [];
+    for (const name of optDirs) {
+      const unit = OPT_TO_SYSTEMD[name];
+      if (!unit) {
+        console.log(`   ⚠️  跳过未知目录 opt/${name}（未配置 systemd 映射）`);
+        continue;
+      }
+      const from = join(optLocalRoot, name);
+      const uploadOpt = `${SCP_CMD} -r "${from}" ${REMOTE_USER}@${REMOTE_HOST}:/opt/`;
+      console.log(`   $ ${uploadOpt}`);
+      run(uploadOpt);
+      units.push(unit);
+      console.log(`   ✅ 已同步 → /opt/${name}/`);
+    }
+    const uniqueUnits = [...new Set(units)];
+    if (uniqueUnits.length > 0) {
+      const npmSteps = [];
+      for (const name of optDirs) {
+        if (OPT_NEEDS_NPM.has(name) && OPT_TO_SYSTEMD[name]) {
+          npmSteps.push(`cd /opt/${name} && npm install --omit=dev`);
+        }
+      }
+      const npmJoined = npmSteps.length ? `${npmSteps.join(" && ")} && ` : "";
+      const restartCmd = `${npmJoined}systemctl restart ${uniqueUnits.join(" ")}`;
+      console.log("\n   🔁 远端依赖安装（如有）并重启: " + uniqueUnits.join(", "));
+      run(`${SSH_CMD} "${restartCmd}"`);
+      console.log("   ✅ 后端服务已重启\n");
+    }
+  } else {
+    console.log("\n   [opt] release/opt 为空，跳过后端同步。\n");
+  }
+} else if (SKIP_BACKEND) {
+  console.log("\n   [opt] 已设置 FMZ_DEPLOY_SKIP_BACKEND，跳过后端同步。\n");
+} else {
+  console.log("\n   [opt] 本 release 无 opt/ 目录（旧版打包或未包含后端镜像），仅更新了静态资源。\n");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Step 3b: release/config/nginx → 远端 /etc/nginx/conf.d（可选）         */
+/* ------------------------------------------------------------------ */
+if (SYNC_NGINX) {
+  const cfgNginxLocal = join(releaseDir, "config", "nginx");
+  if (existsSync(cfgNginxLocal)) {
+    const nf = readdirSync(cfgNginxLocal).filter((f) => !f.startsWith("."));
+    if (nf.length > 0) {
+      console.log(`🌐 同步 release/config/nginx → ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_NGINX_CONF_D}/ …`);
+      for (const f of nf) {
+        const uploadConf = `${SCP_CMD} "${join(cfgNginxLocal, f)}" ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_NGINX_CONF_D}/`;
+        console.log(`   $ ${uploadConf}`);
+        run(uploadConf);
+      }
+      run(`${SSH_CMD} "nginx -t && systemctl reload nginx"`);
+      console.log("   ✅ Nginx 已 reload\n");
+    } else {
+      console.log("\n   [nginx] release/config/nginx 为空，跳过。\n");
+    }
+  } else {
+    console.log("\n   [nginx] 无 release/config/nginx（请用不带 --skip-config 的 pack-release 打包）。\n");
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Step 4: Verify remote BUILD_INFO.txt                               */
 /* ------------------------------------------------------------------ */
 console.log("🔍 验证远端版本...");
 const remoteBuildInfo = run(

@@ -9,8 +9,15 @@
  * 数据归档：按「发布」的模块，将 server/data/ 中对应子路径复制到
  *   release/<label>/server/data/，便于与静态资源一并备份或上传节点。
  *   不含 defense_tower.db（由服务在线生成）。--skip-data 禁用；--exclude-audio-source 排除 source.* 大文件。
+ *
+ * 后端脚本镜像：按 fmzFeatures 将需上线的 Node 服务 .mjs（及 AI 的 package.json）
+ *   复制到 release/<label>/opt/<远端目录名>/，与服务器 /opt/fmz-*-server/ 对齐，
+ *   供 npm run deploy 一并 SCP。**不含密钥**（如 ai-agent-keys.json）。--skip-opt 禁用。
+ *
+ * 配置样例：将仓库 deploy/ 下 Nginx、systemd 单元样例复制到 release/<label>/config/，
+ *   便于与版本一并归档；**默认不**自动覆盖远端 /etc（deploy 需 FMZ_DEPLOY_SYNC_NGINX=1）。--skip-config 禁用。
  */
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, copyFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -126,6 +133,60 @@ if (!confirmed) {
 
 const skipData = process.argv.includes("--skip-data");
 const excludeAudioSource = process.argv.includes("--exclude-audio-source");
+const skipOpt = process.argv.includes("--skip-opt");
+const skipConfig = process.argv.includes("--skip-config");
+
+/**
+ * 与生产环境 /opt/<remoteName>/ 目录一致；仅在对应特性为 true 时纳入 release（赞踩见 include）。
+ * 注：quota（用量看板）**不**走本流水线，仅使用 `npm run pack:quota`（`scripts/pack-quota.mjs`）。
+ * copies: [ 仓库相对路径, 放入 opt 内文件名 ]
+ */
+const OPT_RELEASE_BUNDLES = [
+  {
+    remoteName: "fmz-danmaku-server",
+    include: (f) => f.douyuDanmaku === true,
+    copies: [
+      ["server/douyu-danmaku-server.mjs", "douyu-danmaku-server.mjs"],
+      ["server/gemini-openai-compat-chat-filter.mjs", "gemini-openai-compat-chat-filter.mjs"],
+    ],
+  },
+  {
+    remoteName: "fmz-ai-agent-server",
+    include: (f) => f.aiAgent === true,
+    copies: [
+      ["server/ai-agent-server.mjs", "ai-agent-server.mjs"],
+      ["server/gemini-openai-compat-chat-filter.mjs", "gemini-openai-compat-chat-filter.mjs"],
+      ["deploy/fmz-ai-agent-server.package.json", "package.json"],
+    ],
+  },
+  {
+    remoteName: "fmz-audio-server",
+    include: (f) => f.audio === true,
+    copies: [["server/audio-extractor-server.mjs", "audio-extractor-server.mjs"]],
+  },
+  {
+    remoteName: "fmz-crimes-server",
+    include: (f) => f.crimes === true,
+    copies: [["server/crimes-server.mjs", "crimes-server.mjs"]],
+  },
+  {
+    remoteName: "fmz-defense-server",
+    include: (f) => f.sanguo === true,
+    copies: [
+      ["server/defense-tower-server.mjs", "defense-tower-server.mjs"],
+      ["server/package.json", "package.json"],
+    ],
+  },
+  {
+    remoteName: "fmz-reactions-server",
+    include: (f) =>
+      f.battle === true || f.treasury === true || f.preliminary === true || f.users === true,
+    copies: [
+      ["server/reactions-server.mjs", "reactions-server.mjs"],
+      ["server/package.json", "package.json"],
+    ],
+  },
+];
 
 /* ------------------------------------------------------------------ */
 /*  server/data/ → release/<label>/server/data/ (按发布模块)           */
@@ -212,6 +273,68 @@ if (!skipData) {
   console.log("\n  [data] 已使用 --skip-data，跳过。");
 }
 
+/* ------------------------------------------------------------------ */
+/*  server/*.mjs → release/<label>/opt/<fmz-*-server>/（与 /opt 对齐）   */
+/* ------------------------------------------------------------------ */
+
+const archivedOpt = [];
+if (!skipOpt) {
+  for (const bundle of OPT_RELEASE_BUNDLES) {
+    if (!bundle.include(features)) continue;
+    const destDir = join(target, "opt", bundle.remoteName);
+    mkdirSync(destDir, { recursive: true });
+    let ok = true;
+    for (const [relFrom, baseName] of bundle.copies) {
+      const absFrom = join(root, relFrom);
+      const absTo = join(destDir, baseName);
+      if (!existsSync(absFrom)) {
+        console.warn(`  [opt] ⚠️  跳过 ${bundle.remoteName}：缺少源文件 ${relFrom}`);
+        ok = false;
+        break;
+      }
+      copyFileSync(absFrom, absTo);
+    }
+    if (ok) {
+      archivedOpt.push(bundle.remoteName);
+      console.log(`  [opt] 已复制 → release/${label}/opt/${bundle.remoteName}/`);
+    }
+  }
+  if (archivedOpt.length === 0) {
+    console.log("\n  [opt] 当前发布特性未包含需归档的后端目录（或已全部跳过）。");
+  }
+} else {
+  console.log("\n  [opt] 已使用 --skip-opt，跳过后端脚本归档。");
+}
+
+/* ------------------------------------------------------------------ */
+/*  deploy/nginx|systemd 样例 → release/<label>/config/                */
+/* ------------------------------------------------------------------ */
+
+let archivedConfigDirs = false;
+if (!skipConfig) {
+  const cfgNginx = join(target, "config", "nginx");
+  const cfgSystemd = join(target, "config", "systemd");
+  const nginxPairs = [
+    ["deploy/nginx-fmz-dashboard.conf", join(cfgNginx, "nginx-fmz-dashboard.conf")],
+    ["deploy/nginx-fmz-dashboard-locations.inc", join(cfgNginx, "nginx-fmz-dashboard-locations.inc")],
+  ];
+  const systemdPairs = [["deploy/fmz-ai-agent.service", join(cfgSystemd, "fmz-ai-agent.service")]];
+  let any = false;
+  for (const [relSrc, absDest] of [...nginxPairs, ...systemdPairs]) {
+    const absSrc = join(root, relSrc);
+    if (!existsSync(absSrc)) continue;
+    mkdirSync(dirname(absDest), { recursive: true });
+    copyFileSync(absSrc, absDest);
+    any = true;
+  }
+  if (any) {
+    archivedConfigDirs = true;
+    console.log(`  [config] 已复制 → release/${label}/config/{nginx,systemd}/`);
+  }
+} else {
+  console.log("\n  [config] 已使用 --skip-config，跳过 config/ 镜像（Nginx、systemd 样例）。");
+}
+
 const meta = [
   `release: ${label}`,
   `package.version: ${pkg.version}`,
@@ -219,8 +342,12 @@ const meta = [
   `enabledFeatures: ${enabledModules.join(", ") || "(none)"}`,
   `disabledFeatures: ${disabledModules.join(", ") || "(none)"}`,
   `archivedServerData: ${archivedData.length ? archivedData.join(", ") : "(none)"}`,
+  `archivedOptServices: ${archivedOpt.length ? archivedOpt.join(", ") : "(none)"}`,
+  `archivedConfigBundle: ${archivedConfigDirs ? "config/nginx,config/systemd" : "(none)"}`,
   "",
 ].join("\n");
 writeFileSync(metaPath, meta, "utf-8");
 
-console.log(`\n✅ 已打包到 release/${label}/（含 BUILD_INFO.txt${archivedData.length ? "、server/data" : ""}）`);
+const optHint = archivedOpt.length ? `、opt/${archivedOpt.length} 个后端目录` : "";
+const cfgHint = archivedConfigDirs ? "、config/（Nginx/systemd）" : "";
+console.log(`\n✅ 已打包到 release/${label}/（含 BUILD_INFO.txt${archivedData.length ? "、server/data" : ""}${optHint}${cfgHint}）`);
