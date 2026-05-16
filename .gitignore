@@ -3,6 +3,8 @@ dist/
 node_modules/
 test-results/
 .env*
+server/data/ai-agent-keys.json
+server/local-ai-agent.env
 __pycache__/
 *.log
 _dgb_*

@@ -1,0 +1,23 @@
+---
+description: 本仓库内部调用 ai-agent `/chat` 必须走模型降级适配，禁止单独直连单次请求。
+alwaysApply: true
+---
+
+# 内部 AI 调用（`/chat`）统一走适配器
+
+凡是**本仓库代码**向内网 `ai-agent-server`（`POST /chat`）发聊天补全，都必须通过**已有的「候选模型链 + 可恢复错误时换下一个」**路径，不得在业务里写「只打一个 `model`，失败就完蛋」的逻辑。
+
+## 前端（Vite / Vue）
+
+- **入口**：`src/features/ai-agent/AiAgentPanel.vue`
+- **适配层**：新增或修改的对话/分析/自由问答等，一律经 **`fetchChatStreamWithFallback`**（及与其配套的 SSE 消费逻辑），用当前选中模型为首的降级链调用。
+- **禁止**：手写 `fetch(\`${AI_AGENT_BASE}/chat\`，…)`（或等价封装）且不经过上述 fallback，除非是 `fetchChatStreamWithFallback` 内部的唯一一次实际请求。
+
+## Node 服务端（弹幕等）
+
+- **入口**：`server/douyu-danmaku-server.mjs`（及其它将来调用 `/chat` 的 `*.mjs`）
+- **适配层**：用 **`resolveAiAgentTriggerModelCandidates()`** 得到模型候选顺序，再用 **`chatAiAgentAccumulateFirstAvailable(modelIds, messages)`** 完成累加文本；不得在业务里直接 `fetch(\`${AI_AGENT_INTERNAL_URL}/chat\`, …)` 且只尝试单一 `model`，除非该方法内部实现本身。
+
+## 新增其它调用点时
+
+若新功能需在别的文件调用 `/chat`，**先复用上述函数**；若文件边界不合适，应把共用逻辑抽到 `server/` 或 `src/` 下可被两端复用的模块，再让所有调用走该模块——**原则是「一处适配，处处复用」，不要在新文件里重写一套单次请求**。

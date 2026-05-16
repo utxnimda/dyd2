@@ -7,12 +7,187 @@
  */
 
 import http from "node:http";
+import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ProxyAgent, setGlobalDispatcher } from "undici";
+import { geminiEligibleForOpenAiCompatTextChat } from "./gemini-openai-compat-chat-filter.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.AI_AGENT_PORT || "8792", 10);
+
+const LOCAL_AI_AGENT_ENV = join(__dirname, "local-ai-agent.env");
+
+/**
+ * Optional `server/local-ai-agent.env` (gitignored): KEY=value lines.
+ * Only assigns `process.env[key]` when the key is not already set (CLI / 系统环境优先).
+ */
+function loadOptionalLocalAiAgentEnv() {
+  if (!existsSync(LOCAL_AI_AGENT_ENV)) return;
+  let count = 0;
+  const text = readFileSync(LOCAL_AI_AGENT_ENV, "utf-8").replace(/^\uFEFF/, "");
+  for (const line of text.split(/\n/)) {
+    const t = line.replace(/\r$/, "").trim();
+    if (!t || t.startsWith("#")) continue;
+    const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(t);
+    if (!m) continue;
+    const key = m[1];
+    let val = m[2].trim();
+    if (
+      (val.startsWith("\"") && val.endsWith("\""))
+      || (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+    if (process.env[key] === undefined) {
+      process.env[key] = val;
+      count += 1;
+    }
+  }
+  if (count > 0) {
+    console.log(`[ai-agent] 已从 local-ai-agent.env 补充 ${count} 个环境变量（不覆盖已存在的变量）`);
+  }
+}
+
+/** 专门给 Gemini 出站（list models / chat）用的本地 HTTP 混合端口；优先级最高，覆盖 Windows 注册表里的系统代理 */
+function localMixedProxyEnvUrl() {
+  return process.env.FMZ_AI_AGENT_LOCAL_PROXY?.trim() || "";
+}
+
+function outboundProxyEnvUrl() {
+  return (
+    process.env.FMZ_AI_AGENT_HTTPS_PROXY?.trim()
+    || process.env.HTTPS_PROXY?.trim()
+    || process.env.https_proxy?.trim()
+    || process.env.FMZ_AI_AGENT_HTTP_PROXY?.trim()
+    || process.env.HTTP_PROXY?.trim()
+    || process.env.http_proxy?.trim()
+    || ""
+  );
+}
+
+const WIN_INET_HKCU = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+const WIN_INET_HKLM = "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+
+function regQueryLine(hivePath, valueName) {
+  try {
+    return execFileSync("reg.exe", ["query", hivePath, "/v", valueName], {
+      encoding: "utf-8",
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    return null;
+  }
+}
+
+function regQueryDword(hivePath, valueName) {
+  const out = regQueryLine(hivePath, valueName);
+  if (!out) return null;
+  const re = new RegExp(`${valueName}\\s+REG_DWORD\\s+0x([0-9a-fA-F]+)`, "i");
+  const m = re.exec(out);
+  return m ? Number.parseInt(m[1], 16) : null;
+}
+
+function regQuerySz(hivePath, valueName) {
+  const out = regQueryLine(hivePath, valueName);
+  if (!out) return null;
+  for (const raw of out.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line.startsWith(valueName) || !line.includes("REG_SZ")) continue;
+    const idx = line.indexOf("REG_SZ");
+    return line.slice(idx + 6).trim();
+  }
+  return null;
+}
+
+/** 将「Internet 设置」里的 ProxyServer 转成 undici ProxyAgent 可用的 URL */
+function proxyServerRegistryToUndiciUrl(proxyServer) {
+  if (!proxyServer || typeof proxyServer !== "string") return "";
+  const s = proxyServer.trim();
+  if (!s) return "";
+
+  if (/^https?:\/\//i.test(s)) return s;
+
+  if (s.includes("=")) {
+    const parts = s.split(";").map((p) => p.trim()).filter(Boolean);
+    const https = parts.find((p) => /^https=/i.test(p));
+    const http = parts.find((p) => /^http=/i.test(p));
+    const socks = parts.find((p) => /^socks5?=/i.test(p));
+    const pick = https || http || socks || parts[0];
+    const eq = pick.indexOf("=");
+    if (eq === -1) return "";
+    const scheme = pick.slice(0, eq).toLowerCase().trim();
+    const rest = pick.slice(eq + 1).trim().replace(/^\/\//, "");
+    if (!rest) return "";
+    if (scheme === "socks" || scheme === "socks5") return `socks5://${rest}`;
+    if (scheme === "http" || scheme === "https") return rest.includes("://") ? rest : `http://${rest}`;
+    return "";
+  }
+
+  return `http://${s.replace(/^\/\//, "")}`;
+}
+
+/** 读取 Windows「系统代理」模式写入的注册表（依赖 reg.exe，无额外依赖） */
+function tryWindowsSystemProxyUrl() {
+  if (process.platform !== "win32") return "";
+  if (process.env.FMZ_AI_AGENT_SKIP_SYSTEM_PROXY === "1") return "";
+
+  for (const hivePath of [WIN_INET_HKCU, WIN_INET_HKLM]) {
+    const enable = regQueryDword(hivePath, "ProxyEnable");
+    if (enable !== 1) continue;
+    const server = regQuerySz(hivePath, "ProxyServer");
+    const url = proxyServerRegistryToUndiciUrl(server || "");
+    if (url) {
+      console.log(`[ai-agent] 已读取 Windows 系统代理（${hivePath}）`);
+      return url;
+    }
+  }
+
+  const pac = regQuerySz(WIN_INET_HKCU, "AutoConfigURL") || regQuerySz(WIN_INET_HKLM, "AutoConfigURL");
+  if (pac && !outboundProxyEnvUrl()) {
+    console.warn(
+      "[ai-agent] 检测到 PAC 自动代理（AutoConfigURL），无法自动转为 Node 代理；请在 local-ai-agent.env 或环境变量中设置 HTTPS_PROXY。",
+    );
+  }
+  return "";
+}
+
+function redactProxyUrlForLog(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname + (u.port ? `:${u.port}` : "");
+    if (u.username || u.password) return `${u.protocol}//****@${host}`;
+    return `${u.protocol}//${host}`;
+  } catch {
+    return "(无效的代理 URL)";
+  }
+}
+
+/** Node fetch → Undici；优先：FMZ_AI_AGENT_LOCAL_PROXY（本地混合端口）→ 其它环境变量 → Windows 系统代理 */
+function installUndiciOutboundProxy() {
+  let proxyUrl = localMixedProxyEnvUrl();
+  let source = "FMZ_AI_AGENT_LOCAL_PROXY（本地混合端口）";
+  if (!proxyUrl) {
+    proxyUrl = outboundProxyEnvUrl();
+    source = "环境变量 / local-ai-agent.env";
+  }
+  if (!proxyUrl) {
+    proxyUrl = tryWindowsSystemProxyUrl();
+    source = "Windows 系统代理";
+  }
+  if (!proxyUrl) return;
+  try {
+    setGlobalDispatcher(new ProxyAgent(proxyUrl));
+    console.log(`[ai-agent] 出站请求走代理（${source}）: ${redactProxyUrlForLog(proxyUrl)}`);
+  } catch (err) {
+    console.warn("[ai-agent] 代理不可用，仍将直连上游 API:", err.message);
+  }
+}
+
+loadOptionalLocalAiAgentEnv();
+installUndiciOutboundProxy();
 
 /* ------------------------------------------------------------------ */
 /*  Load API keys from config file or environment variables           */
@@ -22,7 +197,8 @@ const KEYS_FILE = join(__dirname, "data", "ai-agent-keys.json");
 let fileKeys = {};
 try {
   if (existsSync(KEYS_FILE)) {
-    fileKeys = JSON.parse(readFileSync(KEYS_FILE, "utf-8"));
+    const raw = readFileSync(KEYS_FILE, "utf-8").replace(/^\uFEFF/, "");
+    fileKeys = JSON.parse(raw);
     console.log(`[ai-agent] Loaded API keys from ${KEYS_FILE}`);
   }
 } catch (err) {
@@ -31,7 +207,10 @@ try {
 
 /** Resolve an API key: env var takes priority, then config file */
 function resolveKey(envVar, fileField) {
-  return process.env[envVar] || fileKeys[fileField] || "";
+  const fromEnv = (process.env[envVar] || "").trim();
+  if (fromEnv) return fromEnv;
+  const fromFile = fileKeys[fileField];
+  return typeof fromFile === "string" ? fromFile.trim() : "";
 }
 
 /* ------------------------------------------------------------------ */
@@ -39,29 +218,253 @@ function resolveKey(envVar, fileField) {
 /*  API keys are read from environment variables or hardcoded below.  */
 /* ------------------------------------------------------------------ */
 
+const GEMINI_CHAT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+
+/** 逗号/分号/空白分隔的 model id，不出现在 /models 与 /chat（本机仅 2.0 无额度时可填 gemini-2.0-flash） */
+function parseDisabledGeminiModelIds() {
+  const raw = (
+    process.env.FMZ_AI_AGENT_DISABLED_MODEL_IDS?.trim()
+    || process.env.GEMINI_DISABLED_MODEL_IDS?.trim()
+    || ""
+  );
+  if (!raw) return new Set();
+  return new Set(
+    raw.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean),
+  );
+}
+
+const DISABLED_GEMINI_MODEL_IDS = parseDisabledGeminiModelIds();
+
 /**
- * Each provider entry:
- *   id       — unique model identifier (sent from frontend)
- *   label    — display name
- *   provider — provider name for grouping
- *   apiUrl   — chat completions endpoint (OpenAI-compatible)
- *   apiKey   — bearer token
- *   model    — model name to send in the request body
+ * Gemini — OpenAI 兼容 Chat；顺序影响前端首次默认选中项。
+ * 2.0 常与免费档「input token」额度冲突，置于列表后部。
  */
-const MODEL_PROVIDERS = [
-  {
-    id: "gemini-2.0-flash",
-    label: "Gemini",
-    provider: "Google",
-    apiUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    apiKey: resolveKey("GEMINI_API_KEY", "gemini"),
-    model: "gemini-2.0-flash",
-  },
+const GEMINI_VARIANTS_ALL = [
+  { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash", model: "gemini-1.5-flash" },
+  { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash‑8B", model: "gemini-1.5-flash-8b" },
+  { id: "gemini-1.5-pro", label: "Gemini 1.5 Pro", model: "gemini-1.5-pro" },
+  { id: "gemini-2.0-flash-lite", label: "Gemini 2.0 Flash‑Lite", model: "gemini-2.0-flash-lite" },
+  { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash", model: "gemini-2.0-flash" },
 ];
+
+const GEMINI_VARIANTS = GEMINI_VARIANTS_ALL.filter((v) => !DISABLED_GEMINI_MODEL_IDS.has(v.id));
+
+if (DISABLED_GEMINI_MODEL_IDS.size > 0) {
+  console.log(`[ai-agent] 已禁用模型（不出现在列表）: ${[...DISABLED_GEMINI_MODEL_IDS].join(", ")}`);
+}
+
+const GEMINI_SHARED_KEY = () => resolveKey("GEMINI_API_KEY", "gemini");
+
+const OPENAI_SHARED_KEY = () => resolveKey("OPENAI_API_KEY", "openai");
+
+/** 千问 / DashScope OpenAI 兼容：环境变量 DASHSCOPE_API_KEY 或 QWEN_API_KEY；文件字段 qwen */
+function resolveQwenDashScopeKey() {
+  const a = (process.env.DASHSCOPE_API_KEY || "").trim();
+  if (a) return a;
+  const b = (process.env.QWEN_API_KEY || "").trim();
+  if (b) return b;
+  const f = fileKeys.qwen;
+  return typeof f === "string" ? f.trim() : "";
+}
+
+/** 兼容自建 / Azure OpenAI：`https://your-resource.openai.azure.com/openai/deployments/name` → 仍可设 OPENAI_BASE_URL 为前缀；默认官方 v1 */
+function openAiChatCompletionsUrl() {
+  const base = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").trim().replace(/\/+$/, "");
+  return `${base}/chat/completions`;
+}
+
+const GEMINI_LIST_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+
+/** OpenAI Chat Completions 模型（与 TRIGGER_AI、`POST /chat` 的 modelId 一致） */
+const OPENAI_VARIANTS = [
+  { id: "gpt-4o", label: "GPT-4o · OpenAI", model: "gpt-4o" },
+  { id: "gpt-4o-mini", label: "GPT-4o mini · OpenAI", model: "gpt-4o-mini" },
+  { id: "gpt-4-turbo", label: "GPT-4 Turbo · OpenAI", model: "gpt-4-turbo" },
+  { id: "gpt-3.5-turbo", label: "GPT-3.5 Turbo · OpenAI", model: "gpt-3.5-turbo" },
+];
+
+/** 通义千问（DashScope 兼容 OpenAI）；model 与控制台一致时可自行改清单 */
+const QWEN_VARIANTS = [
+  { id: "qwen-max", label: "通义千问 Max · DashScope", model: "qwen-max" },
+  { id: "qwen-plus", label: "通义千问 Plus · DashScope", model: "qwen-plus" },
+  { id: "qwen-turbo", label: "通义千问 Turbo · DashScope", model: "qwen-turbo" },
+  { id: "qwen-long", label: "通义千问 Long · DashScope", model: "qwen-long" },
+];
+
+/** OpenAI：`Authorization: Bearer` + 官方 /v1/chat/completions；无密钥则不注册 */
+function buildOpenAiProviders() {
+  const apiKey = OPENAI_SHARED_KEY();
+  if (!apiKey) return [];
+  const apiUrl = openAiChatCompletionsUrl();
+  return OPENAI_VARIANTS.map((v) => ({
+    id: v.id,
+    label: v.label,
+    provider: "OpenAI",
+    apiUrl,
+    apiKey,
+    model: v.model,
+  }));
+}
+
+/** 中国大陆默认 dashscope.aliyuncs.com；国际区可设 QWEN_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1 */
+function qwenDashScopeChatCompletionsUrl() {
+  const base = (
+    process.env.QWEN_BASE_URL?.trim()
+    || process.env.DASHSCOPE_COMPATIBLE_BASE?.trim()
+    || "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  ).replace(/\/+$/, "");
+  return `${base}/chat/completions`;
+}
+
+/** 与 OpenAI SDK 兼容的模型名（DashScope 控制台 / 文档）；无密钥则不注册 */
+function buildQwenProviders() {
+  const apiKey = resolveQwenDashScopeKey();
+  if (!apiKey) return [];
+  const apiUrl = qwenDashScopeChatCompletionsUrl();
+  return QWEN_VARIANTS.map((v) => ({
+    id: v.id,
+    label: v.label,
+    provider: "Qwen",
+    apiUrl,
+    apiKey,
+    model: v.model,
+  }));
+}
+
+function finalizeProvidersFromGeminiList(geminiList) {
+  const merged = [...geminiList, ...buildOpenAiProviders(), ...buildQwenProviders()];
+  sortModelProviders(merged);
+  return merged;
+}
+
+/** list models 不返回剩余额度；仅作说明给前端 */
+const MODELS_QUOTA_NOTE =
+  "Generative Language API 的 GET /v1beta/models 只返回模型元数据，不包含剩余配额。额度请查看 AI Studio、Google Cloud 配额/计费页；每次请求的 limit 可能在响应头或错误体中体现。";
+
+let modelsListMeta = {
+  source: "static",
+  lastRemoteError: null,
+  quotaNote: MODELS_QUOTA_NOTE,
+};
+
+function buildStaticModelProviders() {
+  return GEMINI_VARIANTS.map((v) => ({
+    id: v.id,
+    label: v.label,
+    provider: "Google",
+    apiUrl: GEMINI_CHAT_URL,
+    apiKey: GEMINI_SHARED_KEY(),
+    model: v.model,
+  }));
+}
+
+/** 分页拉取当前 Key 在 Google 侧可见的全部 models */
+async function fetchAllGeminiModelsPaged(apiKey) {
+  const collected = [];
+  let pageToken = "";
+  for (let page = 0; page < 64; page++) {
+    const u = new URL(GEMINI_LIST_MODELS_URL);
+    u.searchParams.set("pageSize", "100");
+    if (pageToken) u.searchParams.set("pageToken", pageToken);
+    const res = await fetch(u.toString(), {
+      headers: { "x-goog-api-key": apiKey },
+    });
+    const raw = await res.text();
+    if (!res.ok) {
+      throw new Error(`list models HTTP ${res.status}: ${raw.slice(0, 300)}`);
+    }
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error("list models 返回非 JSON");
+    }
+    collected.push(...(data.models || []));
+    pageToken = data.nextPageToken || "";
+    if (!pageToken) break;
+  }
+  return collected;
+}
+
+function tierOrderForSort(id) {
+  if (/2\.5|2-5/.test(id)) return 0;
+  if (/1\.5|1-5/.test(id)) return 1;
+  if (/2\.0|2-0/.test(id)) return 2;
+  return 3;
+}
+
+function sortModelProviders(arr) {
+  arr.sort((a, b) => {
+    const d = tierOrderForSort(a.id) - tierOrderForSort(b.id);
+    return d !== 0 ? d : a.id.localeCompare(b.id);
+  });
+}
+
+function googleListItemToProvider(m, apiKey) {
+  const full = typeof m.name === "string" ? m.name : "";
+  const id = full.replace(/^models\//, "");
+  if (!id || DISABLED_GEMINI_MODEL_IDS.has(id)) return null;
+  if (!geminiEligibleForOpenAiCompatTextChat(id)) return null;
+  const methods = Array.isArray(m.supportedGenerationMethods) ? m.supportedGenerationMethods : [];
+  if (!methods.includes("generateContent")) return null;
+  if (/embed/i.test(id)) return null;
+  if (!/^gemini/i.test(id)) return null;
+  const label = String(m.displayName || id).trim();
+  return {
+    id,
+    label,
+    provider: "Google",
+    apiUrl: GEMINI_CHAT_URL,
+    apiKey,
+    model: id,
+  };
+}
+
+let MODEL_PROVIDERS = finalizeProvidersFromGeminiList(buildStaticModelProviders());
+
+async function refreshModelProvidersFromGoogle() {
+  modelsListMeta.lastRemoteError = null;
+  if (process.env.FMZ_AI_AGENT_MODELS_SOURCE === "static") {
+    modelsListMeta.source = "static";
+    MODEL_PROVIDERS = finalizeProvidersFromGeminiList(buildStaticModelProviders());
+    return;
+  }
+  const key = GEMINI_SHARED_KEY();
+  if (!key) {
+    MODEL_PROVIDERS = finalizeProvidersFromGeminiList(buildStaticModelProviders());
+    modelsListMeta.source = "static";
+    return;
+  }
+  try {
+    const rawModels = await fetchAllGeminiModelsPaged(key);
+    const providers = rawModels
+      .map((item) => googleListItemToProvider(item, key))
+      .filter(Boolean);
+    if (providers.length === 0) {
+      console.warn("[ai-agent] list models 解析后为 0 条，使用内置静态列表");
+      MODEL_PROVIDERS = finalizeProvidersFromGeminiList(buildStaticModelProviders());
+      modelsListMeta.source = "static_fallback_empty_api";
+      return;
+    }
+    sortModelProviders(providers);
+    MODEL_PROVIDERS = finalizeProvidersFromGeminiList(providers);
+    modelsListMeta.source = "google_list_models";
+    console.log(`[ai-agent] 已从 Google GET /v1beta/models 加载 ${providers.length} 个模型`);
+  } catch (err) {
+    modelsListMeta.lastRemoteError = err?.message || String(err);
+    console.warn("[ai-agent] 拉取模型列表失败，使用内置静态列表:", modelsListMeta.lastRemoteError);
+    MODEL_PROVIDERS = finalizeProvidersFromGeminiList(buildStaticModelProviders());
+    modelsListMeta.source = "static_fallback_error";
+  }
+}
+
+function hasUsableApiKey(m) {
+  return typeof m.apiKey === "string" && m.apiKey.trim().length > 0;
+}
 
 /** Only expose models that have a valid API key configured */
 function getAvailableModels() {
-  return MODEL_PROVIDERS.filter((m) => m.apiKey).map((m) => ({
+  return MODEL_PROVIDERS.filter(hasUsableApiKey).map((m) => ({
     id: m.id,
     label: m.label,
     provider: m.provider,
@@ -69,7 +472,20 @@ function getAvailableModels() {
 }
 
 function findModel(id) {
-  return MODEL_PROVIDERS.find((m) => m.id === id && m.apiKey);
+  return MODEL_PROVIDERS.find((m) => m.id === id && hasUsableApiKey(m));
+}
+
+function buildModelsJsonPayload() {
+  return {
+    models: getAvailableModels(),
+    meta: {
+      listSource: modelsListMeta.source,
+      quotaNote: modelsListMeta.quotaNote,
+      listModelsReference:
+        "GET https://generativelanguage.googleapis.com/v1beta/models（x-goog-api-key，与 chat 相同 Key）；不返回剩余配额。",
+      ...(modelsListMeta.lastRemoteError ? { listModelsError: modelsListMeta.lastRemoteError } : {}),
+    },
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -79,7 +495,8 @@ function findModel(id) {
 function sendJson(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
-    "Content-Type": "application/json",
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
   });
@@ -109,9 +526,12 @@ const server = http.createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
-  // GET /models
+  // GET /models  （?refresh=1 时重新拉取 Google 模型列表）
   if (req.method === "GET" && url.pathname === "/models") {
-    return sendJson(res, 200, { models: getAvailableModels() });
+    if (url.searchParams.get("refresh") === "1") {
+      await refreshModelProvidersFromGoogle();
+    }
+    return sendJson(res, 200, buildModelsJsonPayload());
   }
 
   // POST /chat
@@ -175,8 +595,31 @@ const server = http.createServer(async (req, res) => {
 
       res.end();
     } catch (err) {
+      const c = err?.cause;
+      const code = c?.code || c?.errno;
+      const causeMsg = c && typeof c === "object" && "message" in c ? String(c.message) : c ? String(c) : "";
+      const detail = [err?.message, code && `code=${code}`, causeMsg && `cause=${causeMsg}`]
+        .filter(Boolean)
+        .join(" | ");
+      console.error("[ai-agent] Upstream fetch failed:", detail);
       if (!res.headersSent) {
-        sendJson(res, 500, { error: `Proxy error: ${err.message}` });
+        const causeStr = String(causeMsg || "");
+        const localProxyDead =
+          code === "ECONNREFUSED"
+          && /127\.0\.0\.1|localhost/i.test(causeStr);
+        const hint =
+          code === "ENOTFOUND"
+            ? "（DNS 无法解析上游域名，请检查网络/DNS）"
+            : localProxyDead
+              ? "（本机 HTTP 代理端口未监听或未启动混合端口：可注释 server/local-ai-agent.env 中的 HTTPS_PROXY 后重启以走直连/TUN，或先在 VPN 客户端开启对应端口并核对端口号）"
+              : code === "ECONNREFUSED" || code === "ETIMEDOUT"
+                ? "（连接被拒或超时，检查防火墙、代理或本地区是否可达 Google API）"
+                : code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" || /cert|TLS|SSL/i.test(String(causeMsg))
+                  ? "（TLS/证书校验失败，检查系统时间、公司中间人证书）"
+                  : "";
+        sendJson(res, 502, {
+          error: `无法连接上游 API：${detail || err?.message}${hint}`,
+        });
       } else {
         res.end();
       }
@@ -188,12 +631,26 @@ const server = http.createServer(async (req, res) => {
   sendJson(res, 404, { error: "Not found" });
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`[ai-agent] 🤖 AI Agent proxy server running on http://127.0.0.1:${PORT}`);
-  const available = getAvailableModels();
-  if (available.length === 0) {
-    console.log("[ai-agent] ⚠️  No API keys configured! Set GEMINI_API_KEY env var or edit data/ai-agent-keys.json.");
-  } else {
-    console.log(`[ai-agent]    Available models: ${available.map((m) => m.id).join(", ")}`);
-  }
-});
+(async () => {
+  await refreshModelProvidersFromGoogle();
+  server.listen(PORT, "127.0.0.1", () => {
+    console.log(`[ai-agent] 🤖 AI Agent proxy server running on http://127.0.0.1:${PORT}`);
+    const available = getAvailableModels();
+    if (available.length === 0) {
+      console.log(
+        "[ai-agent] ⚠️  No API keys configured! Set GEMINI_API_KEY / OPENAI_API_KEY / DASHSCOPE_API_KEY (或 QWEN_API_KEY) / server/data/ai-agent-keys.json（gemini / openai / qwen）。",
+      );
+    } else {
+      const ids = available.map((m) => m.id);
+      const idLine
+        = ids.length > 28
+          ? `${ids.slice(0, 28).join(", ")} … (+${ids.length - 28})`
+          : ids.join(", ");
+      console.log(`[ai-agent]    模型列表来源: ${modelsListMeta.source} — 共 ${available.length} 个`);
+      console.log(`[ai-agent]    ids: ${idLine}`);
+    }
+    if (modelsListMeta.lastRemoteError) {
+      console.warn(`[ai-agent]    list models 未成功（已回退静态）: ${modelsListMeta.lastRemoteError}`);
+    }
+  });
+})();

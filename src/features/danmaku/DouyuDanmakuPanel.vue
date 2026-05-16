@@ -1,10 +1,6 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, reactive, onMounted, onUnmounted, nextTick, watch } from "vue";
 import DmToolbarMenuSelect from "./DmToolbarMenuSelect.vue";
-import { requestPluginOpen } from "../../shared/plugins";
-
-/** AI Agent plugin feature flag (exposed to template) */
-const F_AI_AGENT = typeof __FEATURE_AI_AGENT__ !== "undefined" && __FEATURE_AI_AGENT__;
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                             */
@@ -28,8 +24,40 @@ interface DanmakuMsg {
   ic?: string;
   photo?: string;
 }
-interface TriggerConfig { id: string; pattern: string; action: string; enabled: boolean; description: string; roomIds?: string[]; }
-interface TriggerLogEntry { triggerId: string; pattern: string; action: string; content: string; nickname: string; uid: string; fullText: string; ts: number; source?: string; roomId?: string; }
+type TriggerKind = "danmaku" | "schedule";
+type ScheduleModeType = "interval" | "daily" | "weekly" | "cron";
+interface TriggerScheduleShape {
+  mode: ScheduleModeType;
+  intervalSec?: number;
+  hour?: number;
+  minute?: number;
+  weekdays?: number[];
+  cron?: string;
+}
+interface TriggerConfig {
+  id: string;
+  kind?: TriggerKind;
+  pattern: string;
+  action: string;
+  enabled: boolean;
+  description: string;
+  roomIds?: string[];
+  schedule?: TriggerScheduleShape;
+  payload?: string;
+}
+/** 定时触发「编辑」表单草稿（与添加逻辑字段对齐） */
+interface ScheduleEditDraft {
+  mode: ScheduleModeType;
+  intervalMinutes: number;
+  hour: number;
+  minute: number;
+  weekdays: number[];
+  cron: string;
+  action: string;
+  payload: string;
+  roomIds: string[];
+}
+interface TriggerLogEntry { triggerId: string; pattern: string; action: string; content: string; nickname: string; uid: string; fullText: string; ts: number; source?: string; roomId?: string; summary?: string; }
 interface RoomInfo { room_id: number; room_name: string; owner_name: string; owner_uid: string | number; show_status: number; game_name: string; cate_name: string; online_num: number; fans_num: number; room_thumb: string; start_time: number; avatar: string; }
 interface GiftMsg { type?: string; uid?: string; nn?: string; gfid?: string; gfn?: string; gfcnt?: string; hits?: string; gs?: string; bg?: string; bnn?: string; bl?: string; brid?: string; level?: string; ic?: string; rid?: string; roomId: string; ts: number; [key: string]: unknown; }
 interface BackendRoomStatus { roomId: string; status: string; stats: { total: number; triggered: number; connected_at: number | null }; recording: boolean; recordedCount: number; info?: RoomInfo | null; }
@@ -40,6 +68,51 @@ interface BackendRoomStatus { roomId: string; status: string; stats: { total: nu
 interface SongTimelineEntry { song: string; artist: string; ts: number; uid: string; nn: string; }
 interface SongRequester { nn: string; uid: string; ts: number; }
 interface SongStatEntry { count: number; requesters: SongRequester[]; }
+
+/** 服务端落盘的结构化数据概览（归档弹幕 / 礼物 catalog 估算；旧条目可能无该字段） */
+interface AiReportOverviewStats {
+  /** kind=daily */
+  dateYmd?: string;
+  weekdayCn?: string;
+  /** kind=weekly：与 periodLabel 一致，如 YYYY-MM-DD～YYYY-MM-DD */
+  rangeLabel?: string;
+  streamerName?: string;
+  roomId?: string;
+  danmakuTotal?: number;
+  danmakuUniqueUsers?: number;
+  giftSenderCount?: number;
+  paidUserCount?: number;
+  streamerIncomeApproxYuan?: number;
+  audiencePaidApproxYuan?: number;
+}
+
+/** 服务端持久化的 AI 日报/周报条目 */
+interface AiReportEntry {
+  id: string;
+  roomId: string;
+  kind: "daily" | "weekly";
+  createdAt: number;
+  /** 服务端去重槽：房间号 + 日历跨度（日报为单日；周报为周一～周日起止） */
+  periodKey?: string;
+  periodLabel?: string;
+  title?: string;
+  content?: string;
+  triggerId?: string;
+  triggeredBy?: string;
+  /** 生成时抓取的主播头像 URL */
+  streamerAvatar?: string;
+  /** -100～+100，来自文末 FMZ_REPORT_META */
+  mentalityScore?: number;
+  bestDanmakuQuote?: string;
+  bestDanmakuReason?: string;
+  mentalityRubric?: string;
+  /** kind=daily：新版生成流程写入 */
+  dailyOverview?: AiReportOverviewStats;
+  /** kind=weekly：新版生成流程写入 */
+  weeklyOverview?: AiReportOverviewStats;
+  /** 服务端软隐藏：为 true 时列表接口不返回，条目仍在 ai-reports.json */
+  hidden?: boolean;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Constants & State                                                 */
@@ -331,32 +404,48 @@ const giftFreeFloatRect = reactive(defaultGiftFreeViewportRect());
 const dmFeedBenchRootRef = ref<HTMLElement | null>(null);
 /** 「弹幕流」整块区域上缘 → 视为固定分列可用的垂直起点 */
 const dmFeedSectionRootRef = ref<HTMLElement | null>(null);
-/** 可见性工具条之下的嵌入区顶端（分列测量起点，不包含「显示弹幕/礼物栏」条） */
-const dmEmbeddedMeasureTopRef = ref<HTMLElement | null>(null);
+/** 可见性工具条之下的嵌入区（分列测量起点，不包含「显示弹幕/礼物栏」条） */
+const dmFeedEmbedSlotRef = ref<HTMLElement | null>(null);
 const dmModeContentRef = ref<HTMLElement | null>(null);
-/** 固定模式：分列外框高度（弹幕/礼物同高），紧贴视口底部留出边距 */
+/** 桌面固定分列高度（变矮时不自动压矮，多出的纵向空间由主列/浏览器滚动） */
 const dmEmbeddedFixedSplitH = ref(368);
 
 let dmEmbedSplitMeasureRaf: number | null = null;
 let dmModeContentResizeObserver: ResizeObserver | null = null;
+let dmEmbedSlotResizeObserver: ResizeObserver | null = null;
 
 function refreshDmEmbeddedFixedSplitHeight(): void {
   if (typeof window === "undefined") return;
   if (activeSubTab.value !== "danmaku") return;
   if (!splitHasFixedSlots.value) return;
-  const anchor = dmEmbeddedMeasureTopRef.value ?? dmFeedSectionRootRef.value;
-  if (!anchor) return;
-  const top = anchor.getBoundingClientRect().top;
-  const bottomGap = Math.max(10, Math.round(window.innerHeight * 0.015));
+
+  const minH = isMobile.value ? 160 : 200;
   const vv = window.visualViewport;
   const visH = vv ? vv.height : window.innerHeight;
   const viewportBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
-  const raw = viewportBottom - top - bottomGap;
-  const minH = isMobile.value ? 160 : 200;
+  const bottomGap = Math.max(10, Math.round(visH * 0.015));
+
+  const slotEl = dmFeedEmbedSlotRef.value;
+  const anchor = slotEl ?? dmFeedSectionRootRef.value;
+  if (!anchor) return;
+
+  const top = anchor.getBoundingClientRect().top;
+  const rawViewport = Math.floor(viewportBottom - top - bottomGap);
   const maxH = Math.max(minH + 48, Math.floor(visH * 0.9));
-  const h = clampNum(Math.floor(raw), minH, maxH);
-  dmEmbeddedFixedSplitH.value = h;
-  dmDanmakuFixedPanelH.value = clampNum(h, minH, maxH);
+
+  /** 当前视窗下「理想」高度（随窗口变高可增加） */
+  const ideal = clampNum(rawViewport, minH, maxH);
+
+  if (!isMobile.value) {
+    /* 桌面：视窗变矮时不降低固定分列高度；maxH 随行高变小时不得把已建立的高度压回去 */
+    const preserve = Math.max(ideal, dmEmbeddedFixedSplitH.value || 0);
+    const sticky = clampNum(preserve, minH, Math.max(maxH, preserve));
+    dmEmbeddedFixedSplitH.value = sticky;
+    dmDanmakuFixedPanelH.value = sticky;
+  } else {
+    dmEmbeddedFixedSplitH.value = ideal;
+    dmDanmakuFixedPanelH.value = ideal;
+  }
 }
 
 function scheduleEmbedSplitHeightMeasure(): void {
@@ -369,8 +458,11 @@ function scheduleEmbedSplitHeightMeasure(): void {
 }
 
 const dmFeedSplitBenchStyle = computed(() => {
-  const s: Record<string, string> = { height: `${dmEmbeddedFixedSplitH.value}px` };
+  const s: Record<string, string> = {};
   if (giftEmbeddedBesideDm.value && !isMobile.value) s["--gift-ratio"] = String(giftPanelRatio.value);
+  if (!isMobile.value && splitHasFixedSlots.value) {
+    s.height = `${dmEmbeddedFixedSplitH.value}px`;
+  }
   return s;
 });
 const danmakuPopoutAuxWin = shallowRef<Window | null>(null);
@@ -1354,6 +1446,13 @@ watch(showDanmakuFeedBar, (open) => {
   }
 });
 
+watch(splitHasFixedSlots, (on, prev) => {
+  if (!isMobile.value && on === true && prev === false) {
+    /* 重新回到固定分列时允许按当前视窗重新取值，之后在视窗变矮时仍会保持不降高 */
+    dmEmbeddedFixedSplitH.value = 0;
+  }
+});
+
 watch([splitHasFixedSlots, activeSubTab], () => {
   scheduleEmbedSplitHeightMeasure();
 });
@@ -1812,21 +1911,6 @@ function openUserPage(uid: string | undefined): void {
   window.open(`https://www.doseeing.com/data/fan/${encodeURIComponent(id)}`, "_blank");
 }
 
-/** Send current danmaku data to AI Agent plugin for analysis */
-function sendToAiAgent(): void {
-  const list = backendDanmakuList.value;
-  if (list.length === 0) return;
-  const text = list.map((m) => {
-    const time = new Date(m.ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    return `[${time}] ${m.nn}: ${m.txt}`;
-  }).join("\n");
-  requestPluginOpen("ai-agent", {
-    danmakuText: text,
-    danmakuCount: list.length,
-    roomId: backendSelectedRoom.value || "",
-  });
-}
-
 /** 解析斗鱼弹幕里的头像/ic 字段；若为 6 位色值则视作等级色而非头像 */
 function normalizeDouyuUserAvatarHref(raw: string): string {
   const t = String(raw || "").trim();
@@ -1937,8 +2021,698 @@ type SongPanelTab = "timeline" | "session" | "total";
 const songPanelTab = ref<SongPanelTab>("timeline");
 const songTimelineOrder = ref<"desc" | "asc">("desc"); // desc = newest first
 
+// AI 日报/周报（触发器生成，服务端落盘）
+const showAiReportPanel = ref(false);
+const aiReportPanelRoomId = ref<string | null>(null);
+const aiReportPanelLoading = ref(false);
+const aiReportEntries = ref<AiReportEntry[]>([]);
+const aiReportSelectedId = ref<string | null>(null);
+const aiReportDeleteBusy = ref(false);
+const selectedAiReport = computed(() => aiReportEntries.value.find((e) => e.id === aiReportSelectedId.value) || null);
 
+/** 侧栏便签日期解析（与服务端 periodLabel 对齐） */
+const AI_REPORT_PIN_YMD = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
+const AI_REPORT_DAILY_PIN_MAX = 7;
+const AI_REPORT_WEEKLY_PIN_MAX = 4;
 
+function normalizeAiReportYmd(raw: string): string | null {
+  const m = AI_REPORT_PIN_YMD.exec(raw.trim());
+  if (!m) return null;
+  const y = m[1];
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (!Number.isFinite(mo) || !Number.isFinite(d)) return null;
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+function aiReportYmdTime(ymd: string): number | null {
+  const n = normalizeAiReportYmd(ymd);
+  if (!n) return null;
+  const [y, mo, d] = n.split("-").map(Number);
+  const t = new Date(y, mo - 1, d).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
+function aiReportDailySortKey(entry: AiReportEntry): number {
+  const pl = String(entry.periodLabel || "").trim();
+  let t = aiReportYmdTime(pl);
+  if (t != null) return t;
+  const tail = String(entry.periodKey || "").split(":").pop()?.trim();
+  if (tail) {
+    t = aiReportYmdTime(tail);
+    if (t != null) return t;
+  }
+  return entry.createdAt;
+}
+
+/** 周报：按区间结束日优先（最近一周靠前），解析失败则用创建时间 */
+function aiReportWeeklySortKey(entry: AiReportEntry): number {
+  const pl = String(entry.periodLabel || "").trim();
+  const chunks = pl.split(/\s*[~～]\s*/).map((s) => s.trim()).filter(Boolean);
+  if (chunks.length >= 2) {
+    const ta = aiReportYmdTime(chunks[0]);
+    const tb = aiReportYmdTime(chunks[1]);
+    if (ta != null && tb != null) return Math.max(ta, tb);
+    if (tb != null) return tb;
+    if (ta != null) return ta;
+  }
+  if (chunks.length === 1) {
+    const t = aiReportYmdTime(chunks[0]);
+    if (t != null) return t;
+  }
+  return entry.createdAt;
+}
+
+/** 公历 YYYY-MM-DD（已规范化）对应中文星期简称 */
+const AI_REPORT_WEEKDAY_CN = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+function chineseWeekdaySuffixFromNormYmd(norm: string): string {
+  const parts = norm.split("-").map(Number);
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return "";
+  const [y, mo, d] = parts;
+  const dt = new Date(y, mo - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return "";
+  return AI_REPORT_WEEKDAY_CN[dt.getDay()] ?? "";
+}
+
+function appendChineseWeekdayToDailyYmd(norm: string): string {
+  const w = chineseWeekdaySuffixFromNormYmd(norm);
+  return w ? `${norm} ${w}` : norm;
+}
+
+function formatAiReportDailyPinLabel(entry: AiReportEntry): string {
+  const pl = String(entry.periodLabel || "").trim();
+  const norm = normalizeAiReportYmd(pl);
+  if (norm) return appendChineseWeekdayToDailyYmd(norm);
+  const pkTail = String(entry.periodKey || "").split(":").pop()?.trim();
+  if (pkTail) {
+    const n = normalizeAiReportYmd(pkTail);
+    if (n) return appendChineseWeekdayToDailyYmd(n);
+  }
+  return pl || "—";
+}
+
+function formatAiReportWeeklyPinLabel(entry: AiReportEntry): string {
+  const pl = String(entry.periodLabel || "").trim();
+  const chunks = pl.split(/\s*[~～]\s*/).map((s) => s.trim()).filter(Boolean);
+  if (chunks.length >= 2) {
+    const a = normalizeAiReportYmd(chunks[0]);
+    const b = normalizeAiReportYmd(chunks[1]);
+    if (a && b) return `${a} 至 ${b}`;
+  }
+  return pl || "—";
+}
+
+/** 心态水印 UI：文案 + 基于条目稳定的角落/偏移/倾角（切换报告会变，同一报告不变） */
+function stableReportUiHash(seed: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function pickAiReportWatermarkCornerLayout(rep: AiReportEntry): {
+  corner: "left" | "right";
+  topPx: number;
+  insetPx: number;
+  rotateDeg: number;
+} {
+  const h = stableReportUiHash(`${rep.id}:${rep.createdAt}:${rep.periodKey || ""}`);
+  const corner: "left" | "right" = (h & 1) === 0 ? "left" : "right";
+  let x = h >>> 1;
+  /** 距顶边：压在顶栏粉笔区内 */
+  const topPx = 2 + (x % 20);
+  x >>>= 8;
+  /** 距左或右边 */
+  const insetPx = 1 + (x % 16);
+  x >>>= 8;
+  /** 倾角：粉笔随手写的幅度 */
+  const rotateDeg = -22 + (x % 41);
+  return { corner, topPx, insetPx, rotateDeg };
+}
+
+const aiReportMastheadWatermarkUi = computed((): {
+  text: string;
+  style: Record<string, string>;
+} | null => {
+  const rep = selectedAiReport.value;
+  if (!rep || rep.kind !== "daily") return null;
+  const s = rep.mentalityScore;
+  if (s == null || !Number.isFinite(Number(s))) return null;
+  const n = Math.min(100, Math.max(-100, Math.round(Number(s))));
+  const { corner, topPx, insetPx, rotateDeg } = pickAiReportWatermarkCornerLayout(rep);
+  const style: Record<string, string> = {
+    top: `${topPx}px`,
+    left: corner === "left" ? `${insetPx}px` : "auto",
+    right: corner === "left" ? "auto" : `${insetPx}px`,
+    bottom: "auto",
+    transform: `rotate(${rotateDeg}deg)`,
+    transformOrigin: corner === "left" ? "top left" : "top right",
+  };
+  return { text: `心态 ${n}`, style };
+});
+
+function formatAiDailyOverviewYuan(n: unknown): string {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "—";
+  if (x === 0) return "0";
+  const t = x >= 100 ? x.toFixed(0) : x.toFixed(1);
+  return t;
+}
+
+function formatAiOverviewInt(n: unknown): string {
+  const x = Number(n);
+  return Number.isFinite(x) ? String(Math.trunc(x)) : "—";
+}
+
+/** 概览卡片展示：去掉规范里的全角/半角括号补充说明 */
+function stripAiOverviewDisplayParens(raw: string): string {
+  let s = String(raw ?? "").trim();
+  let prev = "";
+  while (s !== prev) {
+    prev = s;
+    s = s.replace(/（[^（）]*）/g, "").replace(/\([^()]*\)/g, "").trim();
+  }
+  return s.replace(/\s{2,}/g, " ").trim();
+}
+
+const selectedAiReportOverviewRows = computed((): { label: string; hint: string; value: string }[] => {
+  const rep = selectedAiReport.value;
+  if (!rep) return [];
+  const o = rep.kind === "daily" ? rep.dailyOverview : rep.weeklyOverview;
+  if (!o) return [];
+  const periodStr =
+    rep.kind === "daily"
+      ? [o.dateYmd, o.weekdayCn].filter((x) => String(x || "").trim()).join(" ").trim()
+      : String(o.rangeLabel || rep.periodLabel || "").trim();
+  const dateRowLabel = stripAiOverviewDisplayParens(rep.kind === "weekly" ? "日期（统计区间）" : "日期");
+  const inc = formatAiDailyOverviewYuan(o.streamerIncomeApproxYuan);
+  let audNum = Number(o.audiencePaidApproxYuan);
+  const incNum = Number(o.streamerIncomeApproxYuan);
+  if (!Number.isFinite(audNum) && Number.isFinite(incNum)) audNum = incNum;
+  const aud = formatAiDailyOverviewYuan(audNum);
+  return [
+    { label: dateRowLabel, hint: "", value: stripAiOverviewDisplayParens(periodStr || "—") },
+    { label: "主播", hint: "", value: stripAiOverviewDisplayParens(String(o.streamerName || "").trim() || "—") },
+    { label: "房间号", hint: "", value: stripAiOverviewDisplayParens(String(o.roomId || rep.roomId || "").trim() || "—") },
+    {
+      label: stripAiOverviewDisplayParens("弹幕数（弹幕总数）"),
+      hint: "",
+      value: `${formatAiOverviewInt(o.danmakuTotal)} 条`,
+    },
+    {
+      label: stripAiOverviewDisplayParens("弹幕人数（弹幕人数）"),
+      hint: "",
+      value: `${formatAiOverviewInt(o.danmakuUniqueUsers)} 人`,
+    },
+    {
+      label: "收入",
+      hint: "",
+      value: inc === "—" ? "—" : `${inc} 元`,
+    },
+    {
+      label: "花费",
+      hint: "",
+      value: aud === "—" ? "—" : `${aud} 元`,
+    },
+    {
+      label: "送礼人数",
+      hint: "",
+      value: `${formatAiOverviewInt(o.giftSenderCount)} 人`,
+    },
+  ];
+});
+
+const aiReportDailyPins = computed(() =>
+  [...aiReportEntries.value.filter((e) => e.kind === "daily")]
+    .sort((a, b) => aiReportDailySortKey(b) - aiReportDailySortKey(a))
+    .slice(0, AI_REPORT_DAILY_PIN_MAX),
+);
+
+const aiReportWeeklyPins = computed(() =>
+  [...aiReportEntries.value.filter((e) => e.kind === "weekly")]
+    .sort((a, b) => aiReportWeeklySortKey(b) - aiReportWeeklySortKey(a))
+    .slice(0, AI_REPORT_WEEKLY_PIN_MAX),
+);
+
+function resolveAiReportPinsPreferredSelection(): string | null {
+  return aiReportDailyPins.value[0]?.id ?? aiReportWeeklyPins.value[0]?.id ?? aiReportEntries.value[0]?.id ?? null;
+}
+
+/** 便签贴在标题左右时的网格布局类 */
+const aiReportPinHeroClass = computed(() => {
+  const d = aiReportDailyPins.value.length > 0;
+  const w = aiReportWeeklyPins.value.length > 0;
+  if (d && w) return "dm-ai-report-pinboard-hero--both";
+  if (d) return "dm-ai-report-pinboard-hero--daily-only";
+  if (w) return "dm-ai-report-pinboard-hero--weekly-only";
+  return "dm-ai-report-pinboard-hero--center-only";
+});
+
+watch([aiReportDailyPins, aiReportWeeklyPins, aiReportSelectedId], () => {
+  const id = aiReportSelectedId.value;
+  if (!id || aiReportEntries.value.length === 0) return;
+  const entry = aiReportEntries.value.find((e) => e.id === id);
+  if (!entry) return;
+  const pins = entry.kind === "daily" ? aiReportDailyPins.value : aiReportWeeklyPins.value;
+  if (!pins.some((e) => e.id === id)) {
+    aiReportSelectedId.value = resolveAiReportPinsPreferredSelection();
+  }
+});
+
+type AiReportBodyBlock =
+  | { type: "section"; lines: string[] }
+  | { type: "paragraph"; lines: string[] }
+  | { type: "list"; items: string[] }
+  | {
+      type: "mentality-grade";
+      score: number;
+      rubric: string;
+      quote: string;
+      reason: string;
+    };
+
+function isAiReportSectionHeading(line: string): boolean {
+  const t = line.trim();
+  if (!t) return false;
+  if (/^#{1,3}\s+\S/.test(t)) return true;
+  if (/^【[^】]{2,120}】/.test(t)) return true;
+  if (/^[（(]?[一二三四五六七八九十百千]{1,4}[、．.)]\s*\S/.test(t)) return true;
+  return false;
+}
+
+function aiReportSectionPlainText(b: Extract<AiReportBodyBlock, { type: "section" }>): string {
+  return b.lines.join("");
+}
+
+/** 小节标题：去掉 Markdown ##、行首空白（展示缩进由 CSS 统一控制） */
+function normalizeAiReportSectionHeadingText(raw: string): string {
+  return raw.replace(/^#{1,3}\s+/, "").replace(/^[\s\u3000]+/, "").trimEnd();
+}
+
+/** 长句按中式句读拆开（用于超长段强制分包；不改变语义顺序） */
+function splitChineseSentencesForDisplay(raw: string, softMax = 46): string[] {
+  const s = raw.trim();
+  if (!s) return [];
+  if (s.length <= softMax) return [s];
+  const chunks: string[] = [];
+  let buf = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    buf += ch;
+    if ("。！？；".includes(ch) && buf.replace(/\s/g, "").length >= 8) {
+      const t = buf.trim();
+      if (t) chunks.push(t);
+      buf = "";
+    }
+  }
+  if (buf.trim()) chunks.push(buf.trim());
+  return chunks.length ? chunks : [s];
+}
+
+/** 与版面栏宽约一致的粗略折算（用于判断「超过三行」） */
+const AI_REPORT_CHARS_PER_LINE_EST = 36;
+
+function estimateAiReportWrappedLines(text: string): number {
+  const n = text.replace(/\s/g, "").length;
+  return Math.max(1, Math.ceil(n / AI_REPORT_CHARS_PER_LINE_EST));
+}
+
+/** 极长且无句读时在窗口末就近断到标点 */
+function splitLongSegmentByCharBudget(seg: string, maxLines: number): string[] {
+  const budget = maxLines * AI_REPORT_CHARS_PER_LINE_EST;
+  const core = seg.replace(/\s/g, "");
+  if (core.length <= budget) return [seg];
+  const parts: string[] = [];
+  let rest = seg;
+  while (rest.length > 0) {
+    let take = Math.min(rest.length, budget);
+    if (take < rest.length) {
+      const window = rest.slice(0, take);
+      const punctIdx = Math.max(
+        window.lastIndexOf("。"),
+        window.lastIndexOf("！"),
+        window.lastIndexOf("？"),
+        window.lastIndexOf("；"),
+        window.lastIndexOf("，"),
+      );
+      if (punctIdx > take * 0.32 && punctIdx >= 8) take = punctIdx + 1;
+    }
+    const piece = rest.slice(0, take).trim();
+    if (piece) parts.push(piece);
+    rest = rest.slice(take).trimStart();
+  }
+  return parts.length ? parts : [seg];
+}
+
+/** AI 未分段的一坨正文若排版超过 maxLines，则按句读拆成多个连续段落块 */
+function splitParagraphByEstimatedLines(fullText: string, maxLines = 3): string[] {
+  const compact = fullText.replace(/\s/g, "").trim();
+  if (!compact) return [];
+  if (estimateAiReportWrappedLines(fullText) <= maxLines) return [fullText.trim()];
+  const sentences = splitChineseSentencesForDisplay(fullText);
+  const chunks: string[] = [];
+  let buf = "";
+  const flushBuf = (): void => {
+    const t = buf.trim();
+    if (t) chunks.push(t);
+    buf = "";
+  };
+  for (const s of sentences) {
+    const seg = s.trim();
+    if (!seg) continue;
+    if (estimateAiReportWrappedLines(seg) > maxLines) {
+      flushBuf();
+      chunks.push(...splitLongSegmentByCharBudget(seg, maxLines));
+      continue;
+    }
+    if (!buf) {
+      buf = seg;
+      continue;
+    }
+    const merged = buf + seg;
+    if (estimateAiReportWrappedLines(merged) <= maxLines) {
+      buf = merged;
+    } else {
+      flushBuf();
+      buf = seg;
+    }
+  }
+  flushBuf();
+  return chunks.length ? chunks.map((c) => c.trim()).filter(Boolean) : [fullText.trim()];
+}
+
+/** 展示前剥离 Markdown 残留（旧报告兼容），与服务端 sanitize 逻辑对齐 */
+function stripAiReportMarkdownArtifacts(raw: string): string {
+  let s = String(raw ?? "").replace(/\r\n/g, "\n");
+  s = s.replace(/<\/?(?:b|strong)\b[^>]*>/gi, "");
+  let prev: string;
+  do {
+    prev = s;
+    s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+  } while (s !== prev);
+  s = s.replace(/\*{2,}/g, "");
+  /* 保留行首 #～###：parseAiReportBody 需据此识别小节；标题文案在入库时再 strip */
+  return s.trimEnd();
+}
+
+/** 将 AI 正文拆成章节标题 / 段落 / 列表，便于报纸式排版 */
+function parseAiReportBody(raw: string): AiReportBodyBlock[] {
+  const text = stripAiReportMarkdownArtifacts(raw).replace(/\r\n/g, "\n");
+  if (!text.trim()) return [{ type: "paragraph", lines: ["（正文为空）"] }];
+  const lines = text.split("\n");
+  const blocks: AiReportBodyBlock[] = [];
+  let para: string[] = [];
+  let listItems: string[] | null = null;
+
+  function flushPara(): void {
+    if (!para.length) return;
+    const rawLines = para.map((l) => l.replace(/^[\s\u3000]+/, "").trimEnd()).filter(Boolean);
+    para = [];
+    if (!rawLines.length) return;
+    /** 段内软换行合并为一段连续排版（空白段已由上层 flush） */
+    const joinedFlow = rawLines.join("");
+    for (const chunk of splitParagraphByEstimatedLines(joinedFlow, 3)) {
+      if (chunk) blocks.push({ type: "paragraph", lines: [chunk] });
+    }
+  }
+  function flushList(): void {
+    if (listItems?.length) {
+      blocks.push({ type: "list", items: [...listItems] });
+      listItems = null;
+    }
+  }
+
+  for (const line of lines) {
+    const trimmedEnd = line.trimEnd();
+    const t = trimmedEnd.trim();
+
+    if (!t) {
+      flushList();
+      flushPara();
+      continue;
+    }
+
+    const bullet = /^\s*[-*•]\s+(.+)$/.exec(trimmedEnd);
+    if (bullet) {
+      flushPara();
+      if (!listItems) listItems = [];
+      listItems.push(bullet[1].trim());
+      continue;
+    }
+
+    const numberedCn = /^\s*\d+[）)]\s*(.+)$/.exec(trimmedEnd);
+    if (numberedCn) {
+      flushPara();
+      if (!listItems) listItems = [];
+      listItems.push(numberedCn[1].trim());
+      continue;
+    }
+
+    const numbered = /^\s*\d+[\.、．]\s*(.+)$/.exec(trimmedEnd);
+    if (numbered) {
+      flushPara();
+      if (!listItems) listItems = [];
+      listItems.push(numbered[1].trim());
+      continue;
+    }
+
+    flushList();
+
+    if (isAiReportSectionHeading(t)) {
+      flushPara();
+      const normalized = normalizeAiReportSectionHeadingText(trimmedEnd);
+      blocks.push({
+        type: "section",
+        lines: normalized ? [normalized] : [t.trim()],
+      });
+      continue;
+    }
+
+    para.push(trimmedEnd);
+  }
+
+  flushList();
+  flushPara();
+  return blocks.length ? blocks : [{ type: "paragraph", lines: [text.trim()] }];
+}
+
+const selectedAiReportBlocks = computed(() =>
+  selectedAiReport.value ? parseAiReportBody(selectedAiReport.value.content || "") : [],
+);
+
+function collapseAiReportSpaces(s: string): string {
+  return String(s || "").replace(/\s+/g, "").trim();
+}
+
+/** 剥离小节标题包装，便于匹配 AI 冗余刊头 */
+function normalizeAiReportBannerLine(raw: string): string {
+  return String(raw || "")
+    .replace(/^#{2,6}\s+/, "")
+    .replace(/^【\s*/, "")
+    .replace(/\s*】\s*$/, "")
+    .trim();
+}
+
+/** 去掉正文开头的「斗鱼直播间周报」等与客户端大标题重复的刊头块 */
+function stripLeadingReportKindBanner(blocks: AiReportBodyBlock[], kind: "daily" | "weekly"): AiReportBodyBlock[] {
+  const label = kind === "weekly" ? "周报" : "日报";
+  const collapsedVariants = new Set([
+    collapseAiReportSpaces(label),
+    collapseAiReportSpaces(`斗鱼直播间${label}`),
+    collapseAiReportSpaces(`斗鱼${label}`),
+    collapseAiReportSpaces(`直播间${label}`),
+  ]);
+  const headingMatches = (text: string): boolean =>
+    collapsedVariants.has(collapseAiReportSpaces(normalizeAiReportBannerLine(text)));
+
+  const paragraphMatches = (b: AiReportBodyBlock): boolean => {
+    if (b.type !== "paragraph") return false;
+    const joined = collapseAiReportSpaces(b.lines.join(""));
+    if (collapsedVariants.has(joined)) return true;
+    if (
+      b.lines.length > 0
+      && b.lines.length <= 4
+      && b.lines.every((ln) =>
+        collapsedVariants.has(collapseAiReportSpaces(normalizeAiReportBannerLine(ln))),
+      )
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const out = [...blocks];
+  while (out.length > 0) {
+    const head = out[0];
+    if (head.type === "section" && headingMatches(aiReportSectionPlainText(head))) {
+      out.shift();
+      continue;
+    }
+    if (paragraphMatches(head)) {
+      out.shift();
+      continue;
+    }
+    break;
+  }
+  return out;
+}
+
+/** 模型擅写的「一、数据概览」电报块：与仪表盘结构化卡片重复 */
+function isAiReportDataOverviewSectionHeading(text: string): boolean {
+  const compact = normalizeAiReportBannerLine(text).replace(/\s+/g, "");
+  if (/^【数据概览】/.test(compact)) return true;
+  return /^(?:一、)?数据概览/.test(compact);
+}
+
+/** 电报式指标行（周期 xxx / 弹幕 3108 / 付费笔数 154），避免误删「弹幕整体…」分析句 */
+function looksLikeAiTelemetryOverviewLine(ln: string): boolean {
+  const s = ln.trim();
+  if (!s || s.length > 96) return false;
+  if (/^口径说明/.test(s)) return true;
+  if (/^(周期|统计周期)\s+\S*\d/.test(s)) return true;
+  if (/^日期\s+\S*\d/.test(s)) return true;
+  if (/^(日期（统计区间）|日期)\s*[｜|]\s*\S/.test(s)) return true;
+  if (/^主播\s*[｜|]\s*\S/.test(s)) return true;
+  if (/^房间号\s*[｜|]\s*\S/.test(s)) return true;
+  if (/^弹幕数/.test(s)) return true;
+  if (/^弹幕人数/.test(s)) return true;
+  if (/^收入（主播收入）/.test(s)) return true;
+  if (/^主播收入\s*[｜|]\s*\S/.test(s)) return true;
+  if (/^主播收入\s+\S*\d/.test(s)) return true;
+  if (/^收入\s*[｜|]\s*\S/.test(s)) return true;
+  if (/^付费数/.test(s)) return true;
+  if (/^花费/.test(s)) return true;
+  if (/^付费人数/.test(s)) return true;
+  if (/^送礼人数/.test(s)) return true;
+  if (/^礼物人数/.test(s)) return true;
+  if (/^(房间|直播间)\s+\d/.test(s)) return true;
+  if (/^弹幕\s*[｜|]\s*.+\d/.test(s)) return true;
+  if (/^弹幕\s+\d/.test(s)) return true;
+  if (/^礼物\s*[｜|]\s*.+\d/.test(s)) return true;
+  if (/^礼物\s+\d/.test(s)) return true;
+  if (/^付费\S*\s+\d/.test(s)) return true;
+  return false;
+}
+
+function stripLeadingAiDataOverviewDuplicate(blocks: AiReportBodyBlock[]): AiReportBodyBlock[] {
+  const out = [...blocks];
+  while (
+    out.length > 0
+    && out[0].type === "section"
+    && isAiReportDataOverviewSectionHeading(aiReportSectionPlainText(out[0]))
+  ) {
+    out.shift();
+    while (out.length > 0 && out[0].type !== "section") out.shift();
+  }
+  while (out.length > 0) {
+    const head = out[0];
+    if (head.type === "paragraph") {
+      const lines = head.lines.map((x) => x.trim()).filter(Boolean);
+      if (lines.length === 0) {
+        out.shift();
+        continue;
+      }
+      const pieces = lines.flatMap((ln) => ln.split(/\n/).map((x) => x.trim()).filter(Boolean));
+      const probe = pieces.length > 1 ? pieces : lines;
+      if (probe.length > 0 && probe.every((ln) => looksLikeAiTelemetryOverviewLine(ln))) {
+        out.shift();
+        continue;
+      }
+    }
+    if (head.type === "list") {
+      const items = head.items.map((x) => x.trim()).filter(Boolean);
+      if (items.length > 0 && items.every((ln) => looksLikeAiTelemetryOverviewLine(ln))) {
+        out.shift();
+        continue;
+      }
+    }
+    break;
+  }
+  return out;
+}
+
+const selectedAiReportBlocksTrimmed = computed(() => {
+  const rep = selectedAiReport.value;
+  if (!rep) return [];
+  let b = stripLeadingReportKindBanner(selectedAiReportBlocks.value, rep.kind);
+  /** 顶部已有「数据概览」卡片时，正文不再保留首节同名小节（含旧版服务端写入的正文首节） */
+  if (
+    rep.kind === "daily"
+      ? rep.dailyOverview
+      : rep.weeklyOverview
+  ) {
+    b = stripLeadingAiDataOverviewDuplicate(b);
+  }
+  return b;
+});
+
+/** 详情区头像：优先报告落盘字段，旧数据回落当前房间卡片 */
+const aiReportDetailAvatar = computed(() => {
+  const e = selectedAiReport.value;
+  if (!e) return "";
+  const u = String(e.streamerAvatar || "").trim();
+  if (u) return u;
+  const room = backendRooms.value.find((r) => sameDouyuRoomId(r.roomId, e.roomId));
+  return String(room?.info?.avatar || "").trim();
+});
+
+function formatAiReportCreatedAt(ms: unknown): string {
+  const n = Number(ms);
+  if (!Number.isFinite(n)) return "";
+  return new Date(n).toLocaleString("zh-CN", { hour12: false });
+}
+
+/** 黑板版头：主播展示名（概览字段优先，否则回落房间卡片） */
+const aiReportMastheadStreamerName = computed(() => {
+  const rep = selectedAiReport.value;
+  if (!rep) return "";
+  const o = rep.kind === "daily" ? rep.dailyOverview : rep.weeklyOverview;
+  const fromOverview = String(o?.streamerName || "").trim();
+  if (fromOverview) return fromOverview;
+  const room = backendRooms.value.find((r) => sameDouyuRoomId(r.roomId, rep.roomId));
+  return String(room?.info?.owner_name || "").trim();
+});
+
+const aiReportMastheadGeneratedAt = computed(() =>
+  selectedAiReport.value ? formatAiReportCreatedAt(selectedAiReport.value.createdAt) : "",
+);
+
+function onAiReportAvatarErr(ev: Event): void {
+  const el = ev.target;
+  if (el instanceof HTMLImageElement) el.style.visibility = "hidden";
+}
+
+/** 在「主播心态」章节标题后插入阅卷打分卡 */
+const selectedAiReportBlocksAugmented = computed((): AiReportBodyBlock[] => {
+  const base = selectedAiReportBlocksTrimmed.value;
+  const rep = selectedAiReport.value;
+  if (!rep || rep.mentalityScore == null || !Number.isFinite(Number(rep.mentalityScore))) {
+    return base;
+  }
+  const score = Math.min(100, Math.max(-100, Math.round(Number(rep.mentalityScore))));
+  const inject = (): AiReportBodyBlock => ({
+    type: "mentality-grade",
+    score,
+    rubric: String(rep.mentalityRubric || "").trim(),
+    quote: String(rep.bestDanmakuQuote || "").trim(),
+    reason: String(rep.bestDanmakuReason || "").trim(),
+  });
+  const out: AiReportBodyBlock[] = [];
+  let done = false;
+  const mentalityRe = /主播心态|心态侧写|心态指数|心理状态|阅卷/;
+  for (const b of base) {
+    out.push(b);
+    if (!done && b.type === "section" && mentalityRe.test(aiReportSectionPlainText(b))) {
+      out.push(inject());
+      done = true;
+    }
+  }
+  if (!done) out.unshift(inject());
+  return out;
+});
 /* ------------------------------------------------------------------ */
 /*  Password                                                          */
 /* ------------------------------------------------------------------ */
@@ -2066,6 +2840,69 @@ function openSongPanel(roomId: string) {
   loadSongData(roomId);
 }
 
+async function loadAiReports(roomId: string) {
+  aiReportPanelLoading.value = true;
+  aiReportPanelRoomId.value = roomId;
+  aiReportSelectedId.value = null;
+  try {
+    const d = await (await fetch(`${API}/ai-reports/${encodeURIComponent(roomId)}`)).json();
+    if (d.ok && Array.isArray(d.entries)) {
+      aiReportEntries.value = (d.entries as AiReportEntry[]).filter((e) => !e.hidden);
+      aiReportSelectedId.value = resolveAiReportPinsPreferredSelection();
+    } else {
+      aiReportEntries.value = [];
+    }
+  } catch {
+    aiReportEntries.value = [];
+  }
+  aiReportPanelLoading.value = false;
+}
+
+async function deleteAiReport(entry: AiReportEntry): Promise<void> {
+  const ridPanel = aiReportPanelRoomId.value;
+  if (!ridPanel || aiReportDeleteBusy.value) return;
+  const kind = aiReportKindLabel(entry.kind);
+  if (!confirm(`将从列表中移除这份${kind}（服务端仍保留记录）。确定吗？`)) return;
+  aiReportDeleteBusy.value = true;
+  try {
+    const roomId = String(entry.roomId ?? "").trim();
+    const entryId = String(entry.id ?? "").trim();
+    const res = await fetch(`${API}/ai-reports/hide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        roomId,
+        entryId,
+        password: getBackendPw(),
+      }),
+    });
+    let d: { ok?: boolean; error?: string } = {};
+    try {
+      d = await res.json();
+    } catch { /* ignore */ }
+    if (!res.ok || !d.ok) {
+      alert(typeof d.error === "string" && d.error ? d.error : `操作失败（HTTP ${res.status}）`);
+      return;
+    }
+    const wasSel = aiReportSelectedId.value === entry.id;
+    aiReportEntries.value = aiReportEntries.value.filter((x) => x.id !== entry.id);
+    if (wasSel) aiReportSelectedId.value = resolveAiReportPinsPreferredSelection();
+  } catch {
+    alert("请求失败");
+  } finally {
+    aiReportDeleteBusy.value = false;
+  }
+}
+
+function openAiReportPanel(roomId: string) {
+  showAiReportPanel.value = true;
+  void loadAiReports(roomId);
+}
+
+function aiReportKindLabel(kind: string): string {
+  return kind === "weekly" ? "周报" : "日报";
+}
+
 /* ------------------------------------------------------------------ */
 /*  Backend capture                                                   */
 /* ------------------------------------------------------------------ */
@@ -2105,7 +2942,11 @@ function connectSSE() {
   es.addEventListener("trigger", (e) => {
     try {
       const entry: TriggerLogEntry = JSON.parse(e.data);
-      if (backendSelectedRoom.value && sameDouyuRoomId(entry.roomId, backendSelectedRoom.value)) {
+      const sel = backendSelectedRoom.value;
+      const scheduleGlobal =
+        entry.source === "schedule" && (entry.roomId === undefined || entry.roomId === null || String(entry.roomId).trim() === "");
+      const visibleForRoom = !sel || sameDouyuRoomId(entry.roomId, sel) || scheduleGlobal;
+      if (visibleForRoom) {
         triggerLog.value.unshift(entry);
         if (triggerLog.value.length > 200) triggerLog.value = triggerLog.value.slice(0, 200);
       }
@@ -2142,6 +2983,40 @@ function connectSSE() {
         songTotalStats.value[key].count = d.totalCount;
         songTotalStats.value[key].requesters.push(requester);
       }
+    } catch { /* */ }
+  });
+  es.addEventListener("ai-report-deleted", (e) => {
+    try {
+      const d = JSON.parse(e.data) as { roomId?: string; entryId?: string };
+      if (
+        !d.entryId
+        || !d.roomId
+        || !showAiReportPanel.value
+        || aiReportPanelRoomId.value == null
+        || !sameDouyuRoomId(d.roomId, aiReportPanelRoomId.value)
+      ) {
+        return;
+      }
+      const wasSel = aiReportSelectedId.value === d.entryId;
+      aiReportEntries.value = aiReportEntries.value.filter((x) => x.id !== d.entryId);
+      if (wasSel) aiReportSelectedId.value = resolveAiReportPinsPreferredSelection();
+    } catch { /* */ }
+  });
+  es.addEventListener("ai-report", (e) => {
+    try {
+      const d = JSON.parse(e.data) as { roomId?: string; entry?: AiReportEntry };
+      if (
+        !d.entry
+        || !d.roomId
+        || !showAiReportPanel.value
+        || aiReportPanelRoomId.value == null
+        || !sameDouyuRoomId(d.roomId, aiReportPanelRoomId.value)
+      ) {
+        return;
+      }
+      const rest = aiReportEntries.value.filter((x) => x.id !== d.entry!.id);
+      aiReportEntries.value = [d.entry, ...rest];
+      aiReportSelectedId.value = d.entry.id;
     } catch { /* */ }
   });
   es.onerror = () => { /* auto-reconnect */ };
@@ -2200,6 +3075,18 @@ async function onBackendRoomSelect(rid: string) {
   const r = backendRooms.value.find((x) => sameDouyuRoomId(x.roomId, ridNorm));
   if (r && !r.info) fetchRoomInfo(ridNorm).then(info => { r.info = info; });
 }
+
+/** 供 AI 侧栏读取「当前选中」房间（与 localStorage 同步） */
+const FMZ_DM_SELECTED_ROOM_LS = "fmz_danmaku_selected_room";
+watch(
+  backendSelectedRoom,
+  (v) => {
+    if (v) {
+      try { localStorage.setItem(FMZ_DM_SELECTED_ROOM_LS, String(v)); } catch { /* ignore */ }
+    }
+  },
+  { immediate: true },
+);
 
 /* ------------------------------------------------------------------ */
 /*  Gift API                                                          */
@@ -2360,22 +3247,238 @@ async function clearGiftsForRoom() {
 
 async function loadTriggers() { try { const d = await (await fetch(`${API}/triggers`)).json(); if (d.ok) triggers.value = d.triggers; } catch { /* */ } }
 async function saveTriggers() { try { await fetch(`${API}/triggers`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ triggers: triggers.value }) }); } catch { /* */ } }
+const triggerUiTab = ref<"danmaku" | "schedule">("danmaku");
+/** 与服务端一致：含有效 schedule 即视为定时（避免仅有 kind 缺失时被误判进弹幕列表） */
+function isScheduleTriggerRow(t: TriggerConfig): boolean {
+  if (t.kind === "schedule") return true;
+  const sch = t.schedule;
+  return (
+    sch != null &&
+    typeof sch === "object" &&
+    ["interval", "daily", "weekly", "cron"].includes(String((sch as TriggerScheduleShape).mode))
+  );
+}
+const danmakuTriggers = computed(() => triggers.value.filter((t) => !isScheduleTriggerRow(t)));
+const scheduleTriggers = computed(() => triggers.value.filter((t) => isScheduleTriggerRow(t)));
+function padHm(h?: number, m?: number): string {
+  const hh = Math.min(23, Math.max(0, Math.floor(Number(h) || 0)));
+  const mm = Math.min(59, Math.max(0, Math.floor(Number(m) || 0)));
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+function scheduleSummaryLabel(t: TriggerConfig): string {
+  if (!isScheduleTriggerRow(t) || !t.schedule) return "";
+  const s = t.schedule;
+  switch (s.mode) {
+    case "interval": {
+      const sec = s.intervalSec ?? 3600;
+      if (sec % 86400 === 0) return `每 ${sec / 86400} 天`;
+      if (sec % 3600 === 0) return `每 ${sec / 3600} 小时`;
+      if (sec % 60 === 0) return `每 ${sec / 60} 分钟`;
+      return `每 ${sec} 秒`;
+    }
+    case "daily":
+      return `每天 ${padHm(s.hour, s.minute)}`;
+    case "weekly": {
+      const days = s.weekdays?.length ? [...s.weekdays].sort((a, b) => a - b) : [0, 1, 2, 3, 4, 5, 6];
+      const names = ["日", "一", "二", "三", "四", "五", "六"];
+      return `每周 ${days.map((d) => names[d] ?? d).join("、")} ${padHm(s.hour, s.minute)}`;
+    }
+    case "cron":
+      return `Cron：${s.cron || "*"}`;
+    default:
+      return "";
+  }
+}
 const newTriggerPattern = ref("#");
-const newTriggerDesc = ref("");
-const newTriggerAction = ref("log");
+const newTriggerPayload = ref("");
+const newTriggerAction = ref("song-request");
+/** 与服务端 AVAILABLE_ACTIONS 对齐；历史「log」触发仍可由服务端执行，界面显示为「日志」 */
 const ACTION_OPTIONS: { id: string; label: string }[] = [
-  { id: "log", label: "展示" },
   { id: "song-request", label: "点歌" },
+  { id: "ai-daily-report", label: "日报" },
+  { id: "ai-weekly-report", label: "周报" },
 ];
 function actionLabel(actionId: string): string {
+  if (actionId === "log") return "日志";
   return ACTION_OPTIONS.find(a => a.id === actionId)?.label || actionId;
 }
+
+/** 触发器「说明」展示文本（payload 优先，兼容旧版 description） */
+function triggerMemoText(t: TriggerConfig): string {
+  const p = String(t.payload ?? "").trim();
+  if (p) return p;
+  return String(t.description ?? "").trim();
+}
+
 const newTriggerRoomIds = ref<string[]>([]);
 function roomLabel(rid: string): string { const r = backendRooms.value.find((x) => sameDouyuRoomId(x.roomId, rid)); return r?.info?.owner_name || rid; }
 function toggleRoomForTrigger(t: TriggerConfig, rid: string) { if (!t.roomIds) t.roomIds = []; const idx = t.roomIds.indexOf(rid); if (idx >= 0) t.roomIds.splice(idx, 1); else t.roomIds.push(rid); saveTriggers(); }
 function toggleNewTriggerRoom(rid: string) { const idx = newTriggerRoomIds.value.indexOf(rid); if (idx >= 0) newTriggerRoomIds.value.splice(idx, 1); else newTriggerRoomIds.value.push(rid); }
-async function addTrigger() { const p = newTriggerPattern.value.trim(); if (!p) return; try { const d = await (await fetch(`${API}/triggers`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pattern: p, action: newTriggerAction.value, description: newTriggerDesc.value.trim(), enabled: true, roomIds: newTriggerRoomIds.value.length > 0 ? [...newTriggerRoomIds.value] : [] }) })).json(); if (d.ok) { triggers.value.push(d.trigger); newTriggerPattern.value = "#"; newTriggerDesc.value = ""; newTriggerAction.value = "log"; newTriggerRoomIds.value = []; } } catch { /* */ } }
-async function deleteTrigger(id: string) { try { await fetch(`${API}/triggers/${encodeURIComponent(id)}`, { method: "DELETE" }); triggers.value = triggers.value.filter(t => t.id !== id); } catch { /* */ } }
+async function addTrigger() {
+  const p = newTriggerPattern.value.trim(); if (!p) return;
+  try {
+    const d = await (await fetch(`${API}/triggers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "danmaku",
+        pattern: p,
+        action: newTriggerAction.value,
+        payload: newTriggerPayload.value,
+        description: "",
+        enabled: true,
+        roomIds: newTriggerRoomIds.value.length > 0 ? [...newTriggerRoomIds.value] : [],
+      }),
+    })).json();
+    if (d.ok) {
+      triggers.value.push(d.trigger);
+      newTriggerPattern.value = "#";
+      newTriggerPayload.value = "";
+      newTriggerAction.value = "song-request";
+      newTriggerRoomIds.value = [];
+    }
+  } catch { /* */ }
+}
+
+const WEEKDAY_CHARS = ["日", "一", "二", "三", "四", "五", "六"];
+const newSchedMode = ref<ScheduleModeType>("interval");
+const newSchedIntervalMinutes = ref(60);
+const newSchedHour = ref(20);
+const newSchedMinute = ref(0);
+/** 勾选周几触发；空数组表示周一至周日全开（交由服务端兜底） */
+const newSchedWeekdays = ref<number[]>([1, 2, 3, 4, 5]);
+const newSchedCron = ref("0 * * * *");
+const newSchedPayload = ref("");
+const newSchedAction = ref("song-request");
+const newSchedRoomIds = ref<string[]>([]);
+function toggleNewSchedRoom(rid: string): void {
+  const idx = newSchedRoomIds.value.indexOf(rid);
+  if (idx >= 0) newSchedRoomIds.value.splice(idx, 1);
+  else newSchedRoomIds.value.push(rid);
+}
+function toggleSchedWeekday(d: number): void {
+  const idx = newSchedWeekdays.value.indexOf(d);
+  if (idx >= 0) newSchedWeekdays.value.splice(idx, 1);
+  else newSchedWeekdays.value.push(d);
+}
+async function addScheduleTrigger(): Promise<void> {
+  try {
+    const mode = newSchedMode.value;
+    const schedule: TriggerScheduleShape = { mode };
+    if (mode === "interval") {
+      schedule.intervalSec = Math.min(Math.max(Math.floor(Number(newSchedIntervalMinutes.value) || 1) * 60, 30), 604800);
+    } else if (mode === "daily" || mode === "weekly") {
+      schedule.hour = Math.min(23, Math.max(0, Math.floor(Number(newSchedHour.value) || 0)));
+      schedule.minute = Math.min(59, Math.max(0, Math.floor(Number(newSchedMinute.value) || 0)));
+    }
+    if (mode === "weekly") schedule.weekdays = newSchedWeekdays.value.length ? [...newSchedWeekdays.value] : [0, 1, 2, 3, 4, 5, 6];
+    if (mode === "cron") schedule.cron = String(newSchedCron.value || "").trim() || "0 * * * *";
+
+    const d = await (await fetch(`${API}/triggers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "schedule",
+        schedule,
+        payload: newSchedPayload.value,
+        action: newSchedAction.value,
+        description: "",
+        enabled: true,
+        roomIds: newSchedRoomIds.value.length > 0 ? [...newSchedRoomIds.value] : [],
+      }),
+    })).json();
+    if (d.ok) {
+      triggers.value.push(d.trigger);
+      newSchedPayload.value = "";
+      newSchedCron.value = "0 * * * *";
+      newSchedAction.value = "song-request";
+      newSchedRoomIds.value = [];
+      triggerUiTab.value = "schedule";
+    }
+  } catch { /* */ }
+}
+
+const editingScheduleId = ref<string | null>(null);
+const scheduleEditDraft = ref<ScheduleEditDraft | null>(null);
+
+function beginEditSchedule(t: TriggerConfig): void {
+  if (!isScheduleTriggerRow(t) || !t.schedule) return;
+  const s = t.schedule;
+  const sec = s.intervalSec ?? 3600;
+  const wd =
+    s.mode === "weekly"
+      ? (s.weekdays?.length ? [...s.weekdays].sort((a, b) => a - b) : [0, 1, 2, 3, 4, 5, 6])
+      : [1, 2, 3, 4, 5];
+  editingScheduleId.value = t.id;
+  scheduleEditDraft.value = {
+    mode: s.mode,
+    intervalMinutes: Math.max(1, Math.floor(sec / 60)),
+    hour: s.hour ?? 20,
+    minute: s.minute ?? 0,
+    weekdays: wd,
+    cron: s.cron || "0 * * * *",
+    action: t.action,
+    payload: String(t.payload ?? ""),
+    roomIds: t.roomIds?.length ? [...t.roomIds] : [],
+  };
+}
+
+function cancelEditSchedule(): void {
+  editingScheduleId.value = null;
+  scheduleEditDraft.value = null;
+}
+
+function toggleEditSchedWeekday(d: number): void {
+  const draft = scheduleEditDraft.value;
+  if (!draft) return;
+  const idx = draft.weekdays.indexOf(d);
+  if (idx >= 0) draft.weekdays.splice(idx, 1);
+  else draft.weekdays.push(d);
+}
+
+function toggleEditSchedRoom(rid: string): void {
+  const draft = scheduleEditDraft.value;
+  if (!draft) return;
+  const idx = draft.roomIds.indexOf(rid);
+  if (idx >= 0) draft.roomIds.splice(idx, 1);
+  else draft.roomIds.push(rid);
+}
+
+async function saveEditSchedule(): Promise<void> {
+  const id = editingScheduleId.value;
+  const d = scheduleEditDraft.value;
+  if (!id || !d) return;
+  const t = triggers.value.find(x => x.id === id);
+  if (!t || !isScheduleTriggerRow(t)) return;
+
+  const mode = d.mode;
+  const schedule: TriggerScheduleShape = { mode };
+  if (mode === "interval") {
+    schedule.intervalSec = Math.min(Math.max(Math.floor(Number(d.intervalMinutes) || 1) * 60, 30), 604800);
+  } else if (mode === "daily" || mode === "weekly") {
+    schedule.hour = Math.min(23, Math.max(0, Math.floor(Number(d.hour) || 0)));
+    schedule.minute = Math.min(59, Math.max(0, Math.floor(Number(d.minute) || 0)));
+  }
+  if (mode === "weekly") schedule.weekdays = d.weekdays.length ? [...d.weekdays].sort((a, b) => a - b) : [0, 1, 2, 3, 4, 5, 6];
+  if (mode === "cron") schedule.cron = String(d.cron || "").trim() || "0 * * * *";
+
+  t.kind = "schedule";
+  t.schedule = schedule;
+  t.action = d.action;
+  t.payload = d.payload;
+  t.roomIds = [...d.roomIds];
+
+  await saveTriggers();
+  cancelEditSchedule();
+}
+
+async function deleteTrigger(id: string) {
+  try {
+    await fetch(`${API}/triggers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    triggers.value = triggers.value.filter(t => t.id !== id);
+    if (editingScheduleId.value === id) cancelEditSchedule();
+  } catch { /* */ }
+}
 async function toggleTrigger(t: TriggerConfig) { t.enabled = !t.enabled; await saveTriggers(); }
 async function loadActionLog() { try { const roomParam = backendSelectedRoom.value ? `&roomId=${encodeURIComponent(backendSelectedRoom.value)}` : ''; const d = await (await fetch(`${API}/action-log?limit=100${roomParam}`)).json(); if (d.ok) triggerLog.value = d.log; } catch { /* */ } }
 async function clearActionLog() { try { await fetch(`${API}/action-log/clear`, { method: "POST" }); triggerLog.value = []; } catch { /* */ } }
@@ -2385,6 +3488,51 @@ async function clearActionLog() { try { await fetch(`${API}/action-log/clear`, {
 /* ------------------------------------------------------------------ */
 
 function formatTime(ts: number): string { return new Date(ts).toLocaleTimeString("zh-CN", { hour12: false }); }
+function formatDateTime(ts: number): string { return new Date(ts).toLocaleString("zh-CN", { hour12: false }); }
+/** 触发日志悬停气泡：完整字段（列表区仅单行省略） */
+function triggerLogFullDetail(entry: TriggerLogEntry): string {
+  const lines: string[] = [];
+  lines.push(`时间：${formatDateTime(entry.ts)}`);
+  if (entry.source === "schedule") lines.push("来源：定时触发");
+  else if (entry.source === "web") lines.push("来源：弹幕采集");
+  if (entry.roomId) lines.push(`房间：${entry.roomId}`);
+  if (entry.triggerId) lines.push(`触发器 ID：${entry.triggerId}`);
+  lines.push(`动作：${entry.action}`);
+  if (entry.summary) lines.push(`摘要：${entry.summary}`);
+  lines.push(`昵称：${entry.nickname}（uid：${entry.uid}）`);
+  lines.push(`前缀：${entry.pattern || "—"}`);
+  lines.push(`记录 content：${entry.content}`);
+  if (entry.fullText) lines.push(`原始全文 fullText：${entry.fullText}`);
+  return lines.join("\n");
+}
+
+/** 复制到剪贴板（HTTPS / localhost 优先 Clipboard API） */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      ta.setAttribute("readonly", "");
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+async function copyTriggerLogEntry(entry: TriggerLogEntry): Promise<void> {
+  await copyTextToClipboard(triggerLogFullDetail(entry));
+}
+
 function formatDuration(ms: number): string { const s = Math.floor(ms / 1000); const m = Math.floor(s / 60); const h = Math.floor(m / 60); if (h > 0) return `${h}h${m % 60}m`; if (m > 0) return `${m}m${s % 60}s`; return `${s}s`; }
 function formatNum(n: number): string { if (!n) return "0"; if (n >= 10000) return (n / 10000).toFixed(1) + "万"; return String(n); }
 function scrollEl(el: HTMLElement | null) { if (el) el.scrollTop = el.scrollHeight; }
@@ -2437,6 +3585,11 @@ onMounted(() => {
       dmModeContentResizeObserver = new ResizeObserver(() => scheduleEmbedSplitHeightMeasure());
       dmModeContentResizeObserver.observe(root);
     }
+    const slot = dmFeedEmbedSlotRef.value;
+    if (slot && typeof ResizeObserver !== "undefined") {
+      dmEmbedSlotResizeObserver = new ResizeObserver(() => scheduleEmbedSplitHeightMeasure());
+      dmEmbedSlotResizeObserver.observe(slot);
+    }
     scheduleEmbedSplitHeightMeasure();
   });
   connectSSE();
@@ -2454,6 +3607,10 @@ onUnmounted(() => {
   if (dmModeContentResizeObserver) {
     dmModeContentResizeObserver.disconnect();
     dmModeContentResizeObserver = null;
+  }
+  if (dmEmbedSlotResizeObserver) {
+    dmEmbedSlotResizeObserver.disconnect();
+    dmEmbedSlotResizeObserver = null;
   }
   if (dmEmbedSplitMeasureRaf != null) {
     cancelAnimationFrame(dmEmbedSplitMeasureRaf);
@@ -2503,6 +3660,7 @@ function hideUidTooltip() {
         <div v-if="passwordError" class="dm-error">{{ passwordError }}</div>
       </div>
       <template v-else>
+        <div class="dm-header-stack">
         <div class="dm-add-row">
           <input v-model="backendNewRoomId" class="dm-input" type="text" placeholder="直播间号" @keydown.enter="backendAddRoom" />
           <button class="dm-btn dm-btn--primary" :disabled="!backendNewRoomId.trim()" @click="backendAddRoom">
@@ -2524,23 +3682,40 @@ function hideUidTooltip() {
         </div>
 
         <template v-if="selectedBackendRoom">
-          <div v-if="selectedBackendRoom.info" class="dm-room-card">
-            <img v-if="selectedBackendRoom.info.avatar" :src="selectedBackendRoom.info.avatar" class="dm-room-avatar" alt="" referrerpolicy="no-referrer" />
+          <div class="dm-room-card">
+            <img
+              v-if="selectedBackendRoom.info?.avatar"
+              :src="selectedBackendRoom.info.avatar"
+              class="dm-room-avatar"
+              alt=""
+              referrerpolicy="no-referrer"
+            />
             <div class="dm-room-body">
-              <div class="dm-room-title">{{ selectedBackendRoom.info.room_name }}</div>
-              <div class="dm-room-meta">
+              <div class="dm-room-title">{{ selectedBackendRoom.info?.room_name || `房间 ${selectedBackendRoom.roomId}` }}</div>
+              <div v-if="selectedBackendRoom.info" class="dm-room-meta">
                 <span>{{ selectedBackendRoom.info.owner_name }}</span>
                 <span v-if="selectedBackendRoom.info.game_name" class="dm-meta-tag">{{ selectedBackendRoom.info.game_name }}</span>
                 <span v-if="selectedBackendRoom.info.show_status === 1" class="dm-meta-live">● LIVE</span>
                 <span v-if="selectedBackendRoom.info.online_num">{{ formatNum(selectedBackendRoom.info.online_num) }} 在线</span>
               </div>
+              <div class="dm-room-stats" :class="{ 'dm-room-stats--solo': !selectedBackendRoom.info }">
+                <span>弹幕 <strong>{{ selectedBackendRoom.stats.total }}</strong></span>
+                <span>触发 <strong>{{ selectedBackendRoom.stats.triggered }}</strong></span>
+                <span v-if="selectedBackendRoom.stats.connected_at">时长 <strong>{{ formatDuration(Date.now() - (selectedBackendRoom.stats.connected_at || 0)) }}</strong></span>
+              </div>
             </div>
-<button class="dm-btn dm-btn--outline dm-btn--sm" @click="openSongPanel(selectedBackendRoom.roomId)">🎵 点歌统计</button>
-          </div>
-          <div class="dm-stats-bar">
-            <span>弹幕 <strong>{{ selectedBackendRoom.stats.total }}</strong></span>
-            <span>触发 <strong>{{ selectedBackendRoom.stats.triggered }}</strong></span>
-            <span v-if="selectedBackendRoom.stats.connected_at">时长 <strong>{{ formatDuration(Date.now() - (selectedBackendRoom.stats.connected_at || 0)) }}</strong></span>
+            <div class="dm-room-actions">
+              <button
+                type="button"
+                class="dm-btn dm-btn--outline dm-btn--sm dm-room-song-btn"
+                @click="openSongPanel(selectedBackendRoom.roomId)"
+              >点歌统计</button>
+              <button
+                type="button"
+                class="dm-btn dm-btn--outline dm-btn--sm dm-room-report-btn"
+                @click="openAiReportPanel(selectedBackendRoom.roomId)"
+              >日报周报</button>
+            </div>
           </div>
         </template>
 
@@ -2549,8 +3724,10 @@ function hideUidTooltip() {
           <button :class="{ active: activeSubTab === 'danmaku' }" @click="activeSubTab = 'danmaku'">弹幕流</button>
           <button :class="{ active: activeSubTab === 'triggers' }" @click="activeSubTab = 'triggers'">触发器</button>
           <button :class="{ active: activeSubTab === 'log' }" @click="activeSubTab = 'log'">日志 <sup v-if="triggerLog.length" class="dm-badge">{{ triggerLog.length }}</sup></button>
-                          </nav>
-                        </div>
+        </nav>
+        </div>
+
+        </div><!-- /.dm-header-stack -->
 
         <div v-if="activeSubTab === 'danmaku'" ref="dmFeedSectionRootRef" class="dm-feed-section">
           <div class="dm-bench-visibility-strip" role="toolbar" aria-label="固定栏可见性">
@@ -2574,7 +3751,7 @@ function hideUidTooltip() {
               {{ showGiftPanel ? '隐藏礼物栏' : '显示礼物栏' }}
             </button>
           </div>
-          <div ref="dmEmbeddedMeasureTopRef" class="dm-feed-embed-slot">
+          <div ref="dmFeedEmbedSlotRef" class="dm-feed-embed-slot">
           <div
             v-if="splitHasFixedSlots"
             ref="dmFeedBenchRootRef"
@@ -2605,7 +3782,6 @@ function hideUidTooltip() {
                         <div class="dm-toolbar-mode-cluster">
                           <div class="dm-toolbar-mode-cluster-actions">
             <button type="button" class="dm-toolbar-soft-btn" title="清空当前弹幕列表" @click="backendDanmakuList = []">清空</button>
-                            <button v-if="F_AI_AGENT" type="button" class="dm-toolbar-soft-btn dm-toolbar-ai-btn" title="将当前弹幕发送到 AI 分析" @click="sendToAiAgent">🤖 AI</button>
                           </div>
                           <div v-if="!isMobile" class="dm-toolbar-layout-slot">
                             <DmToolbarMenuSelect
@@ -2674,7 +3850,7 @@ function hideUidTooltip() {
                     <span class="dm-chat-ident">
                       <span class="dm-chat-nick" @mouseenter="showUidTooltip($event, msg.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(msg.uid)">{{ msg.nn }}</span>
                     </span>
-                    <span class="dm-chat-colon">：</span><span class="dm-chat-txt">{{ msg.txt }}</span>
+                    <span class="dm-chat-postfix"><span class="dm-chat-colon">：</span><span class="dm-chat-txt">{{ msg.txt }}</span></span>
                   </div>
                 </div>
                 </div>
@@ -3080,7 +4256,6 @@ function hideUidTooltip() {
                         <div class="dm-toolbar-mode-cluster">
                           <div class="dm-toolbar-mode-cluster-actions">
             <button type="button" class="dm-toolbar-soft-btn" title="清空当前弹幕列表" @click="backendDanmakuList = []">清空</button>
-                            <button v-if="F_AI_AGENT" type="button" class="dm-toolbar-soft-btn dm-toolbar-ai-btn" title="将当前弹幕发送到 AI 分析" @click="sendToAiAgent">🤖 AI</button>
                           </div>
                           <div class="dm-toolbar-layout-slot">
                             <DmToolbarMenuSelect
@@ -3135,7 +4310,7 @@ function hideUidTooltip() {
                       <span class="dm-chat-ident">
                       <span class="dm-chat-nick" @mouseenter="showUidTooltip($event, msg.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(msg.uid)">{{ msg.nn }}</span>
                       </span>
-                      <span class="dm-chat-colon">：</span><span class="dm-chat-txt">{{ msg.txt }}</span>
+                      <span class="dm-chat-postfix"><span class="dm-chat-colon">：</span><span class="dm-chat-txt">{{ msg.txt }}</span></span>
                     </div>
                   </div>
                 </div>
@@ -3522,10 +4697,9 @@ function hideUidTooltip() {
                     </div>
                     <div class="dm-toolbar-mode-cluster">
                       <div class="dm-toolbar-mode-cluster-actions">
-            <button type="button" class="dm-toolbar-soft-btn" title="清空当前弹幕列表" @click="backendDanmakuList = []">清空</button>
-                            <button v-if="F_AI_AGENT" type="button" class="dm-toolbar-soft-btn dm-toolbar-ai-btn" title="将当前弹幕发送到 AI 分析" @click="sendToAiAgent">🤖 AI</button>
-                          </div>
-                          <div class="dm-toolbar-layout-slot">
+                        <button type="button" class="dm-toolbar-soft-btn" title="清空当前弹幕列表" @click="backendDanmakuList = []">清空</button>
+                      </div>
+                      <div class="dm-toolbar-layout-slot">
                         <DmToolbarMenuSelect
                           :model-value="danmakuColumnMode"
                           variant="layout"
@@ -3553,11 +4727,11 @@ function hideUidTooltip() {
                         class="dm-search-pill__q"
                         placeholder="筛选弹幕…"
                         enterkeyhint="search"
-                            aria-label="弹幕筛选关键字"
-                          />
-                          <span class="dm-search-pill__ico" aria-hidden="true">🔍</span>
-                        </div>
-                      </div>
+                        aria-label="弹幕筛选关键字"
+                      />
+                      <span class="dm-search-pill__ico" aria-hidden="true">🔍</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -3592,7 +4766,7 @@ function hideUidTooltip() {
                   <span class="dm-chat-ident">
                       <span class="dm-chat-nick" @mouseenter="showUidTooltip($event, msg.uid)" @mouseleave="hideUidTooltip()" @click="openUserPage(msg.uid)">{{ msg.nn }}</span>
                   </span>
-                  <span class="dm-chat-colon">：</span><span class="dm-chat-txt">{{ msg.txt }}</span>
+                  <span class="dm-chat-postfix"><span class="dm-chat-colon">：</span><span class="dm-chat-txt">{{ msg.txt }}</span></span>
                 </div>
               </div>
             </div>
@@ -3997,46 +5171,205 @@ function hideUidTooltip() {
         </Teleport>
 
         <div v-if="activeSubTab === 'triggers'" class="dm-trigger-section">
-          <div class="dm-trigger-info">触发器匹配弹幕前缀，提取指令内容。格式：<code>#cmd 参数内容</code>，空格后的内容作为参数传入对应功能。</div>
-          <div class="dm-trigger-add">
-            <input v-model="newTriggerPattern" class="dm-input dm-input--sm" placeholder="前缀" style="width:80px" />
-            <select v-model="newTriggerAction" class="dm-select dm-select--sm">
-              <option v-for="opt in ACTION_OPTIONS" :key="opt.id" :value="opt.id">{{ opt.label }}</option>
-            </select>
-            <input v-model="newTriggerDesc" class="dm-input dm-input--sm" placeholder="描述" style="flex:1" />
-            <button class="dm-btn dm-btn--primary dm-btn--sm" @click="addTrigger">添加</button>
+          <div class="dm-trigger-kind-tabs">
+            <button type="button" :class="{ active: triggerUiTab === 'danmaku' }" class="dm-trigger-kind-tab" @click="triggerUiTab = 'danmaku'">
+              弹幕触发
+            </button>
+            <button type="button" :class="{ active: triggerUiTab === 'schedule' }" class="dm-trigger-kind-tab" @click="triggerUiTab = 'schedule'">
+              定时触发
+            </button>
           </div>
-          <div v-if="backendRooms.length > 0" class="dm-trigger-rooms-row">
-            <span class="dm-trigger-rooms-label">绑定直播间：</span>
-            <span v-for="room in backendRooms" :key="room.roomId" class="dm-trigger-room-chip" :class="{ active: newTriggerRoomIds.includes(room.roomId) }" @click="toggleNewTriggerRoom(room.roomId)">{{ room.info?.owner_name || room.roomId }}</span>
-            <span v-if="newTriggerRoomIds.length === 0" class="dm-trigger-rooms-hint">不选则全部生效</span>
-          </div>
-          <div class="dm-trigger-list">
-            <div v-if="triggers.length === 0" class="dm-empty">暂无触发器</div>
-            <div v-for="t in triggers" :key="t.id" class="dm-trigger-item" :class="{ disabled: !t.enabled }">
-              <button class="dm-toggle" @click="toggleTrigger(t)"><span :class="t.enabled ? 'toggle-on' : 'toggle-off'"></span></button>
-              <div class="dm-trigger-body">
-                <code class="dm-pattern">{{ t.pattern }}</code>
-                <span class="dm-action-tag" :class="'dm-action--' + t.action">{{ actionLabel(t.action) }}</span>
-                <span v-if="t.description" class="dm-trigger-desc">{{ t.description }}</span>
-                <span v-if="t.roomIds && t.roomIds.length > 0" class="dm-trigger-bound-rooms">
-                  <span v-for="rid in t.roomIds" :key="rid" class="dm-trigger-bound-chip" @click.stop="toggleRoomForTrigger(t, rid)">{{ roomLabel(rid) }} ×</span>
-                </span>
-                <span v-else class="dm-trigger-bound-all">全部直播间</span>
-              </div>
-              <div v-if="backendRooms.length > 0" class="dm-trigger-room-edit">
-                <span v-for="room in backendRooms" :key="room.roomId" class="dm-trigger-room-chip dm-trigger-room-chip--sm" :class="{ active: t.roomIds && t.roomIds.includes(room.roomId) }" @click.stop="toggleRoomForTrigger(t, room.roomId)">{{ room.info?.owner_name || room.roomId }}</span>
-              </div>
-              <button class="dm-btn dm-btn--ghost dm-btn--sm" @click="deleteTrigger(t.id)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+
+          <template v-if="triggerUiTab === 'danmaku'">
+            <div class="dm-trigger-info">
+              <p><strong>弹幕触发</strong>：弹幕以所填<strong>前缀</strong>开头时执行；每次触发写入<strong>触发日志</strong>。</p>
             </div>
-          </div>
+            <div class="dm-trigger-add">
+              <span class="dm-trigger-type-pill">弹幕</span>
+              <input v-model="newTriggerPattern" class="dm-input dm-input--sm" placeholder="前缀" style="width:80px" />
+              <select v-model="newTriggerAction" class="dm-select dm-select--sm dm-schedule-action-select">
+                <option v-for="opt in ACTION_OPTIONS" :key="opt.id" :value="opt.id">{{ opt.label }}</option>
+              </select>
+              <input v-model="newTriggerPayload" class="dm-input dm-input--sm dm-schedule-memo" placeholder="说明（点歌：歌名 歌手；其余可空）" />
+              <button type="button" class="dm-btn dm-btn--primary dm-btn--sm" @click="addTrigger">添加</button>
+            </div>
+            <div v-if="backendRooms.length > 0" class="dm-trigger-rooms-row">
+              <span class="dm-trigger-rooms-label">绑定直播间：</span>
+              <span v-for="room in backendRooms" :key="'ndm_' + room.roomId" class="dm-trigger-room-chip" :class="{ active: newTriggerRoomIds.includes(room.roomId) }" @click="toggleNewTriggerRoom(room.roomId)">{{ room.info?.owner_name || room.roomId }}</span>
+              <span v-if="newTriggerRoomIds.length === 0" class="dm-trigger-rooms-hint">不选则全部生效</span>
+            </div>
+            <div class="dm-trigger-list">
+              <div v-if="danmakuTriggers.length === 0" class="dm-empty">暂无弹幕触发器</div>
+              <div v-for="t in danmakuTriggers" :key="t.id" class="dm-trigger-item" :class="{ disabled: !t.enabled }">
+                <button type="button" class="dm-toggle" @click="toggleTrigger(t)"><span :class="t.enabled ? 'toggle-on' : 'toggle-off'"></span></button>
+                <div class="dm-trigger-body">
+                  <span class="dm-trigger-type-pill dm-trigger-type-pill--sm">弹幕</span>
+                  <code class="dm-pattern">{{ t.pattern }}</code>
+                  <span class="dm-action-tag" :class="'dm-action--' + t.action">{{ actionLabel(t.action) }}</span>
+                  <code v-if="triggerMemoText(t)" class="dm-pattern dm-pattern--muted">{{ triggerMemoText(t) }}</code>
+                  <span v-if="t.roomIds && t.roomIds.length > 0" class="dm-trigger-bound-rooms">
+                    <span v-for="rid in t.roomIds" :key="rid" class="dm-trigger-bound-chip" @click.stop="toggleRoomForTrigger(t, rid)">{{ roomLabel(rid) }} ×</span>
+                  </span>
+                  <span v-else class="dm-trigger-bound-all">全部直播间</span>
+                </div>
+                <div v-if="backendRooms.length > 0" class="dm-trigger-room-edit">
+                  <span v-for="room in backendRooms" :key="'edb_' + t.id + '_' + room.roomId" class="dm-trigger-room-chip dm-trigger-room-chip--sm" :class="{ active: t.roomIds && t.roomIds.includes(room.roomId) }" @click.stop="toggleRoomForTrigger(t, room.roomId)">{{ room.info?.owner_name || room.roomId }}</span>
+                </div>
+                <button type="button" class="dm-btn dm-btn--ghost dm-btn--sm" @click="deleteTrigger(t.id)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+              </div>
+            </div>
+          </template>
+
+          <template v-else>
+            <div class="dm-trigger-info">
+              <p><strong>定时触发</strong>：到达配置的<strong>间隔或时刻</strong>时执行；每次触发写入<strong>触发日志</strong>。</p>
+            </div>
+            <div class="dm-trigger-add">
+              <span class="dm-trigger-type-pill">定时</span>
+              <select v-model="newSchedMode" class="dm-select dm-select--sm dm-schedule-mode-select">
+                <option value="interval">固定间隔</option>
+                <option value="weekly">每周指定时刻</option>
+                <option value="daily">每日指定时刻</option>
+                <option value="cron">自定义 Cron</option>
+              </select>
+
+              <template v-if="newSchedMode === 'interval'">
+                <label class="dm-schedule-inline">每<input v-model.number="newSchedIntervalMinutes" class="dm-input dm-input--sm dm-schedule-num dm-schedule-num--mins" type="number" min="1" max="10080" />分钟</label>
+              </template>
+              <template v-else-if="newSchedMode === 'weekly'">
+                <span class="dm-schedule-inline dm-schedule-inline--muted">周</span>
+                <span v-for="(ch, d) in WEEKDAY_CHARS" :key="'wd_' + d" class="dm-trigger-room-chip dm-trigger-room-chip--sm" :class="{ active: newSchedWeekdays.includes(d) }" @click="toggleSchedWeekday(d)">{{ ch }}</span>
+                <span class="dm-schedule-inline dm-schedule-inline--muted">时刻</span>
+                <input v-model.number="newSchedHour" class="dm-input dm-input--sm dm-schedule-num dm-schedule-num--2" type="number" min="0" max="23" maxlength="2" />
+                <span class="dm-schedule-colon">:</span>
+                <input v-model.number="newSchedMinute" class="dm-input dm-input--sm dm-schedule-num dm-schedule-num--2" type="number" min="0" max="59" maxlength="2" />
+              </template>
+              <template v-else-if="newSchedMode === 'daily'">
+                <span class="dm-schedule-inline dm-schedule-inline--muted">时刻</span>
+                <input v-model.number="newSchedHour" class="dm-input dm-input--sm dm-schedule-num dm-schedule-num--2" type="number" min="0" max="23" maxlength="2" />
+                <span class="dm-schedule-colon">:</span>
+                <input v-model.number="newSchedMinute" class="dm-input dm-input--sm dm-schedule-num dm-schedule-num--2" type="number" min="0" max="59" maxlength="2" />
+              </template>
+              <template v-else>
+                <input v-model="newSchedCron" class="dm-input dm-input--sm dm-schedule-cron" type="text" spellcheck="false" placeholder="分 时 日 月 周" />
+              </template>
+
+              <select v-model="newSchedAction" class="dm-select dm-select--sm dm-schedule-action-select">
+                <option v-for="opt in ACTION_OPTIONS" :key="'s_' + opt.id" :value="opt.id">{{ opt.label }}</option>
+              </select>
+              <input v-model="newSchedPayload" class="dm-input dm-input--sm dm-schedule-memo" placeholder="说明（点歌：歌名 歌手；其余可空）" />
+              <button type="button" class="dm-btn dm-btn--primary dm-btn--sm" @click="addScheduleTrigger">添加</button>
+            </div>
+            <div v-if="backendRooms.length > 0" class="dm-trigger-rooms-row">
+              <span class="dm-trigger-rooms-label">绑定直播间：</span>
+              <span v-for="room in backendRooms" :key="'nsch_' + room.roomId" class="dm-trigger-room-chip" :class="{ active: newSchedRoomIds.includes(room.roomId) }" @click="toggleNewSchedRoom(room.roomId)">{{ room.info?.owner_name || room.roomId }}</span>
+              <span v-if="newSchedRoomIds.length === 0" class="dm-trigger-rooms-hint">不选则对所有已连接房间各执行一次</span>
+            </div>
+            <div class="dm-trigger-list">
+              <div v-if="scheduleTriggers.length === 0" class="dm-empty">暂无定时触发器</div>
+              <div v-for="t in scheduleTriggers" :key="t.id" class="dm-trigger-schedule-wrap">
+                <div class="dm-trigger-item" :class="{ disabled: !t.enabled }">
+                  <button type="button" class="dm-toggle" @click="toggleTrigger(t)"><span :class="t.enabled ? 'toggle-on' : 'toggle-off'"></span></button>
+                  <div class="dm-trigger-body">
+                    <span class="dm-trigger-type-pill dm-trigger-type-pill--sched">定时</span>
+                    <span class="dm-schedule-summary">{{ scheduleSummaryLabel(t) }}</span>
+                    <span class="dm-action-tag" :class="'dm-action--' + t.action">{{ actionLabel(t.action) }}</span>
+                    <code v-if="triggerMemoText(t)" class="dm-pattern dm-pattern--muted">{{ triggerMemoText(t) }}</code>
+                    <span v-if="t.roomIds && t.roomIds.length > 0" class="dm-trigger-bound-rooms">
+                      <template v-if="editingScheduleId !== t.id">
+                        <span v-for="rid in t.roomIds" :key="'sr_' + rid" class="dm-trigger-bound-chip" @click.stop="toggleRoomForTrigger(t, rid)">{{ roomLabel(rid) }} ×</span>
+                      </template>
+                      <template v-else>
+                        <span v-for="rid in t.roomIds" :key="'sr_ro_' + rid" class="dm-trigger-bound-chip dm-trigger-bound-chip--readonly">{{ roomLabel(rid) }}</span>
+                      </template>
+                    </span>
+                    <span v-else class="dm-trigger-bound-all">全部已连接房间</span>
+                  </div>
+                  <div v-if="backendRooms.length > 0 && editingScheduleId !== t.id" class="dm-trigger-room-edit">
+                    <span v-for="room in backendRooms" :key="'esb_' + t.id + '_' + room.roomId" class="dm-trigger-room-chip dm-trigger-room-chip--sm" :class="{ active: t.roomIds && t.roomIds.includes(room.roomId) }" @click.stop="toggleRoomForTrigger(t, room.roomId)">{{ room.info?.owner_name || room.roomId }}</span>
+                  </div>
+                  <button type="button" class="dm-btn dm-btn--ghost dm-btn--sm" title="修改定时规则与动作" @click="beginEditSchedule(t)">编辑</button>
+                  <button type="button" class="dm-btn dm-btn--ghost dm-btn--sm" @click="deleteTrigger(t.id)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                </div>
+                <div v-if="editingScheduleId === t.id && scheduleEditDraft" class="dm-schedule-edit-panel">
+                  <div class="dm-schedule-edit-row">
+                    <select v-model="scheduleEditDraft.mode" class="dm-select dm-select--sm dm-schedule-mode-select">
+                      <option value="interval">固定间隔</option>
+                      <option value="weekly">每周指定时刻</option>
+                      <option value="daily">每日指定时刻</option>
+                      <option value="cron">自定义 Cron</option>
+                    </select>
+                    <template v-if="scheduleEditDraft.mode === 'interval'">
+                      <label class="dm-schedule-inline">每<input v-model.number="scheduleEditDraft.intervalMinutes" class="dm-input dm-input--sm dm-schedule-num dm-schedule-num--mins" type="number" min="1" max="10080" />分钟</label>
+                    </template>
+                    <template v-else-if="scheduleEditDraft.mode === 'weekly'">
+                      <span class="dm-schedule-inline dm-schedule-inline--muted">周</span>
+                      <span v-for="(ch, d) in WEEKDAY_CHARS" :key="'ewd_' + t.id + '_' + d" class="dm-trigger-room-chip dm-trigger-room-chip--sm" :class="{ active: scheduleEditDraft.weekdays.includes(d) }" @click="toggleEditSchedWeekday(d)">{{ ch }}</span>
+                      <span class="dm-schedule-inline dm-schedule-inline--muted">时刻</span>
+                      <input v-model.number="scheduleEditDraft.hour" class="dm-input dm-input--sm dm-schedule-num dm-schedule-num--2" type="number" min="0" max="23" maxlength="2" />
+                      <span class="dm-schedule-colon">:</span>
+                      <input v-model.number="scheduleEditDraft.minute" class="dm-input dm-input--sm dm-schedule-num dm-schedule-num--2" type="number" min="0" max="59" maxlength="2" />
+                    </template>
+                    <template v-else-if="scheduleEditDraft.mode === 'daily'">
+                      <span class="dm-schedule-inline dm-schedule-inline--muted">时刻</span>
+                      <input v-model.number="scheduleEditDraft.hour" class="dm-input dm-input--sm dm-schedule-num dm-schedule-num--2" type="number" min="0" max="23" maxlength="2" />
+                      <span class="dm-schedule-colon">:</span>
+                      <input v-model.number="scheduleEditDraft.minute" class="dm-input dm-input--sm dm-schedule-num dm-schedule-num--2" type="number" min="0" max="59" maxlength="2" />
+                    </template>
+                    <template v-else>
+                      <input v-model="scheduleEditDraft.cron" class="dm-input dm-input--sm dm-schedule-cron" type="text" spellcheck="false" placeholder="分 时 日 月 周" />
+                    </template>
+                    <select v-model="scheduleEditDraft.action" class="dm-select dm-select--sm dm-schedule-action-select">
+                      <option v-for="opt in ACTION_OPTIONS" :key="'ed_' + t.id + '_' + opt.id" :value="opt.id">{{ opt.label }}</option>
+                    </select>
+                    <input v-model="scheduleEditDraft.payload" class="dm-input dm-input--sm dm-schedule-memo" placeholder="说明（点歌：歌名 歌手；其余可空）" />
+                  </div>
+                  <div v-if="backendRooms.length > 0" class="dm-trigger-rooms-row dm-trigger-rooms-row--schedule-edit">
+                    <span class="dm-trigger-rooms-label">绑定直播间：</span>
+                    <span v-for="room in backendRooms" :key="'esch_' + t.id + '_' + room.roomId" class="dm-trigger-room-chip" :class="{ active: scheduleEditDraft.roomIds.includes(room.roomId) }" @click="toggleEditSchedRoom(room.roomId)">{{ room.info?.owner_name || room.roomId }}</span>
+                    <span v-if="scheduleEditDraft.roomIds.length === 0" class="dm-trigger-rooms-hint">不选则对所有已连接房间各执行一次</span>
+                  </div>
+                  <div class="dm-schedule-edit-actions">
+                    <button type="button" class="dm-btn dm-btn--primary dm-btn--sm" @click="saveEditSchedule">保存</button>
+                    <button type="button" class="dm-btn dm-btn--ghost dm-btn--sm" @click="cancelEditSchedule">取消</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
         </div>
 
         <div v-if="activeSubTab === 'log'" class="dm-log-section">
-          <div class="dm-log-toolbar"><span class="dm-log-count">{{ triggerLog.length }} 条</span><button class="dm-btn dm-btn--ghost dm-btn--sm" @click="clearActionLog">清空</button><button class="dm-btn dm-btn--ghost dm-btn--sm" @click="loadActionLog">刷新</button></div>
+          <div class="dm-log-toolbar"><span class="dm-log-count">{{ triggerLog.length }} 条</span><button type="button" class="dm-btn dm-btn--ghost dm-btn--sm" @click="clearActionLog">清空</button><button type="button" class="dm-btn dm-btn--ghost dm-btn--sm" @click="loadActionLog">刷新</button></div>
           <div class="dm-log-list">
             <div v-if="triggerLog.length === 0" class="dm-empty">暂无记录</div>
-            <div v-for="(entry, idx) in triggerLog" :key="idx" class="dm-log-item"><span class="dm-time">{{ formatTime(entry.ts) }}</span><span class="dm-nick" @click="openUserPage(entry.uid)">{{ entry.nickname }}</span><code class="dm-pattern">{{ entry.pattern }}</code><span class="dm-log-text">{{ entry.content }}</span></div>
+            <div v-for="(entry, idx) in triggerLog" :key="idx" class="dm-log-item">
+              <span class="dm-log-time-copy">
+                <span class="dm-time">{{ formatTime(entry.ts) }}</span>
+                <button
+                  type="button"
+                  class="dm-log-copy-btn"
+                  title="复制本条日志（完整字段）"
+                  aria-label="复制本条日志"
+                  @click.stop="copyTriggerLogEntry(entry)"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+              </span>
+              <span v-if="entry.source === 'schedule'" class="dm-log-src">定时</span>
+              <span v-else-if="entry.source === 'web'" class="dm-log-src">采集</span>
+              <span
+                class="dm-log-body-clip"
+                :title="triggerLogFullDetail(entry)"
+              >
+                <template v-if="entry.summary">{{ entry.summary }}</template>
+                <template v-else>
+                  <span class="dm-log-inline-nick" @click.stop="openUserPage(entry.uid)">{{ entry.nickname }}</span>
+                  <code class="dm-pattern dm-pattern--log-inline">{{ entry.pattern }}</code>
+                  <span class="dm-log-inline-content">{{ entry.content }}</span>
+                </template>
+              </span>
+            </div>
           </div>
         </div>
       </template>
@@ -4047,7 +5380,7 @@ function hideUidTooltip() {
       <div v-if="showSongPanel" class="dm-overlay" @click.self="showSongPanel = false">
         <div class="dm-stats-panel">
           <div class="dm-stats-header">
-            <h3>🎵 点歌统计 <span v-if="songPanelRoomId" class="dm-stats-room">房间 {{ songPanelRoomId }}</span></h3>
+            <h3>点歌统计 <span v-if="songPanelRoomId" class="dm-stats-room">房间 {{ songPanelRoomId }}</span></h3>
             <div class="dm-stats-actions">
               <button class="dm-btn dm-btn--ghost dm-btn--sm" @click="loadSongData(songPanelRoomId!)">刷新</button>
               <button class="dm-stats-close" @click="showSongPanel = false">
@@ -4159,6 +5492,227 @@ function hideUidTooltip() {
       </div>
     </Teleport>
 
+    <!-- ==================== AI 日报 / 周报 列表 ==================== -->
+    <Teleport to="body">
+      <div v-if="showAiReportPanel" class="dm-overlay" @click.self="showAiReportPanel = false">
+        <div class="dm-stats-panel dm-ai-report-panel">
+          <div class="dm-stats-header">
+            <h3>日报与周报 <span v-if="aiReportPanelRoomId" class="dm-stats-room">房间 {{ aiReportPanelRoomId }}</span></h3>
+            <div class="dm-stats-actions">
+              <button
+                class="dm-btn dm-btn--ghost dm-btn--sm"
+                :disabled="!aiReportPanelRoomId"
+                @click="aiReportPanelRoomId && loadAiReports(aiReportPanelRoomId)"
+              >刷新</button>
+              <button
+                type="button"
+                class="dm-btn dm-btn--ghost dm-btn--sm"
+                title="从列表移除当前报告（服务端保留，需后台密码）"
+                :disabled="!selectedAiReport || aiReportDeleteBusy || aiReportPanelLoading"
+                @click="selectedAiReport ? deleteAiReport(selectedAiReport) : undefined"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                删除
+              </button>
+              <button class="dm-stats-close" @click="showAiReportPanel = false">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
+          <div v-if="aiReportPanelLoading" class="dm-empty">加载中…</div>
+          <template v-else>
+            <div v-if="aiReportEntries.length === 0" class="dm-empty">尚无已生成的日报或周报；可在「触发器」里配置日报/周报动作后触发。</div>
+            <div v-else class="dm-ai-report-layout">
+              <div
+                class="dm-ai-report-detail"
+                role="tabpanel"
+                :class="selectedAiReport ? `dm-ai-report-detail--${selectedAiReport.kind}` : ''"
+              >
+                <div class="dm-ai-report-headline-board">
+                    <div class="dm-ai-report-pinboard-hero" :class="aiReportPinHeroClass">
+                      <aside v-if="aiReportDailyPins.length" class="dm-ai-report-pin-rail dm-ai-report-pin-rail--daily">
+                      <div class="dm-ai-report-pin-rail-heading dm-ai-report-pin-rail-heading--daily">日报</div>
+                      <div class="dm-ai-report-chalk-list" role="tablist" aria-label="日报列表">
+                        <div v-for="entry in aiReportDailyPins" :key="entry.id" class="dm-ai-report-chalk-item">
+                          <button
+                            type="button"
+                            role="tab"
+                            class="dm-ai-report-chalk-tab"
+                            :class="{ 'dm-ai-report-chalk-tab--active': entry.id === aiReportSelectedId }"
+                            :title="entry.periodLabel || formatAiReportDailyPinLabel(entry)"
+                            @click="aiReportSelectedId = entry.id"
+                          >
+                            {{ formatAiReportDailyPinLabel(entry) }}
+                          </button>
+                          <button
+                            type="button"
+                            class="dm-ai-report-chalk-del"
+                            :disabled="aiReportDeleteBusy"
+                            :title="'从列表移除' + aiReportKindLabel(entry.kind)"
+                            :aria-label="'从列表移除此' + aiReportKindLabel(entry.kind)"
+                            @click.stop="deleteAiReport(entry)"
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                          </button>
+                        </div>
+                      </div>
+                    </aside>
+                    <div class="dm-ai-report-pin-center">
+                      <template v-if="selectedAiReport">
+                        <header class="dm-ai-report-masthead" :aria-label="`${aiReportKindLabel(selectedAiReport.kind)}版头`">
+                          <div
+                            v-if="aiReportMastheadWatermarkUi"
+                            class="dm-ai-report-masthead-watermark"
+                            :style="aiReportMastheadWatermarkUi.style"
+                            aria-hidden="true"
+                          >
+                            {{ aiReportMastheadWatermarkUi.text }}
+                          </div>
+                          <div class="dm-ai-report-masthead-stack">
+                            <div class="dm-ai-report-masthead-brand">
+                              <span v-if="aiReportPanelRoomId" class="dm-ai-report-masthead-room">直播间 {{ aiReportPanelRoomId }}</span>
+                            </div>
+                            <div class="dm-ai-report-headline-row">
+                              <img
+                                v-if="aiReportDetailAvatar"
+                                :src="aiReportDetailAvatar"
+                                class="dm-ai-report-title-avatar"
+                                alt=""
+                                referrerpolicy="no-referrer"
+                                loading="lazy"
+                                width="44"
+                                height="44"
+                                @error="onAiReportAvatarErr"
+                              />
+                            </div>
+                            <div v-if="aiReportMastheadStreamerName" class="dm-ai-report-masthead-streamer-line">{{ aiReportMastheadStreamerName }}</div>
+                            <div v-if="aiReportMastheadGeneratedAt" class="dm-ai-report-masthead-generated-line">生成 {{ aiReportMastheadGeneratedAt }}</div>
+                          </div>
+                          <div class="dm-ai-report-deck-rule" aria-hidden="true"></div>
+                        </header>
+                      </template>
+                      <div v-else class="dm-ai-report-pinboard-hint">点击日报或周报下的日期查看报告全文。</div>
+                    </div>
+                    <aside v-if="aiReportWeeklyPins.length" class="dm-ai-report-pin-rail dm-ai-report-pin-rail--weekly">
+                      <div class="dm-ai-report-pin-rail-heading dm-ai-report-pin-rail-heading--weekly">周报</div>
+                      <div class="dm-ai-report-chalk-list" role="tablist" aria-label="周报列表">
+                        <div v-for="entry in aiReportWeeklyPins" :key="entry.id" class="dm-ai-report-chalk-item">
+                          <button
+                            type="button"
+                            role="tab"
+                            class="dm-ai-report-chalk-tab"
+                            :class="{ 'dm-ai-report-chalk-tab--active': entry.id === aiReportSelectedId }"
+                            :title="entry.periodLabel || formatAiReportWeeklyPinLabel(entry)"
+                            @click="aiReportSelectedId = entry.id"
+                          >
+                            {{ formatAiReportWeeklyPinLabel(entry) }}
+                          </button>
+                          <button
+                            type="button"
+                            class="dm-ai-report-chalk-del"
+                            :disabled="aiReportDeleteBusy"
+                            :title="'从列表移除' + aiReportKindLabel(entry.kind)"
+                            :aria-label="'从列表移除此' + aiReportKindLabel(entry.kind)"
+                            @click.stop="deleteAiReport(entry)"
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                          </button>
+                        </div>
+                      </div>
+                    </aside>
+                  </div>
+                </div>
+                <template v-if="selectedAiReport">
+                  <article class="dm-ai-report-article" aria-label="报告正文">
+                    <div class="dm-ai-report-sheet">
+                      <div class="dm-ai-report-sheet-inner">
+                      <div
+                        v-if="selectedAiReport && selectedAiReport.kind === 'weekly'"
+                        class="dm-ai-report-kind-hero"
+                        :class="'dm-ai-report-kind-hero--' + selectedAiReport.kind"
+                        role="heading"
+                        aria-level="2"
+                      >{{ aiReportKindLabel(selectedAiReport.kind) }}</div>
+                      <section
+                        v-if="selectedAiReportOverviewRows.length && selectedAiReport"
+                        class="dm-ai-report-daily-overview"
+                        :aria-labelledby="'dm-ai-report-overview-h-' + selectedAiReport.id"
+                      >
+                        <h3
+                          :id="'dm-ai-report-overview-h-' + selectedAiReport.id"
+                          class="dm-ai-report-daily-overview-title"
+                        >
+                          数据概览
+                        </h3>
+                        <dl class="dm-ai-report-daily-overview-dl">
+                          <template v-for="(row, ri) in selectedAiReportOverviewRows" :key="ri">
+                            <dt class="dm-ai-report-daily-overview-dt">
+                              <span class="dm-ai-report-daily-overview-label">{{ row.label }}</span>
+                              <span v-if="row.hint" class="dm-ai-report-daily-overview-hint">（{{ row.hint }}）</span>
+                            </dt>
+                            <dd class="dm-ai-report-daily-overview-dd">{{ row.value }}</dd>
+                          </template>
+                        </dl>
+                        <p class="dm-ai-report-overview-footnote">
+                          弹幕与礼物来自本服务本地归档；弹幕人数优先 uid，无 uid 时用昵称弱去重。礼物金额口径：收入为分成价合计；花费为标价合计，无价礼则用分成价；未命中礼单的有价礼不计入金额。
+                        </p>
+                      </section>
+                      <template v-for="(blk, bi) in selectedAiReportBlocksAugmented" :key="bi + '-' + blk.type">
+                        <div
+                          v-if="blk.type === 'section'"
+                          role="heading"
+                          aria-level="3"
+                          class="dm-ai-report-section"
+                        >
+                          <span
+                            v-for="(ln, li) in blk.lines"
+                            :key="li"
+                            class="dm-ai-report-section-line"
+                          >{{ ln }}</span>
+                        </div>
+                        <ul v-else-if="blk.type === 'list'" class="dm-ai-report-ul">
+                          <li v-for="(it, li) in blk.items" :key="li" class="dm-ai-report-li">{{ it }}</li>
+                        </ul>
+                        <div v-else-if="blk.type === 'mentality-grade'" class="dm-ai-report-mentality-grade">
+                          <div class="dm-ai-report-grade-paper">
+                            <div class="dm-ai-report-grade-header">
+                              <span class="dm-ai-report-grade-title">主播心态 · 阅卷栏</span>
+                              <span class="dm-ai-report-grade-range">量表 −100～+100</span>
+                            </div>
+                            <div class="dm-ai-report-grade-body">
+                              <div
+                                class="dm-ai-report-score-ring"
+                                :data-tier="blk.score >= 35 ? 'high' : blk.score <= -35 ? 'low' : 'mid'"
+                              >
+                                <span class="dm-ai-report-score-num">{{ blk.score }}</span>
+                                <span class="dm-ai-report-score-unit">分</span>
+                              </div>
+                              <div class="dm-ai-report-grade-notes">
+                                <div v-if="blk.rubric" class="dm-ai-report-rubric-lines">{{ blk.rubric }}</div>
+                                <div v-if="blk.quote || blk.reason" class="dm-ai-report-best-wrap">
+                                  <div class="dm-ai-report-best-label">最佳弹幕（系统摘录）</div>
+                                  <div v-if="blk.quote" class="dm-ai-report-best-quote" role="blockquote">{{ blk.quote }}</div>
+                                  <p v-if="blk.reason" class="dm-ai-report-best-reason">{{ blk.reason }}</p>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <p v-else class="dm-ai-report-p dm-ai-report-p--flow">
+                          {{ blk.lines.join("") }}
+                        </p>
+                      </template>
+                      </div>
+                    </div>
+                  </article>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- UID Tooltip Bubble -->
     <Teleport to="body">
       <Transition name="dm-uid-tip">
@@ -4178,9 +5732,14 @@ function hideUidTooltip() {
 /* ================================================================== */
 
 .dm-panel {
-  padding: 1rem 1.25rem 1.25rem;
+  padding: var(--dm-stack-gap) 1.12rem 1rem;
   max-width: min(720px, 100%);
+  width: 100%;
+  box-sizing: border-box;
   margin: 0 auto;
+  scrollbar-gutter: stable;
+  /* 顶区：直播间号 / 标签行 / 卡片 / 子 Tab / 弹幕显隐条 — 统一竖直间距（px 级、尽量紧凑） */
+  --dm-stack-gap: 0.3125rem;
   /* 面板内按钮/标签统一字色（随主题变量） */
   --dm-ui-muted: color-mix(in srgb, var(--muted) 72%, var(--text));
   --dm-ui-soft: color-mix(in srgb, var(--muted) 82%, var(--text));
@@ -4189,6 +5748,14 @@ function hideUidTooltip() {
   --dm-ui-accent: color-mix(in srgb, var(--primary) 74%, var(--text));
   --dm-trigger-label: color-mix(in srgb, var(--primary) 44%, var(--text));
   --dm-trigger-label-hover: color-mix(in srgb, var(--primary) 58%, var(--text));
+}
+
+/* 顶区整块：用 gap 保证各横条之间间距完全一致 */
+.dm-header-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dm-stack-gap);
+  margin-bottom: var(--dm-stack-gap);
 }
 
 /* ---- Lock screen ---- */
@@ -4206,14 +5773,15 @@ function hideUidTooltip() {
 
 /* ---- Add room row (capsule search bar) ---- */
 .dm-add-row {
-  display: flex; gap: 0; align-items: stretch; margin-bottom: 0.85rem;
+  display: flex; gap: 0; align-items: stretch; margin-bottom: 0;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
   background: color-mix(in srgb, var(--surface) 70%, var(--bg));
   backdrop-filter: blur(16px) saturate(1.2);
   -webkit-backdrop-filter: blur(16px) saturate(1.2);
   box-shadow: inset 0 1px 1px rgba(0,0,0,0.05);
-  overflow: hidden; min-height: 2.5rem;
+  overflow: hidden;
+  min-height: 0;
   transition: border-color 0.18s, box-shadow 0.18s;
 }
 .dm-add-row:focus-within {
@@ -4223,7 +5791,10 @@ function hideUidTooltip() {
 }
 .dm-add-row .dm-input {
   flex: 1; min-width: 0; width: 100%; border: none; border-radius: 0;
-  background: transparent; padding: 0.5rem 0.85rem; font-size: 0.84rem;
+  background: transparent;
+  padding: 0.22rem 0.72rem;
+  font-size: 0.8rem;
+  line-height: 1.3;
   font-family: inherit;
   outline: none; box-shadow: none; color: var(--dm-ui-body);
 }
@@ -4233,7 +5804,8 @@ function hideUidTooltip() {
   flex-shrink: 0; border: none;
   border-radius: 0 999px 999px 0;
   background: var(--primary) !important;
-  padding: 0 1.1rem; font-size: 0.82rem;
+  padding: 0.22rem 0.8rem;
+  font-size: 0.74rem;
   color: var(--on-primary) !important;
   font-weight: 700; letter-spacing: 0.02em;
   cursor: pointer; position: relative;
@@ -4253,10 +5825,10 @@ function hideUidTooltip() {
 .dm-add-row .dm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* ---- Room chips ---- */
-.dm-room-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 0.85rem; }
+.dm-room-list { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 0; }
 .dm-room-chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 5px 12px; border-radius: 999px;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border-radius: 999px;
   border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
   background: color-mix(in srgb, var(--surface) 70%, var(--bg));
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
@@ -4290,8 +5862,9 @@ function hideUidTooltip() {
 
 /* ---- Room info card (glassmorphism) ---- */
 .dm-room-card {
-  display: flex; align-items: center; gap: 0.75rem;
-  padding: 0.75rem 1rem; margin-bottom: 0.85rem;
+  display: flex; align-items: flex-start; gap: 0.6rem;
+  padding: 0.52rem 0.82rem;
+  margin-bottom: 0;
   border-radius: 16px;
   border: 1px solid color-mix(in srgb, #fff 10%, var(--border));
   background: linear-gradient(195deg,
@@ -4303,12 +5876,37 @@ function hideUidTooltip() {
   -webkit-backdrop-filter: blur(20px) saturate(1.2);
 }
 .dm-room-avatar {
-  width: 42px; height: 42px; border-radius: 50%; object-fit: cover; flex-shrink: 0;
+  width: 38px; height: 38px; border-radius: 50%; object-fit: cover; flex-shrink: 0;
   border: 2px solid color-mix(in srgb, #fff 10%, var(--border));
 }
-.dm-room-body { flex: 1; min-width: 0; }
+.dm-room-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.28rem; }
 .dm-room-title { font-size: 0.9rem; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: 0.01em; }
-.dm-room-meta { display: flex; flex-wrap: wrap; gap: 0.4rem 0.75rem; margin-top: 3px; font-size: 0.73rem; color: var(--muted); align-items: center; }
+.dm-room-meta { display: flex; flex-wrap: wrap; gap: 0.4rem 0.75rem; margin: 0; font-size: 0.73rem; color: var(--muted); align-items: center; }
+.dm-room-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.dm-room-song-btn,
+.dm-room-report-btn { flex-shrink: 0; white-space: nowrap; }
+.dm-room-stats {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 0.3rem 1rem;
+  margin: 0;
+  padding-top: 0.28rem;
+  margin-top: 0.06rem;
+  border-top: 1px solid color-mix(in srgb, #fff 8%, var(--border));
+  font-size: 0.74rem; color: var(--muted);
+}
+.dm-room-stats strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.dm-room-stats--solo {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
 .dm-meta-tag {
   font-size: 0.62rem; font-weight: 600; color: var(--muted);
   background: color-mix(in srgb, #fff 5%, transparent);
@@ -4316,13 +5914,6 @@ function hideUidTooltip() {
   border: 1px solid color-mix(in srgb, #fff 6%, var(--border));
 }
 .dm-meta-live { color: var(--accent); font-weight: 700; font-size: 0.72rem; }
-
-/* ---- Stats bar ---- */
-.dm-stats-bar {
-  display: flex; gap: 1.25rem; font-size: 0.78rem; color: var(--muted);
-  margin-bottom: 0.75rem; padding: 0 0.25rem;
-}
-.dm-stats-bar strong { color: var(--text); font-variant-numeric: tabular-nums; }
 
 /* ---- Inputs & buttons ---- */
 .dm-input {
@@ -4395,7 +5986,7 @@ function hideUidTooltip() {
   box-shadow: 0 1px 6px color-mix(in srgb, var(--primary) 20%, transparent);
 }
 .dm-btn--sm { padding: 0.3rem 0.6rem; font-size: 0.75rem; font-weight: 500; }
-.dm-error { color: var(--danger, #ff6b6b); font-size: 0.8rem; margin: 0.35rem 0; }
+.dm-error { color: var(--danger, #ff6b6b); font-size: 0.78rem; margin: 0; }
 
 /* ---- 顶区：弹幕/礼物切换 + 子标签 — 挤压时收紧字号与间距 ---- */
 .dm-panel-subnav {
@@ -4403,8 +5994,8 @@ function hideUidTooltip() {
   container-name: dm-subnav;
   display: flex;
   flex-direction: column;
-  gap: 0.36rem;
-  margin-bottom: 0.62rem;
+  gap: 0;
+  margin-bottom: 0;
 }
 /* ---- Sub-tabs (pill style) ---- */
 .dm-tabs {
@@ -4416,7 +6007,7 @@ function hideUidTooltip() {
 .dm-tabs button {
   flex: 1;
   min-width: 0;
-  padding: clamp(0.26rem, 0.08rem + 0.65vw, 0.41rem) clamp(0.4rem, 0.06rem + 1.05vw, 0.74rem);
+  padding: clamp(0.2rem, 0.06rem + 0.55vw, 0.34rem) clamp(0.38rem, 0.05rem + 0.95vw, 0.68rem);
   border: none; background: transparent;
   color: var(--dm-ui-muted); cursor: pointer;
   font-family: inherit;
@@ -4452,14 +6043,15 @@ function hideUidTooltip() {
 .dm-feed-section {
   display: flex;
   flex-direction: column;
+  gap: var(--dm-stack-gap);
 }
 
 .dm-bench-visibility-strip {
   display: flex;
   align-items: stretch;
-  gap: 6px;
-  margin-bottom: 0.5rem;
-  padding: 6px;
+  gap: 5px;
+  margin-bottom: 0;
+  padding: 3px 5px;
   border-radius: 12px;
   border: 1px solid color-mix(in srgb, #fff 10%, var(--border));
   background: linear-gradient(
@@ -4475,7 +6067,7 @@ function hideUidTooltip() {
   flex: 1;
   min-width: 0;
   margin: 0;
-  padding: 0.32rem 0.5rem;
+  padding: 0.26rem 0.45rem;
   border-radius: 9px;
   border: 1px solid color-mix(in srgb, #fff 12%, var(--border));
   background: color-mix(in srgb, var(--bg) 35%, transparent);
@@ -4512,15 +6104,12 @@ function hideUidTooltip() {
 .dm-feed-embed-slot {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
 }
 
 .dm-feed-bench-root {
   position: relative;
   display: flex;
   flex-direction: column;
-  min-height: 0;
 }
 
 .dm-feed-bench-root--free {
@@ -4531,9 +6120,6 @@ function hideUidTooltip() {
   position: relative;
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-  align-self: stretch;
 }
 .dm-danmaku-stack--fill-free {
   flex: 1 1 auto;
@@ -4541,13 +6127,6 @@ function hideUidTooltip() {
   display: flex;
   flex-direction: column;
   height: 100%;
-}
-
-.dm-feed.dm-feed--fills-stack {
-  flex: 1 1 auto;
-  min-height: 0;
-  height: auto !important;
-  max-height: none;
 }
 
 .dm-gift-panel.dm-gift-panel--free-overlay {
@@ -4742,12 +6321,8 @@ function hideUidTooltip() {
   min-width: 48px;
 }
 .dm-danmaku-stack {
-  flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  align-self: stretch;
-  overflow: hidden;
   border-radius: 16px;
   border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
   background: linear-gradient(
@@ -5010,16 +6585,6 @@ function hideUidTooltip() {
     0 0 0 3px color-mix(in srgb, var(--primary) 24%, transparent);
 }
 
-.dm-toolbar-ai-btn {
-  color: #8b5cf6;
-  font-weight: 700;
-}
-.dm-toolbar-ai-btn:hover {
-  color: #7c3aed;
-  background: rgba(139, 92, 246, 0.1);
-  text-decoration-color: rgba(139, 92, 246, 0.5);
-}
-
 .dm-toolbar-mode-cluster .dm-toolbar-layout-slot {
   flex: 0 1 auto;
   min-width: 0;
@@ -5251,7 +6816,9 @@ function hideUidTooltip() {
 
 /* Split layout: danmaku left, gift right */
 .dm-feed-split {
-  display: flex; gap: 0; min-height: 0; align-items: stretch;
+  display: flex;
+  gap: 0;
+  align-items: stretch;
 }
 .dm-feed-split .dm-feed-left {
   flex: 1; min-width: 0; display: flex; flex-direction: column;
@@ -6213,34 +7780,41 @@ function hideUidTooltip() {
   border-left: 2.5px solid var(--accent);
 }
 .dm-msg-chatline {
-  display: block;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 0.28rem;
+  row-gap: 0.12rem;
   font-size: 0.72rem;
-  line-height: 1.52;
+  line-height: 1.45;
   word-break: break-word;
   overflow-wrap: anywhere;
   color: color-mix(in srgb, var(--text) 92%, #fff);
 }
 .dm-time--chat {
-  display: inline;
-  margin-right: 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  margin-right: 0;
+  flex-shrink: 0;
   font-size: 0.54rem;
   font-weight: 500;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
-  vertical-align: baseline;
   opacity: 0.85;
 }
 .dm-chat-pill {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  margin-right: 5px;
+  margin-right: 0;
+  flex-shrink: 0;
+  align-self: center;
   padding: 1px 6px;
   border-radius: 4px;
   font-size: 0.58rem;
   font-weight: 600;
   line-height: 1.35;
-  vertical-align: middle;
   white-space: nowrap;
 }
 /* 品质胶囊基底：用户等级（小圆角）/ 粉丝牌（旗帜形）共用 */
@@ -6540,7 +8114,8 @@ function hideUidTooltip() {
   display: inline-flex;
   align-items: center;
   gap: 0.32rem;
-  vertical-align: middle;
+  flex-shrink: 0;
+  align-self: center;
   margin-right: 0;
 }
 .dm-chat-nick {
@@ -6548,34 +8123,216 @@ function hideUidTooltip() {
   font-weight: 600;
   color: color-mix(in srgb, var(--text) 78%, #c8d0e0);
   margin-right: 0;
-  vertical-align: middle;
+}
+.dm-chat-postfix {
+  flex: 1 1 14rem;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  align-self: center;
 }
 .dm-chat-colon {
   display: inline;
+  flex-shrink: 0;
   font-weight: 600;
   color: color-mix(in srgb, var(--muted) 58%, var(--text));
   margin-right: 0.06em;
-  vertical-align: baseline;
 }
 .dm-chat-txt {
-  display: inline;
+  flex: 1 1 auto;
+  min-width: min(100%, 6rem);
   font-weight: 400;
   color: color-mix(in srgb, var(--text) 90%, #e8ecf4);
-  vertical-align: baseline;
 }
 .dm-time { color: var(--muted); font-size: 0.7rem; flex-shrink: 0; min-width: 58px; font-variant-numeric: tabular-nums; }
 
 /* ---- Trigger section ---- */
-.dm-trigger-section { display: flex; flex-direction: column; gap: 0.75rem; }
+.dm-trigger-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dm-stack-gap);
+}
+.dm-trigger-kind-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dm-trigger-kind-tab {
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
+  background: color-mix(in srgb, var(--surface) 50%, transparent);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.dm-trigger-kind-tab.active {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
+}
+.dm-trigger-type-pill {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: color-mix(in srgb, var(--accent) 90%, var(--text));
+}
+.dm-trigger-type-pill--sm { font-size: 0.58rem; padding: 0 6px; }
+.dm-trigger-type-pill--sched {
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+  color: var(--primary);
+}
+.dm-schedule-mode-select {
+  min-width: 0;
+  width: auto;
+  max-width: 10.5rem;
+}
+.dm-schedule-action-select {
+  min-width: 5.25rem;
+  width: auto;
+  max-width: 5.5rem;
+  flex-shrink: 0;
+}
+.dm-schedule-memo {
+  flex: 1 1 140px;
+  min-width: min(100%, 120px);
+}
+.dm-schedule-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.dm-schedule-inline--muted { color: var(--muted); font-weight: 500; }
+.dm-schedule-colon {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin: 0 -0.05rem;
+  user-select: none;
+}
+.dm-schedule-num {
+  box-sizing: border-box;
+  padding-inline: 0.22rem;
+  text-align: center;
+}
+.dm-schedule-num--2 {
+  width: 2.35rem;
+  min-width: 2.35rem;
+  max-width: 2.35rem;
+}
+.dm-schedule-num--mins {
+  width: 3.35rem;
+  min-width: 3.35rem;
+  max-width: 4rem;
+}
+.dm-schedule-cron {
+  box-sizing: border-box;
+  width: 12rem;
+  min-width: 9rem;
+  max-width: min(12rem, 100%);
+  font-family: ui-monospace, monospace;
+  font-size: 0.74rem;
+}
+.dm-schedule-summary { font-size: 0.78rem; font-weight: 600; color: var(--text); }
+.dm-pattern--muted {
+  font-weight: 500;
+  color: color-mix(in srgb, var(--text) 82%, var(--muted));
+  border-color: color-mix(in srgb, var(--border) 85%, var(--primary));
+}
+.dm-log-src {
+  font-size: 0.55rem;
+  font-weight: 700;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary);
+  flex-shrink: 0;
+}
+.dm-log-section .dm-log-toolbar .dm-btn--sm {
+  font-size: 0.68rem;
+  padding: 0.22rem 0.42rem;
+}
 .dm-trigger-info {
+  flex-shrink: 0;
   font-size: 0.8rem; color: var(--muted);
   border-radius: 12px; padding: 0.6rem 0.85rem;
   border: 1px solid color-mix(in srgb, #fff 6%, var(--border));
   background: color-mix(in srgb, var(--surface) 50%, transparent);
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
 }
-.dm-trigger-add { display: flex; gap: 0.5rem; align-items: center; }
-.dm-trigger-list { display: flex; flex-direction: column; gap: 6px; }
+.dm-trigger-info p {
+  margin: 0 0 0.45rem;
+  line-height: 1.55;
+}
+.dm-trigger-info p:last-child {
+  margin-bottom: 0;
+}
+.dm-trigger-info strong {
+  color: color-mix(in srgb, var(--text) 72%, var(--muted));
+  font-weight: 650;
+}
+.dm-trigger-info code {
+  font-size: 0.78em;
+  padding: 0.08rem 0.28rem;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: color-mix(in srgb, var(--text) 85%, var(--primary));
+}
+.dm-trigger-add {
+  flex-shrink: 0;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
+  width: 100%;
+  min-width: 0;
+}
+.dm-trigger-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dm-trigger-schedule-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+.dm-schedule-edit-panel {
+  margin: 4px 0 2px;
+  padding: 0.65rem 0.75rem 0.75rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.dm-schedule-edit-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  row-gap: 0.35rem;
+  width: 100%;
+  min-width: 0;
+}
+.dm-trigger-rooms-row--schedule-edit {
+  padding-top: 0.25rem;
+}
+.dm-schedule-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+}
 .dm-trigger-item {
   display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
   padding: 0.55rem 0.75rem; border-radius: 12px;
@@ -6604,10 +8361,13 @@ function hideUidTooltip() {
 .dm-action-tag { font-size: 0.65rem; padding: 2px 7px; border-radius: 5px; font-weight: 600; }
 .dm-action--log { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .dm-action--song-request { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
+.dm-action--ai-daily-report { background: color-mix(in srgb, #8b5cf6 14%, transparent); color: #a78bfa; }
+.dm-action--ai-weekly-report { background: color-mix(in srgb, #0ea5e9 14%, transparent); color: #38bdf8; }
 .dm-trigger-desc { font-size: 0.75rem; color: var(--muted); }
 
 /* Trigger room binding */
 .dm-trigger-rooms-row {
+  flex-shrink: 0;
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   padding: 0.35rem 0; font-size: 0.75rem;
 }
@@ -6636,6 +8396,11 @@ function hideUidTooltip() {
   color: var(--primary); cursor: pointer; transition: all 0.15s;
 }
 .dm-trigger-bound-chip:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.dm-trigger-bound-chip--readonly {
+  cursor: default;
+  pointer-events: none;
+  opacity: 0.88;
+}
 .dm-trigger-bound-all { font-size: 0.65rem; color: var(--muted); opacity: 0.7; font-style: italic; }
 .dm-select {
   padding: 0.35rem 0.5rem;
@@ -6650,9 +8415,18 @@ function hideUidTooltip() {
 .dm-select--sm { padding: 0.3rem 0.45rem; font-size: 0.78rem; }
 
 /* ---- Log section ---- */
-.dm-log-section { display: flex; flex-direction: column; }
-.dm-log-toolbar { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; }
-.dm-log-count { font-size: 0.8rem; color: var(--muted); flex: 1; }
+.dm-log-section {
+  display: flex;
+  flex-direction: column;
+}
+.dm-log-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: var(--dm-stack-gap);
+}
+.dm-log-count { font-size: 0.7rem; color: var(--muted); flex: 1; }
 .dm-log-list {
   border-radius: 16px;
   border: 1px solid color-mix(in srgb, #fff 8%, var(--border));
@@ -6663,26 +8437,82 @@ function hideUidTooltip() {
   box-shadow: 0 4px 20px rgba(0,0,0,0.1), inset 0 1px 0 rgba(255,255,255,0.05);
   backdrop-filter: blur(16px) saturate(1.2);
   -webkit-backdrop-filter: blur(16px) saturate(1.2);
-  max-height: 420px; overflow-y: auto;
+  max-height: 420px;
+  overflow-y: auto;
 }
 .dm-log-item {
-  display: flex; align-items: center; gap: 0.5rem;
-  padding: 0.5rem 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.72rem;
   border-bottom: 1px solid color-mix(in srgb, #fff 4%, var(--border));
-  font-size: 0.8rem;
+  font-size: 0.68rem;
 }
 .dm-log-item:last-child { border-bottom: none; }
-.dm-log-item .dm-nick {
-  color: var(--primary);
-  font-weight: 600;
+.dm-log-time-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
   flex-shrink: 0;
-  max-width: 110px;
+}
+.dm-log-time-copy .dm-time {
+  font-size: 0.62rem;
+  min-width: 50px;
+}
+.dm-log-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.dm-log-copy-btn:hover {
+  opacity: 1;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+.dm-log-copy-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  outline-offset: 1px;
+}
+.dm-log-body-clip {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text);
+  font-weight: 500;
+  cursor: help;
+  font-size: 0.68rem;
+}
+.dm-pattern--log-inline {
+  margin: 0 0.15rem;
+  padding: 0 5px;
+  font-size: 0.62rem;
+  vertical-align: baseline;
+}
+.dm-log-inline-nick {
+  color: var(--primary);
+  font-weight: 600;
+  font-size: 0.68rem;
   cursor: pointer;
 }
-.dm-log-text { color: var(--accent); font-weight: 600; word-break: break-all; }
+.dm-log-inline-content {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.68rem;
+}
 
 /* Song panel overlay — frosted glass (modern music app style) */
 .dm-overlay {
@@ -6731,6 +8561,906 @@ function hideUidTooltip() {
   color: var(--muted); transition: all 0.15s;
 }
 .dm-stats-close:hover { background: color-mix(in srgb, var(--text) 12%, transparent); color: var(--text); transform: scale(1.05); }
+
+.dm-ai-report-panel { width: min(980px, 96vw); max-height: 88vh; }
+.dm-ai-report-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+  max-height: calc(82vh - 5rem);
+  padding: 0 0 0.85rem 0.85rem;
+  overflow: hidden;
+}
+/** 标题区：单层黑板底板（木纹边框 + 哑光绿板 + 轻微粉笔尘纹理） */
+.dm-ai-report-headline-board {
+  position: relative;
+  flex-shrink: 0;
+  margin: 0 0 10px;
+  padding: 22px 14px 16px;
+  border-radius: 5px;
+  border: 5px solid #4a3428;
+  box-shadow:
+    inset 0 0 100px rgba(0, 0, 0, 0.42),
+    inset 0 2px 0 rgba(255, 255, 255, 0.07),
+    inset 0 -16px 48px rgba(0, 0, 0, 0.22),
+    0 6px 22px rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(0, 0, 0, 0.35);
+  background:
+    repeating-linear-gradient(
+      -8deg,
+      transparent,
+      transparent 11px,
+      rgba(255, 255, 255, 0.018) 11px,
+      rgba(255, 255, 255, 0.018) 12px
+    ),
+    radial-gradient(ellipse 95% 65% at 40% 18%, rgba(255, 255, 255, 0.06), transparent 58%),
+    radial-gradient(ellipse 70% 50% at 88% 92%, rgba(0, 0, 0, 0.28), transparent 55%),
+    linear-gradient(168deg, #1f4536 0%, #173529 42%, #0f231c 100%);
+}
+.dm-ai-report-headline-board .dm-ai-report-pinboard-hero {
+  padding-top: 4px;
+}
+.dm-ai-report-headline-board .dm-ai-report-masthead {
+  position: relative;
+  margin-top: 0;
+  padding-top: 0.35rem;
+  padding-left: 0.85rem;
+  padding-right: 0.85rem;
+  padding-bottom: 0.55rem;
+  background: transparent !important;
+  border-bottom: none;
+  text-align: center;
+}
+.dm-ai-report-headline-board .dm-ai-report-masthead-watermark {
+  font-size: clamp(0.92rem, 2.5vw, 1.32rem);
+  letter-spacing: 0.09em;
+  color: rgba(212, 238, 222, 0.38);
+  opacity: 1;
+  text-shadow:
+    0 1px 10px rgba(0, 0, 0, 0.42),
+    0 0 1px rgba(0, 0, 0, 0.35);
+  z-index: 2;
+}
+.dm-ai-report-headline-board .dm-ai-report-masthead-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.42rem;
+  margin-bottom: 0.35rem;
+}
+.dm-ai-report-headline-board .dm-ai-report-masthead-brand {
+  margin-bottom: 0;
+}
+.dm-ai-report-headline-board .dm-ai-report-masthead-brand,
+.dm-ai-report-headline-board .dm-ai-report-masthead-stack > .dm-ai-report-headline-row,
+.dm-ai-report-headline-board .dm-ai-report-masthead-streamer-line,
+.dm-ai-report-headline-board .dm-ai-report-masthead-generated-line,
+.dm-ai-report-headline-board .dm-ai-report-deck-rule {
+  z-index: 3;
+}
+.dm-ai-report-detail--daily .dm-ai-report-headline-board .dm-ai-report-masthead,
+.dm-ai-report-detail--weekly .dm-ai-report-headline-board .dm-ai-report-masthead {
+  border-bottom: none;
+}
+.dm-ai-report-headline-board .dm-ai-report-masthead-room {
+  font-family: "KaiTi", "STKaiti", "FangSong", "Songti SC", ui-serif, serif;
+  letter-spacing: 0.06em;
+  color: rgba(198, 218, 206, 0.72);
+  text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.35);
+}
+.dm-ai-report-headline-board .dm-ai-report-masthead-streamer-line,
+.dm-ai-report-headline-board .dm-ai-report-masthead-generated-line {
+  width: 100%;
+  text-align: center;
+  font-family: "KaiTi", "STKaiti", "FangSong", "Songti SC", ui-serif, serif;
+  letter-spacing: 0.05em;
+  color: rgba(200, 226, 210, 0.88);
+  text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.35);
+}
+.dm-ai-report-headline-board .dm-ai-report-masthead-streamer-line {
+  font-weight: 500;
+  font-size: clamp(0.84rem, 2.35vw, 1.06rem);
+  color: rgba(228, 246, 236, 0.94);
+}
+.dm-ai-report-headline-board .dm-ai-report-masthead-generated-line {
+  opacity: 0.82;
+  font-size: clamp(0.5rem, 1.35vw, 0.62rem);
+  padding-bottom: 1px;
+  border-bottom: 1px dashed rgba(236, 248, 238, 0.38);
+  display: inline-block;
+  width: auto;
+  max-width: 100%;
+}
+.dm-ai-report-headline-board .dm-ai-report-headline {
+  font-family: "KaiTi", "STKaiti", "FangSong", "Songti SC", ui-serif, serif;
+  font-weight: 400;
+  font-size: clamp(0.92rem, 2.55vw, 1.14rem);
+  letter-spacing: 0.07em;
+  color: rgba(246, 252, 246, 0.94);
+  text-shadow:
+    0 0 8px rgba(180, 220, 195, 0.18),
+    1px 1px 0 rgba(0, 0, 0, 0.42),
+    -0.5px -0.5px 0 rgba(255, 255, 255, 0.05);
+}
+.dm-ai-report-headline-board .dm-ai-report-title-avatar {
+  position: relative;
+  z-index: 3;
+  border-color: rgba(220, 236, 226, 0.42);
+  box-shadow:
+    0 3px 14px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.dm-ai-report-headline-board .dm-ai-report-pinboard-hint {
+  padding: 16px 12px 12px;
+  font-family: "KaiTi", "STKaiti", "FangSong", "Songti SC", ui-serif, serif;
+  letter-spacing: 0.06em;
+  color: rgba(212, 228, 218, 0.88);
+  text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.35);
+}
+.dm-ai-report-headline-board .dm-ai-report-deck-rule {
+  opacity: 0.75;
+  border-top-color: rgba(255, 255, 255, 0.16);
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+.dm-ai-report-pinboard-hint {
+  text-align: center;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.65rem;
+  font-weight: 400;
+  line-height: 1.45;
+}
+.dm-ai-report-pinboard-hero {
+  display: grid;
+  gap: 10px 12px;
+  align-items: start;
+  width: 100%;
+}
+.dm-ai-report-pinboard-hero--both {
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  grid-template-areas: "rail-l center rail-r";
+}
+.dm-ai-report-pinboard-hero--daily-only {
+  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-areas: "rail-l center";
+}
+.dm-ai-report-pinboard-hero--weekly-only {
+  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-areas: "center rail-r";
+}
+.dm-ai-report-pinboard-hero--center-only {
+  grid-template-columns: 1fr;
+  grid-template-areas: "center";
+}
+.dm-ai-report-pin-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.dm-ai-report-pin-rail--daily {
+  grid-area: rail-l;
+  justify-self: start;
+  align-items: flex-start;
+  padding-right: 0;
+}
+.dm-ai-report-pin-rail--weekly {
+  grid-area: rail-r;
+  justify-self: end;
+  align-items: flex-end;
+  padding-left: 0;
+}
+.dm-ai-report-pin-rail-heading {
+  margin: 0;
+  padding: 1px 0 3px;
+  width: auto;
+  flex-shrink: 0;
+  font-family: "KaiTi", "STKaiti", "FangSong", "Songti SC", ui-serif, serif;
+  font-size: 0.62rem;
+  font-weight: 650;
+  letter-spacing: 0.14em;
+  color: rgba(232, 246, 238, 0.93);
+  text-shadow:
+    0 0 6px rgba(180, 220, 195, 0.14),
+    1px 1px 0 rgba(0, 0, 0, 0.38);
+}
+.dm-ai-report-pin-rail-heading--daily {
+  text-align: left;
+  align-self: flex-start;
+}
+.dm-ai-report-pin-rail-heading--weekly {
+  text-align: right;
+  align-self: flex-end;
+}
+.dm-ai-report-pin-center {
+  grid-area: center;
+  min-width: 0;
+  align-self: stretch;
+}
+.dm-ai-report-chalk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 0 1px;
+  margin: 0;
+}
+.dm-ai-report-pin-rail--daily .dm-ai-report-chalk-list {
+  align-items: flex-start;
+}
+.dm-ai-report-pin-rail--weekly .dm-ai-report-chalk-list {
+  align-items: flex-end;
+}
+.dm-ai-report-pin-rail--weekly .dm-ai-report-chalk-item {
+  flex-direction: row-reverse;
+}
+.dm-ai-report-chalk-item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+  width: max-content;
+  max-width: 100%;
+  min-width: 0;
+}
+.dm-ai-report-pin-rail--daily .dm-ai-report-chalk-tab {
+  text-align: left;
+}
+.dm-ai-report-pin-rail--weekly .dm-ai-report-chalk-tab {
+  text-align: right;
+}
+.dm-ai-report-chalk-tab {
+  flex: 0 0 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 1px 1px 2px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+  font-family: "KaiTi", "STKaiti", "FangSong", "Songti SC", ui-serif, serif;
+  font-size: clamp(0.56rem, 1.28vw, 0.64rem);
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  line-height: 1.22;
+  color: rgba(232, 244, 236, 0.88);
+  text-shadow:
+    0 0 6px rgba(180, 220, 195, 0.12),
+    1px 1px 0 rgba(0, 0, 0, 0.36),
+    -0.5px -0.5px 0 rgba(255, 255, 255, 0.05);
+  transition: color 0.12s ease, text-shadow 0.12s ease;
+  white-space: nowrap;
+}
+.dm-ai-report-chalk-tab:hover {
+  color: rgba(252, 252, 248, 0.94);
+}
+.dm-ai-report-chalk-tab--active {
+  color: rgba(254, 252, 248, 0.98);
+  text-shadow:
+    0 0 9px rgba(215, 235, 205, 0.22),
+    1px 1px 0 rgba(0, 0, 0, 0.4),
+    -0.5px -0.5px 0 rgba(255, 255, 255, 0.07);
+}
+.dm-ai-report-chalk-del {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.05rem;
+  min-height: 1.05rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.08);
+  color: rgba(230, 238, 232, 0.52);
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.dm-ai-report-chalk-del:hover:not(:disabled) {
+  color: #fecaca;
+  background: rgba(248, 113, 113, 0.16);
+}
+.dm-ai-report-chalk-del svg {
+  width: 10px;
+  height: 10px;
+  display: block;
+}
+.dm-ai-report-chalk-del:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+.dm-ai-report-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--text) 9%, var(--border));
+  background:
+    radial-gradient(ellipse 110% 55% at 12% -8%, color-mix(in srgb, var(--primary) 10%, transparent), transparent 52%),
+    radial-gradient(ellipse 90% 40% at 100% 108%, color-mix(in srgb, #c4a574 10%, transparent), transparent 48%),
+    linear-gradient(
+      172deg,
+      color-mix(in srgb, #faf7ef 92%, var(--surface)) 0%,
+      color-mix(in srgb, var(--surface) 86%, #ebe6dc) 42%,
+      color-mix(in srgb, var(--bg) 78%, transparent) 100%
+    );
+  overflow: hidden;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 6px 18px rgba(0, 0, 0, 0.1);
+}
+.dm-ai-report-detail--daily {
+  border-top: 3px solid color-mix(in srgb, #7c3aed 62%, transparent);
+}
+.dm-ai-report-detail--weekly {
+  border-top: 3px solid color-mix(in srgb, #0284c7 62%, transparent);
+}
+.dm-ai-report-detail--daily .dm-ai-report-masthead {
+  border-bottom-color: color-mix(in srgb, #8b5cf6 22%, var(--border));
+  background: linear-gradient(
+    185deg,
+    color-mix(in srgb, #8b5cf6 10%, transparent) 0%,
+    transparent 65%
+  );
+}
+.dm-ai-report-detail--weekly .dm-ai-report-masthead {
+  border-bottom-color: color-mix(in srgb, #0ea5e9 22%, var(--border));
+  background: linear-gradient(
+    185deg,
+    color-mix(in srgb, #0ea5e9 10%, transparent) 0%,
+    transparent 65%
+  );
+}
+.dm-ai-report-detail--daily .dm-ai-report-title-avatar {
+  border-color: color-mix(in srgb, #8b5cf6 48%, var(--border));
+}
+.dm-ai-report-detail--weekly .dm-ai-report-title-avatar {
+  border-color: color-mix(in srgb, #0ea5e9 48%, var(--border));
+}
+.dm-ai-report-detail--daily .dm-ai-report-section {
+  border-left-color: color-mix(in srgb, #8b5cf6 52%, #948575);
+}
+.dm-ai-report-detail--weekly .dm-ai-report-section {
+  border-left-color: color-mix(in srgb, #0ea5e9 52%, #8a9aaa);
+}
+.dm-ai-report-article {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* UI 正文字族笔画偏细，避免宋体系在深色衬纸上显「假粗」 */
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    "Segoe UI Variable Text",
+    "Microsoft YaHei UI",
+    "PingFang SC",
+    sans-serif;
+  font-weight: 400;
+  font-synthesis: none;
+  background:
+    radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.06) 0%, transparent 42%),
+    radial-gradient(circle at 78% 65%, rgba(0, 0, 0, 0.06) 0%, transparent 38%),
+    linear-gradient(
+      168deg,
+      color-mix(in srgb, #78716c 28%, var(--surface)) 0%,
+      color-mix(in srgb, #57534e 18%, var(--surface)) 48%,
+      color-mix(in srgb, #44403c 14%, var(--surface)) 100%
+    );
+  box-shadow:
+    inset 0 2px 12px rgba(0, 0, 0, 0.14),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+}
+.dm-ai-report-article :where(strong, b) {
+  font-weight: 400;
+}
+.dm-ai-report-masthead {
+  position: relative;
+  flex-shrink: 0;
+  text-align: center;
+  padding: 0.68rem 0.85rem 0.55rem;
+  background: linear-gradient(
+    185deg,
+    color-mix(in srgb, #fff 14%, transparent) 0%,
+    transparent 72%
+  );
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 11%, var(--border));
+}
+.dm-ai-report-masthead-watermark {
+  position: absolute;
+  margin: 0;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+  font-family: "KaiTi", "STKaiti", "FangSong", "Songti SC", ui-serif, serif;
+  font-size: clamp(0.92rem, 2.65vw, 1.36rem);
+  font-weight: 300;
+  letter-spacing: 0.09em;
+  color: color-mix(in srgb, var(--text) 22%, transparent);
+  opacity: 0.16;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.06);
+  z-index: 2;
+}
+.dm-ai-report-masthead-brand,
+.dm-ai-report-headline-row,
+.dm-ai-report-byline,
+.dm-ai-report-deck-rule {
+  position: relative;
+  z-index: 3;
+}
+.dm-ai-report-masthead-brand {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.28rem;
+}
+.dm-ai-report-kicker {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.54rem;
+  font-weight: 400;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--muted) 60%, var(--text));
+}
+.dm-ai-report-kicker--daily {
+  color: color-mix(in srgb, #c4b5fd 72%, var(--text));
+}
+.dm-ai-report-kicker--weekly {
+  color: color-mix(in srgb, #7dd3fc 72%, var(--text));
+}
+.dm-ai-report-masthead-room {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.58rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+.dm-ai-report-headline-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.38rem;
+}
+.dm-ai-report-title-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center top;
+  border: 2px solid color-mix(in srgb, var(--primary) 38%, var(--border));
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.14);
+  flex-shrink: 0;
+  position: relative;
+  z-index: 3;
+}
+.dm-ai-report-headline {
+  margin: 0;
+  font-size: clamp(0.88rem, 2.2vw, 1.08rem);
+  font-weight: 400;
+  line-height: 1.32;
+  letter-spacing: 0.03em;
+  color: color-mix(in srgb, var(--text) 93%, #2a2520);
+}
+.dm-ai-report-headline--stacked {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  line-height: 1.22;
+}
+.dm-ai-report-headline-time {
+  font-size: clamp(0.76rem, 1.85vw, 0.88rem);
+  font-weight: 400;
+  letter-spacing: 0.03em;
+  color: color-mix(in srgb, var(--text) 72%, var(--muted));
+}
+.dm-ai-report-headline-room {
+  font-size: clamp(0.84rem, 2.35vw, 1.02rem);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+.dm-ai-report-byline {
+  margin-top: 0.32rem;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.35rem 0.65rem;
+  flex-wrap: wrap;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.58rem;
+  color: var(--muted);
+  font-weight: 400;
+}
+.dm-ai-report-byline-period {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-weight: 400;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: color-mix(in srgb, var(--primary) 82%, var(--text));
+}
+.dm-ai-report-byline-by { opacity: 0.85; }
+.dm-ai-report-deck-rule {
+  margin-top: 0.65rem;
+  height: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
+  border-bottom: 3px double color-mix(in srgb, var(--text) 18%, transparent);
+  opacity: 0.65;
+}
+.dm-ai-report-sheet {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  background: transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(72, 64, 56, 0.68) rgba(0, 0, 0, 0.1);
+}
+.dm-ai-report-sheet-inner {
+  max-width: 52rem;
+  margin: 0 auto;
+  padding: 0.65rem 0.72rem 0.85rem 0.82rem;
+  box-sizing: border-box;
+}
+.dm-ai-report-kind-hero {
+  text-align: center;
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", Georgia, "Times New Roman", serif;
+  font-size: clamp(1.38rem, 4.5vw, 1.88rem);
+  font-weight: 500;
+  letter-spacing: 0.48em;
+  text-indent: 0.48em;
+  margin: 0 0 0.58rem;
+  padding: 0.38rem 0.35rem 0.48rem;
+  line-height: 1.28;
+  color: color-mix(in srgb, var(--text) 88%, #2a2520);
+  border-bottom: 2px solid color-mix(in srgb, var(--text) 14%, transparent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--text) 5%, transparent),
+    transparent 85%
+  );
+}
+.dm-ai-report-kind-hero--daily {
+  color: color-mix(in srgb, #7c6bcf 46%, var(--text));
+  border-bottom-color: color-mix(in srgb, #7c6bcf 28%, var(--text));
+}
+.dm-ai-report-kind-hero--weekly {
+  color: color-mix(in srgb, #2ea3d6 48%, var(--text));
+  border-bottom-color: color-mix(in srgb, #2ea3d6 30%, var(--text));
+}
+.dm-ai-report-daily-overview-title {
+  margin: 0 0 0.42rem;
+  padding: 0;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  line-height: 1.35;
+  color: color-mix(in srgb, var(--text) 82%, #4a3728);
+}
+.dm-ai-report-daily-overview {
+  margin: 0 0 0.72rem;
+  padding: 0.52rem 0.62rem 0.58rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--text) 11%, transparent);
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--primary) 8%, transparent),
+    color-mix(in srgb, var(--text) 4%, transparent)
+  );
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.dm-ai-report-daily-overview-dl {
+  display: grid;
+  grid-template-columns: minmax(7rem, 30%) 1fr;
+  gap: 0.35rem 0.55rem;
+  margin: 0;
+  align-items: baseline;
+}
+.dm-ai-report-daily-overview-dt {
+  margin: 0;
+  font-size: 0.62rem;
+  font-weight: 400;
+  line-height: 1.42;
+  color: color-mix(in srgb, var(--muted) 92%, var(--text));
+}
+.dm-ai-report-daily-overview-label {
+  color: color-mix(in srgb, var(--text) 76%, var(--muted));
+}
+.dm-ai-report-daily-overview-hint {
+  font-size: 0.56rem;
+  color: var(--muted);
+  opacity: 0.92;
+}
+.dm-ai-report-daily-overview-dd {
+  margin: 0;
+  font-size: 0.71rem;
+  font-weight: 400;
+  line-height: 1.58;
+  letter-spacing: 0.015em;
+  color: color-mix(in srgb, var(--text) 94%, #2e2924);
+}
+.dm-ai-report-overview-footnote {
+  margin: 0.52rem 0 0;
+  padding-top: 0.42rem;
+  border-top: 1px dashed color-mix(in srgb, var(--text) 12%, transparent);
+  font-size: 0.56rem;
+  line-height: 1.52;
+  font-weight: 400;
+  color: var(--muted);
+}
+@media (max-width: 540px) {
+  .dm-ai-report-daily-overview-dl {
+    grid-template-columns: 1fr;
+    gap: 0.18rem 0;
+  }
+  .dm-ai-report-daily-overview-dd {
+    padding-left: 0.85rem;
+    margin-bottom: 0.42rem;
+    border-left: 2px solid color-mix(in srgb, var(--primary) 42%, transparent);
+  }
+  .dm-ai-report-daily-overview-dt + .dm-ai-report-daily-overview-dd {
+    margin-top: -0.08rem;
+  }
+}
+.dm-ai-report-sheet::-webkit-scrollbar {
+  width: 9px;
+}
+.dm-ai-report-sheet::-webkit-scrollbar-track {
+  margin: 6px 0;
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 100px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+    inset 0 1px 5px rgba(0, 0, 0, 0.14);
+}
+.dm-ai-report-sheet::-webkit-scrollbar-thumb {
+  border-radius: 100px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, #a8a29e 80%, #57534e),
+    color-mix(in srgb, #57534e 88%, #292524)
+  );
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+.dm-ai-report-sheet::-webkit-scrollbar-thumb:hover {
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, #d6d3d1 50%, #78716c),
+    color-mix(in srgb, #78716c 82%, #44403c)
+  );
+}
+.dm-ai-report-section {
+  margin: 0.58rem 0 0.32rem;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: color-mix(in srgb, var(--text) 84%, #4a3728);
+  padding: 0.15rem 0.55rem 0.28rem 0;
+  margin-left: 0;
+  text-indent: 0;
+  border-left: 2px solid color-mix(in srgb, var(--primary) 52%, #a89078);
+  border-bottom: none;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--primary) 7%, transparent),
+    transparent 72%
+  );
+}
+.dm-ai-report-section-line {
+  display: block;
+  margin: 0 0 0.22em;
+}
+.dm-ai-report-section-line:first-child {
+  text-indent: 2em;
+}
+.dm-ai-report-section-line:not(:first-child) {
+  padding-left: 2em;
+  text-indent: 0;
+}
+.dm-ai-report-section-line:last-child {
+  margin-bottom: 0;
+}
+.dm-ai-report-section:first-child {
+  margin-top: 0;
+}
+.dm-ai-report-p {
+  margin: 0 0 0.52rem;
+  padding-left: 0;
+  font-size: 0.74rem;
+  font-weight: 400;
+  line-height: 1.72;
+  letter-spacing: 0.02em;
+  text-align: justify;
+  text-justify: inter-ideograph;
+  color: color-mix(in srgb, var(--text) 92%, #3d3935);
+  break-inside: avoid;
+  orphans: 3;
+  widows: 3;
+  white-space: normal;
+}
+.dm-ai-report-p--flow {
+  text-indent: 2em;
+}
+.dm-ai-report-ul {
+  margin: 0 0 0.62rem;
+  padding: 0.42rem 0.55rem 0.42rem 2em;
+  list-style: none;
+  break-inside: avoid;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text) 7%, transparent);
+}
+.dm-ai-report-li {
+  position: relative;
+  margin: 0 0 0.22rem;
+  padding-left: calc(2em + 0.82rem);
+  text-indent: 0;
+  font-size: 0.72rem;
+  font-weight: 400;
+  line-height: 1.68;
+  letter-spacing: 0.025em;
+  text-align: justify;
+  text-justify: inter-ideograph;
+  color: color-mix(in srgb, var(--text) 92%, #2a2520);
+}
+.dm-ai-report-li::before {
+  content: "";
+  position: absolute;
+  left: 2em;
+  top: 0.62em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--primary) 55%, var(--muted));
+}
+.dm-ai-report-li:last-child {
+  margin-bottom: 0;
+}
+
+/* AI 日报：心态阅卷卡 + 最佳弹幕摘录 */
+.dm-ai-report-mentality-grade {
+  margin: 0.35rem 0 0.85rem;
+  break-inside: avoid;
+  font-family: inherit;
+}
+.dm-ai-report-grade-paper {
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #c45c26 35%, var(--border));
+  background: repeating-linear-gradient(
+    180deg,
+    color-mix(in srgb, #fff8f0 14%, var(--surface)) 0px,
+    color-mix(in srgb, #fff8f0 14%, var(--surface)) 22px,
+    color-mix(in srgb, #fde8d8 8%, var(--surface)) 22px,
+    color-mix(in srgb, #fde8d8 8%, var(--surface)) 23px
+  );
+  box-shadow: 0 2px 0 color-mix(in srgb, #c45c26 25%, transparent), inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+.dm-ai-report-grade-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.4rem 0.65rem;
+  background: color-mix(in srgb, #c45c26 16%, transparent);
+  border-bottom: 1px dashed color-mix(in srgb, #c45c26 45%, var(--border));
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+.dm-ai-report-grade-title {
+  font-size: 0.65rem;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  color: color-mix(in srgb, #9a3412 70%, var(--text));
+}
+.dm-ai-report-grade-range {
+  font-size: 0.56rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+.dm-ai-report-grade-body {
+  display: flex;
+  gap: 0.85rem;
+  padding: 0.65rem 0.75rem 0.75rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.dm-ai-report-score-ring {
+  flex-shrink: 0;
+  width: 4.5rem;
+  height: 4.5rem;
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 3px solid color-mix(in srgb, var(--border) 50%, #c45c26);
+  background: radial-gradient(circle at 32% 28%, #fff 0%, color-mix(in srgb, var(--surface) 90%, #fff) 55%, color-mix(in srgb, var(--surface) 70%, transparent) 100%);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+.dm-ai-report-score-ring[data-tier="high"] {
+  border-color: color-mix(in srgb, #16a34a 55%, var(--border));
+}
+.dm-ai-report-score-ring[data-tier="low"] {
+  border-color: color-mix(in srgb, #dc2626 55%, var(--border));
+}
+.dm-ai-report-score-ring[data-tier="mid"] {
+  border-color: color-mix(in srgb, #ca8a04 50%, var(--border));
+}
+.dm-ai-report-score-num {
+  font-size: 1.12rem;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  color: color-mix(in srgb, var(--text) 88%, #1c1917);
+}
+.dm-ai-report-score-unit {
+  font-size: 0.52rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+.dm-ai-report-grade-notes {
+  flex: 1;
+  min-width: 12rem;
+}
+.dm-ai-report-rubric-lines {
+  font-size: 0.68rem;
+  font-weight: 400;
+  line-height: 1.58;
+  color: color-mix(in srgb, var(--text) 92%, #292524);
+  white-space: pre-wrap;
+  padding: 0.35rem 0.45rem;
+  border-left: 3px solid color-mix(in srgb, #c45c26 55%, transparent);
+  background: color-mix(in srgb, #fff 6%, transparent);
+  margin-bottom: 0.5rem;
+}
+.dm-ai-report-best-wrap {
+  padding: 0.35rem 0.45rem;
+  border-radius: 8px;
+  border: 1px dashed color-mix(in srgb, var(--primary) 35%, var(--border));
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+}
+.dm-ai-report-best-label {
+  font-size: 0.56rem;
+  font-weight: 400;
+  letter-spacing: 0.05em;
+  color: color-mix(in srgb, var(--primary) 75%, var(--text));
+  margin-bottom: 0.25rem;
+}
+.dm-ai-report-best-quote {
+  margin: 0;
+  padding: 0.28rem 0 0;
+  font-family: inherit;
+  font-size: 0.72rem;
+  font-weight: 400;
+  font-style: normal;
+  line-height: 1.55;
+  color: var(--text);
+}
+.dm-ai-report-best-reason {
+  margin: 0.28rem 0 0;
+  font-size: 0.66rem;
+  font-weight: 400;
+  color: var(--muted);
+  line-height: 1.48;
+}
 
 /* Song panel tabs — pill style */
 .dm-song-tabs {
@@ -6841,10 +9571,91 @@ function hideUidTooltip() {
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
+/* 桌面端：填满主列可视高度，溢出时仅在内部滚动；手机不走此布局（沿用整页滚动等） */
+@media (min-width: 601px) {
+  .dm-panel {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: visible;
+  }
+  .dm-mode-content {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: visible;
+  }
+  .dm-feed-section {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: visible;
+  }
+  .dm-feed-embed-slot {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: visible;
+  }
+  .dm-feed-bench-root {
+    flex: 1 1 0;
+    min-height: 0;
+  }
+  .dm-feed-split {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .dm-danmaku-stack--fixed-h {
+    flex: 1 1 auto;
+    min-height: 0;
+    align-self: stretch;
+  }
+  .dm-danmaku-stack {
+    flex: 1;
+    min-height: 0;
+    align-self: stretch;
+    overflow: hidden;
+  }
+  .dm-feed.dm-feed--fills-stack {
+    flex: 1 1 0;
+    min-height: 0;
+    height: unset;
+    max-height: none;
+  }
+  .dm-trigger-section {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .dm-trigger-list {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  .dm-log-section {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .dm-log-list {
+    flex: 1 1 0;
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+  }
+}
+
 @media (max-width: 600px) {
-  .dm-panel { padding: 0.75rem 0.75rem 4rem; }
+  .dm-panel { padding: var(--dm-stack-gap) 0.72rem 4rem; }
   .dm-input { width: 100px; font-size: 0.8rem; font-family: inherit; }
-  .dm-feed { height: 300px; font-size: 0.72rem; }
+  .dm-feed:not(.dm-feed--fills-stack) {
+    height: 300px;
+    font-size: 0.72rem;
+  }
   .dm-tabs button {
     padding: 0.3rem 0.48rem;
     font-size: 0.7rem;
@@ -6853,6 +9664,45 @@ function hideUidTooltip() {
     text-overflow: ellipsis;
   }
   .dm-stats-panel { width: 96vw; max-width: 96vw; border-radius: 14px; }
+  .dm-ai-report-layout {
+    max-height: none;
+    padding: 0 0 0.75rem 0.72rem;
+  }
+  .dm-ai-report-headline-board {
+    margin: 4px 0 8px;
+    padding: 18px 10px 12px;
+  }
+  .dm-ai-report-pinboard-hero--both {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "center"
+      "rail-l"
+      "rail-r";
+  }
+  .dm-ai-report-pinboard-hero--daily-only {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "center"
+      "rail-l";
+  }
+  .dm-ai-report-pinboard-hero--weekly-only {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "center"
+      "rail-r";
+  }
+  .dm-ai-report-pin-rail--daily,
+  .dm-ai-report-pin-rail--weekly {
+    justify-self: center;
+  }
+  .dm-ai-report-pin-rail--daily .dm-ai-report-chalk-list {
+    padding-left: 0;
+    padding-right: 0.2rem;
+  }
+  .dm-ai-report-pin-rail--weekly .dm-ai-report-chalk-list {
+    padding-right: 0;
+    padding-left: 0.2rem;
+  }
   .dm-song-tabs { margin: 0.5rem 0.85rem 0.4rem; }
   .dm-song-toolbar { padding: 0.25rem 0.85rem 0.4rem; }
   .dm-room-card { flex-wrap: wrap; }

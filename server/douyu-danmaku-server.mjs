@@ -5,7 +5,7 @@
  * - Connects to Douyu danmaku server via raw TCP socket (multi-room)
  * - Implements Douyu STT (Serialized Text Transport) protocol
  * - Forwards danmaku to frontend via Server-Sent Events (SSE)
- * - Supports trigger+action configuration for #command style messages
+ * - Supports 「弹幕触发」(prefix/command) plus 「定时触发」(interval / daily / weekly / cron)
  * - Password protection for adding/removing rooms
  *
  * Port: 8791 (configurable via PORT env)
@@ -16,6 +16,8 @@ import net from "node:net";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { geminiEligibleForOpenAiCompatTextChat } from "./gemini-openai-compat-chat-filter.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8791;
@@ -520,23 +522,309 @@ function listRecordings(roomId) {
 
 const CONFIG_FILE = join(DATA_DIR, "triggers.json");
 const LOG_FILE = join(DATA_DIR, "action-log.json");
-
-function loadTriggers() {
-  try { if (existsSync(CONFIG_FILE)) return JSON.parse(readFileSync(CONFIG_FILE, "utf-8")); } catch { /* ignore */ }
-  return { triggers: [{ id: "default_cmd", pattern: "#", action: "log", enabled: true, description: "Capture all #command style danmaku and log the content after #" }] };
-}
+const SCHEDULE_STATE_FILE = join(DATA_DIR, "schedule-fire-state.json");
+/** AI 日报/周报持久化条目（与前端 AiAgentPanel / SSE ai-report 对齐） */
+const AI_REPORTS_FILE = join(DATA_DIR, "ai-reports.json");
 
 /** Available action types for triggers */
 const AVAILABLE_ACTIONS = [
   { id: "log", label: "展示" },
   { id: "song-request", label: "点歌" },
+  { id: "ai-daily-report", label: "日报" },
+  { id: "ai-weekly-report", label: "周报" },
 ];
+
+const TRIGGER_ACTION_IDS = new Set(["log", "song-request", "ai-daily-report", "ai-weekly-report"]);
+
 function saveTriggers(config) { writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8"); }
 function loadActionLog() { try { if (existsSync(LOG_FILE)) return JSON.parse(readFileSync(LOG_FILE, "utf-8")); } catch { /* ignore */ } return []; }
 function saveActionLog(log) { writeFileSync(LOG_FILE, JSON.stringify(log.slice(-500), null, 2), "utf-8"); }
 
-let triggerConfig = loadTriggers();
+function loadScheduleFireState() {
+  try {
+    if (existsSync(SCHEDULE_STATE_FILE)) return JSON.parse(readFileSync(SCHEDULE_STATE_FILE, "utf-8"));
+  } catch { /* ignore */ }
+  return {};
+}
+function saveScheduleFireState() {
+  try {
+    writeFileSync(SCHEDULE_STATE_FILE, JSON.stringify(scheduleFireState, null, 2), "utf-8");
+  } catch (e) {
+    console.warn("[danmaku] schedule state save failed:", e.message);
+  }
+}
+
+function readTriggersFile() {
+  try {
+    if (existsSync(CONFIG_FILE)) return JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+  } catch { /* ignore */ }
+  return {
+    triggers: [{
+      id: "default_cmd",
+      kind: "danmaku",
+      pattern: "#",
+      action: "log",
+      enabled: true,
+      description: "Capture all #command style danmaku and log the content after #",
+      roomIds: [],
+    }],
+  };
+}
+
+function normalizeSchedule(s) {
+  const d = s && typeof s === "object" ? { ...s } : {};
+  const mode = ["interval", "daily", "weekly", "cron"].includes(d.mode) ? d.mode : "interval";
+  d.mode = mode;
+  let intervalSec = Number(d.intervalSec);
+  if (!Number.isFinite(intervalSec)) intervalSec = 3600;
+  d.intervalSec = Math.min(Math.max(Math.floor(intervalSec), 30), 604800);
+  let hour = Number(d.hour);
+  if (!Number.isFinite(hour)) hour = 8;
+  d.hour = Math.min(23, Math.max(0, Math.floor(hour)));
+  let minute = Number(d.minute);
+  if (!Number.isFinite(minute)) minute = 0;
+  d.minute = Math.min(59, Math.max(0, Math.floor(minute)));
+  d.weekdays = Array.isArray(d.weekdays) && d.weekdays.length > 0
+    ? [...new Set(d.weekdays.map(Number).filter((x) => x >= 0 && x <= 6))]
+    : [0, 1, 2, 3, 4, 5, 6];
+  d.cron = typeof d.cron === "string" && d.cron.trim() ? d.cron.trim() : "0 8 * * *";
+  return d;
+}
+
+/** True when payload carries a schedule block (even if kind was omitted — avoids mis-classifying as danmaku and deleting schedule). */
+function triggerLooksScheduled(raw) {
+  const sch = raw && raw.schedule && typeof raw.schedule === "object" ? raw.schedule : null;
+  return !!(sch && typeof sch.mode === "string" && ["interval", "daily", "weekly", "cron"].includes(sch.mode));
+}
+
+function normalizeTrigger(raw) {
+  const t = { ...raw };
+  const explicitSchedule =
+    typeof t.kind === "string" && String(t.kind).toLowerCase() === "schedule";
+  t.kind = explicitSchedule || triggerLooksScheduled(raw) ? "schedule" : "danmaku";
+  if (t.kind === "danmaku") {
+    if (typeof t.pattern !== "string" || !t.pattern) t.pattern = "#";
+    delete t.schedule;
+    const pay = typeof raw.payload === "string" ? raw.payload : "";
+    const desc = typeof raw.description === "string" ? raw.description : "";
+    t.payload = String(pay).trim() !== "" ? pay : desc;
+    t.description = "";
+  } else {
+    t.pattern = "[定时]";
+    t.schedule = normalizeSchedule(t.schedule || raw.schedule);
+    t.payload = typeof t.payload === "string" ? t.payload : "";
+  }
+  if (!t.id || typeof t.id !== "string") t.id = `trigger_${Date.now()}`;
+  t.action = TRIGGER_ACTION_IDS.has(t.action) ? t.action : "log";
+  t.enabled = t.enabled !== false;
+  t.description = typeof t.description === "string" ? t.description : "";
+  t.roomIds = Array.isArray(t.roomIds) ? t.roomIds.map(String) : [];
+  return t;
+}
+
+function hydrateTriggerConfig(cfg) {
+  const triggers = Array.isArray(cfg.triggers) ? cfg.triggers.map((x) => normalizeTrigger(x)) : [];
+  return { triggers };
+}
+
+let triggerConfig = hydrateTriggerConfig(readTriggersFile());
 let actionLog = loadActionLog();
+/** @type {Record<string, { intervalLast?: number, lastSlot?: string }>} */
+let scheduleFireState = loadScheduleFireState();
+
+function localMinuteKey(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function fieldMatchesCron(spec, value) {
+  const s = String(spec).trim();
+  if (s === "*" || s === "?") return true;
+  if (s.includes("/")) {
+    const [base, stepStr] = s.split("/");
+    const step = Number(stepStr);
+    if (!Number.isFinite(step) || step <= 0) return false;
+    if (base === "*") return value % step === 0;
+    if (base.includes("-")) {
+      const [a, b] = base.split("-").map((x) => Number(String(x).trim()));
+      if (Number.isFinite(a) && Number.isFinite(b) && value >= a && value <= b) return (value - a) % step === 0;
+    }
+    return false;
+  }
+  for (const part of s.split(",")) {
+    const p = part.trim();
+    if (!p) continue;
+    if (p.includes("-")) {
+      const [a, b] = p.split("-").map((x) => Number(String(x).trim()));
+      if (Number.isFinite(a) && Number.isFinite(b) && value >= a && value <= b) return true;
+    } else {
+      const n = Number(p);
+      if (Number.isFinite(n) && n === value) return true;
+    }
+  }
+  return false;
+}
+
+function cronExpressionMatches(expr, date) {
+  const tokens = String(expr).trim().split(/\s+/).filter(Boolean);
+  if (tokens.length !== 5) return false;
+  const [minute, hour, dom, month, dow] = tokens;
+  const m = date.getMinutes();
+  const H = date.getHours();
+  const D = date.getDate();
+  const M = date.getMonth() + 1;
+  const w = date.getDay();
+  return fieldMatchesCron(minute, m)
+    && fieldMatchesCron(hour, H)
+    && fieldMatchesCron(dom, D)
+    && fieldMatchesCron(month, M)
+    && fieldMatchesCron(dow, w);
+}
+
+function shouldFireScheduledTrigger(t, nowDate, nowMs) {
+  const st = scheduleFireState[t.id] || {};
+  const s = t.schedule;
+  if (!s || typeof s !== "object") return false;
+
+  switch (s.mode) {
+    case "interval": {
+      const sec = s.intervalSec ?? 3600;
+      let last = st.intervalLast;
+      if (last == null) {
+        scheduleFireState[t.id] = { ...st, intervalLast: nowMs };
+        saveScheduleFireState();
+        return false;
+      }
+      return nowMs - last >= sec * 1000;
+    }
+    case "daily": {
+      const slot = localMinuteKey(nowDate);
+      if (nowDate.getHours() !== s.hour || nowDate.getMinutes() !== s.minute) return false;
+      return st.lastSlot !== slot;
+    }
+    case "weekly": {
+      const slot = localMinuteKey(nowDate);
+      const dow = nowDate.getDay();
+      const days = Array.isArray(s.weekdays) && s.weekdays.length > 0 ? s.weekdays : [0, 1, 2, 3, 4, 5, 6];
+      if (!days.includes(dow)) return false;
+      if (nowDate.getHours() !== s.hour || nowDate.getMinutes() !== s.minute) return false;
+      return st.lastSlot !== slot;
+    }
+    case "cron": {
+      if (!cronExpressionMatches(s.cron, nowDate)) return false;
+      return st.lastSlot !== localMinuteKey(nowDate);
+    }
+    default:
+      return false;
+  }
+}
+
+function markScheduleFired(t, nowDate, nowMs) {
+  const st = { ...(scheduleFireState[t.id] || {}) };
+  const s = t.schedule;
+  if (s.mode === "interval") {
+    st.intervalLast = nowMs;
+  } else {
+    st.lastSlot = localMinuteKey(nowDate);
+  }
+  scheduleFireState[t.id] = st;
+  saveScheduleFireState();
+}
+
+/** 定时 tick 与 normalizeTrigger 推断一致，避免仅有 schedule 字段但 kind 未写入时不触发 */
+function isScheduleTriggerNode(t) {
+  return !!(t && (t.kind === "schedule" || triggerLooksScheduled(t)));
+}
+
+function triggerActionLabelZh(action) {
+  switch (action) {
+    case "log":
+      return "仅记日志";
+    case "song-request":
+      return "点歌";
+    case "ai-daily-report":
+      return "AI 日报";
+    case "ai-weekly-report":
+      return "AI 周报";
+    default:
+      return String(action || "unknown");
+  }
+}
+
+function describeScheduleRule(t) {
+  const s = t?.schedule;
+  if (!s || typeof s !== "object") return "定时规则未知";
+  switch (s.mode) {
+    case "interval": {
+      const sec = Math.min(Math.max(Number(s.intervalSec) || 3600, 30), 604800);
+      if (sec % 86400 === 0) return `固定间隔已满 · 周期为每 ${sec / 86400} 天`;
+      if (sec % 3600 === 0) return `固定间隔已满 · 周期为每 ${sec / 3600} 小时`;
+      if (sec % 60 === 0) return `固定间隔已满 · 周期为每 ${sec / 60} 分钟`;
+      return `固定间隔已满 · 周期为每 ${sec} 秒`;
+    }
+    case "daily": {
+      const h = Math.min(23, Math.max(0, Math.floor(Number(s.hour) || 0)));
+      const m = Math.min(59, Math.max(0, Math.floor(Number(s.minute) || 0)));
+      return `每日时刻已到 · ${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    }
+    case "weekly": {
+      const h = Math.min(23, Math.max(0, Math.floor(Number(s.hour) || 0)));
+      const m = Math.min(59, Math.max(0, Math.floor(Number(s.minute) || 0)));
+      const names = ["日", "一", "二", "三", "四", "五", "六"];
+      const days = Array.isArray(s.weekdays) && s.weekdays.length > 0
+        ? [...new Set(s.weekdays.map(Number).filter((x) => x >= 0 && x <= 6))].sort((a, b) => a - b)
+        : [0, 1, 2, 3, 4, 5, 6];
+      const dayStr = days.map((d) => names[d] ?? d).join("、");
+      return `每周指定日及时刻已到 · 周${dayStr} · ${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    }
+    case "cron":
+      return `Cron 规则匹配 · ${typeof s.cron === "string" && s.cron.trim() ? s.cron.trim() : "未配置"}`;
+    default:
+      return "定时条件已满足";
+  }
+}
+
+/**
+ * 一行说明：哪个触发器、满足什么条件、执行了什么动作（及结果要点）
+ * @param {"danmaku"|"schedule"|"web"} source
+ */
+function buildTriggerLogSummary({ trigger, source, pattern, plainContent, nickname, roomId }) {
+  const id = trigger?.id || "?";
+  const actionLb = triggerActionLabelZh(trigger?.action);
+  const memo = typeof trigger?.payload === "string" ? trigger.payload.trim() : "";
+  const memoFrag = memo ? ` · 触发器备注「${memo.length > 120 ? `${memo.slice(0, 120)}…` : memo}」` : "";
+
+  if (source === "schedule") {
+    const rule = describeScheduleRule(trigger);
+    const roomHint = roomId
+      ? `目标房间 ${roomId}`
+      : "当前无已连接房间（仅记录日志，未向房间派发动作）";
+    const pay = plainContent != null ? String(plainContent).trim() : "";
+    let detail = "";
+    if (trigger.action === "song-request") {
+      detail = pay
+        ? `将解析说明为点歌载荷「${pay}」并尝试落库`
+        : "动作「点歌」需要填写说明（歌名、歌手等）；本次为空，已跳过写入点歌记录";
+    } else if (trigger.action === "log") {
+      detail = pay
+        ? `日志内容「${pay}」`
+        : "无附加说明，仅记录触发事件";
+    } else {
+      detail = `已排队执行「${actionLb}」（后台异步，失败时见服务端 [ai-report] 日志）`;
+    }
+    return `[定时触发] 触发器「${id}」· ${rule} · ${roomHint} · 动作：${actionLb} · ${detail}${memoFrag}`;
+  }
+
+  if (source === "web") {
+    const nick = nickname || "访客";
+    const ct = plainContent != null && String(plainContent).trim() ? String(plainContent).trim() : "(空)";
+    return `[弹幕采集] 触发器「${id}」· 匹配前缀「${pattern}」· 动作：${actionLb} · ${nick}: ${ct}${memoFrag}`;
+  }
+
+  const nick = nickname || "观众";
+  const ct = plainContent != null && String(plainContent).trim() ? String(plainContent).trim() : "(空)";
+  return `[弹幕] 触发器「${id}」· 匹配前缀「${pattern}」· 动作：${actionLb} · ${nick}: ${ct}${memoFrag}`;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Song request tracking — per-room persistent data                  */
@@ -731,6 +1019,1006 @@ function getRecentDanmaku(roomId, limit = 100) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  AI 导出：按时间范围汇总录制弹幕 + 归档礼物                          */
+/* ------------------------------------------------------------------ */
+
+function startOfLocalDayMs(ts) {
+  const x = new Date(ts);
+  x.setHours(0, 0, 0, 0);
+  return x.getTime();
+}
+
+/** @returns {{ startTs: number, endTs: number } | null} */
+function parseLocalDayBounds(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd).trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  const startTs = new Date(y, mo, d, 0, 0, 0, 0).getTime();
+  if (Number.isNaN(startTs)) return null;
+  const chk = new Date(startTs);
+  if (chk.getFullYear() !== y || chk.getMonth() !== mo || chk.getDate() !== d) return null;
+  const endTs = startTs + 86400000 - 1;
+  return { startTs, endTs };
+}
+
+function mondayStartMsContaining(ts) {
+  const sod = startOfLocalDayMs(ts);
+  const dt = new Date(sod);
+  const dow = dt.getDay();
+  const deltaDays = dow === 0 ? -6 : 1 - dow;
+  dt.setDate(dt.getDate() + deltaDays);
+  return startOfLocalDayMs(dt.getTime());
+}
+
+function fmtLocalYmd(ts) {
+  const x = new Date(ts);
+  const y = x.getFullYear();
+  const mo = String(x.getMonth() + 1).padStart(2, "0");
+  const d = String(x.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${d}`;
+}
+
+/** 本地日历星期简称（与前端日报便签一致：getDay() 0=周日） */
+function weekdayCnLocal(ts) {
+  const names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  return names[new Date(ts).getDay()];
+}
+
+/** 时间窗内归档 chatmsg 条数；独立观众数优先按 uid，无 uid 时按昵称 nn 降级去重（弱唯一） */
+function computeDanmakuStatsInRange(roomId, startTs, endTs) {
+  const roomDir = join(RECORD_DIR, String(roomId));
+  if (!existsSync(roomDir)) return { total: 0, uniqueUsers: 0 };
+  const files = readdirSync(roomDir).filter((f) => f.endsWith(".jsonl")).sort();
+  let total = 0;
+  const identities = new Set();
+  for (const f of files) {
+    let content;
+    try {
+      content = readFileSync(join(roomDir, f), "utf-8");
+    } catch {
+      continue;
+    }
+    for (const line of content.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      let obj;
+      try {
+        obj = JSON.parse(t);
+      } catch {
+        continue;
+      }
+      if (obj.type !== "chatmsg") continue;
+      const ts = Number(obj.ts) || 0;
+      if (ts < startTs || ts > endTs) continue;
+      total++;
+      const uid = String(obj.uid ?? "").trim();
+      const nn = String(obj.nn ?? "").trim();
+      let key = uid;
+      if (!key && nn) key = `nn:${nn}`;
+      if (key) identities.add(key);
+    }
+  }
+  return { total, uniqueUsers: identities.size };
+}
+
+/** 日报/周报去重槽：直播间号 + 覆盖的日历跨度（与导出区间 start/end 对齐） */
+function buildAiReportPeriodKey(roomId, kind, startTs, endTs) {
+  const rid = String(roomId);
+  if (kind === "daily") {
+    return `daily:${rid}:${fmtLocalYmd(startTs)}`;
+  }
+  if (kind === "weekly") {
+    return `weekly:${rid}:${fmtLocalYmd(startTs)}_${fmtLocalYmd(endTs)}`;
+  }
+  return `${kind}:${rid}:${fmtLocalYmd(startTs)}_${fmtLocalYmd(endTs)}`;
+}
+
+/**
+ * 同一槽位重复生成时：隐藏旧条目（保留 JSON），返回需推送 SSE 删除事件的条目。
+ * - 优先匹配 periodKey；
+ * - 无 periodKey 的旧数据：仅当 periodLabel 与当前跨度文案完全一致时视为同槽（兼容升级前记录）。
+ * @returns {{ roomId: string, entryId: string }[]}
+ */
+function hidePriorAiReportsForSameSlot(roomId, kind, periodKey, periodLabelSpan) {
+  const rid = String(roomId);
+  const label = periodLabelSpan != null ? String(periodLabelSpan) : "";
+  const store = loadAiReportsStore();
+  const removed = [];
+  let changed = false;
+  for (const e of store.entries) {
+    if (String(e.roomId) !== rid || e.kind !== kind || e.hidden) continue;
+    const byKey = e.periodKey === periodKey;
+    const byLegacy = !e.periodKey && label && String(e.periodLabel || "") === label;
+    if (byKey || byLegacy) {
+      e.hidden = true;
+      changed = true;
+      removed.push({ roomId: rid, entryId: String(e.id) });
+    }
+  }
+  if (changed) {
+    try {
+      saveAiReportsStore(store);
+    } catch (err) {
+      console.error("[ai-reports] bulk hide save failed:", err);
+      return [];
+    }
+  }
+  return removed;
+}
+
+/**
+ * @param {string} preset today | 24h | yesterday | prev_calendar_day | 7days | prev_calendar_week | rolling_week | day:YYYY-MM-DD | week:YYYY-MM-DD
+ * @returns {{ startTs: number, endTs: number, label: string } | null}
+ */
+function resolveAiExportRange(preset) {
+  const key = String(preset || "").trim();
+  if (key.startsWith("day:")) {
+    const ymd = key.slice(4).trim();
+    const b = parseLocalDayBounds(ymd);
+    if (!b) return null;
+    return { startTs: b.startTs, endTs: b.endTs, label: `指定日 ${ymd}` };
+  }
+  if (key.startsWith("week:")) {
+    const ymd = key.slice(5).trim();
+    const b = parseLocalDayBounds(ymd);
+    if (!b) return null;
+    const monday = mondayStartMsContaining(b.startTs);
+    const sundayEnd = monday + 7 * 86400000 - 1;
+    return {
+      startTs: monday,
+      endTs: sundayEnd,
+      label: `指定周（周一至周日）${fmtLocalYmd(monday)}～${fmtLocalYmd(sundayEnd)}`,
+    };
+  }
+  const now = Date.now();
+  const sod = startOfLocalDayMs(now);
+  switch (key) {
+    case "today":
+      return { startTs: sod, endTs: now, label: "今日" };
+    case "24h":
+      return { startTs: now - 86400000, endTs: now, label: "过去24小时" };
+    case "yesterday": {
+      const yStart = sod - 86400000;
+      const yEnd = sod - 1;
+      return { startTs: yStart, endTs: yEnd, label: "昨天" };
+    }
+    /** 日报：上一个自然日 [00:00, 24:00)（本地），便签仅显示该日 YYYY-MM-DD */
+    case "prev_calendar_day": {
+      const yStart = sod - 86400000;
+      const yEnd = sod - 1;
+      return { startTs: yStart, endTs: yEnd, label: fmtLocalYmd(yStart) };
+    }
+    case "7days":
+      return { startTs: now - 7 * 86400000, endTs: now, label: "近7天" };
+    /** 周报：上一个完整自然周（周一至周日，本地），便签显示起止日期 */
+    case "prev_calendar_week": {
+      const curMon = mondayStartMsContaining(now);
+      const prevMonStart = curMon - 7 * 86400000;
+      const prevSunEnd = prevMonStart + 7 * 86400000 - 1;
+      return {
+        startTs: prevMonStart,
+        endTs: prevSunEnd,
+        label: `${fmtLocalYmd(prevMonStart)}～${fmtLocalYmd(prevSunEnd)}`,
+      };
+    }
+    case "rolling_week":
+      return { startTs: sod - 6 * 86400000, endTs: now, label: "近一周（含今天，自6天前0点）" };
+    default:
+      return { startTs: sod, endTs: now, label: "今日" };
+  }
+}
+
+/**
+ * 从录制 jsonl 中收集 [startTs,endTs] 内的 chatmsg，最多保留最近 maxLines 条（按时间）。
+ * @returns {{ lines: string[], totalMatched: number, truncated: boolean }}
+ */
+function collectDanmakuLinesInRange(roomId, startTs, endTs, maxLines) {
+  const roomDir = join(RECORD_DIR, String(roomId));
+  if (!existsSync(roomDir)) return { lines: [], totalMatched: 0, truncated: false };
+  const files = readdirSync(roomDir).filter((f) => f.endsWith(".jsonl")).sort();
+  const bucket = [];
+  for (const f of files) {
+    let content;
+    try {
+      content = readFileSync(join(roomDir, f), "utf-8");
+    } catch {
+      continue;
+    }
+    for (const line of content.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      let obj;
+      try {
+        obj = JSON.parse(t);
+      } catch {
+        continue;
+      }
+      if (obj.type !== "chatmsg") continue;
+      const ts = Number(obj.ts) || 0;
+      if (ts < startTs || ts > endTs) continue;
+      bucket.push({ ts, obj });
+    }
+  }
+  bucket.sort((a, b) => a.ts - b.ts);
+  const totalMatched = bucket.length;
+  let truncated = false;
+  if (bucket.length > maxLines) {
+    truncated = true;
+    bucket.splice(0, bucket.length - maxLines);
+  }
+  const lines = bucket.map(({ obj }) => {
+    const d = new Date(obj.ts);
+    const time = d.toLocaleString("zh-CN", { hour12: false });
+    return `[${time}] ${obj.nn || "?"}: ${obj.txt || ""}`;
+  });
+  return { lines, totalMatched, truncated };
+}
+
+/**
+ * @returns {{ lines: string[], totalMatched: number, truncated: boolean }}
+ */
+function collectGiftLinesInRange(roomId, startTs, endTs, maxLines) {
+  migrateOldGiftFile(roomId);
+  const index = loadGiftIndex(roomId);
+  const bucket = [];
+  for (let i = 0; i < index.fileCount; i++) {
+    const chunk = loadJsonFile(giftChunkPath(roomId, i), []);
+    for (const g of chunk) {
+      const ts = g.ts || 0;
+      if (ts < startTs || ts > endTs) continue;
+      bucket.push({ ts, g });
+    }
+  }
+  bucket.sort((a, b) => a.ts - b.ts);
+  const totalMatched = bucket.length;
+  let truncated = false;
+  if (bucket.length > maxLines) {
+    truncated = true;
+    bucket.splice(0, bucket.length - maxLines);
+  }
+  const lines = bucket.map(({ g }) => {
+    const d = new Date(g.ts);
+    const time = d.toLocaleString("zh-CN", { hour12: false });
+    const name = g.gfn || g.gfid || "?";
+    const n = giftPiecesFromStoredRecord(g);
+    return `[${time}] ${g.nn || "匿名"} 赠送 ${name} ×${n}`;
+  });
+  return { lines, totalMatched, truncated };
+}
+
+/**
+ * 统计时间窗内礼物：按 gfid / 用户聚合（与 collectGiftLinesInRange 同源数据）。
+ * @returns {{ totalPieces: number, byGift: Record<string, { count: number, name: string }>, byUser: Record<string, { nn: string, count: number, gifts: Record<string, number> }> }}
+ */
+function aggregateGiftsInTimeRange(roomId, startTs, endTs) {
+  migrateOldGiftFile(roomId);
+  const index = loadGiftIndex(roomId);
+  /** @type {Record<string, { count: number, name: string }>} */
+  const byGift = {};
+  /** @type {Record<string, { nn: string, count: number, gifts: Record<string, number> }>} */
+  const byUser = {};
+  let totalPieces = 0;
+  for (let i = 0; i < index.fileCount; i++) {
+    const chunk = loadJsonFile(giftChunkPath(roomId, i), []);
+    for (const g of chunk) {
+      const ts = g.ts || 0;
+      if (ts < startTs || ts > endTs) continue;
+      const gfid = String(g.gfid ?? "0");
+      const amt = giftPiecesFromStoredRecord(g);
+      totalPieces += amt;
+      if (!byGift[gfid]) byGift[gfid] = { count: 0, name: "" };
+      byGift[gfid].count += amt;
+      const gfn = g.gfn || "";
+      if (gfn) byGift[gfid].name = gfn;
+      const uid = String(g.uid || "anon");
+      if (!byUser[uid]) byUser[uid] = { nn: g.nn || "", count: 0, gifts: {} };
+      if (g.nn) byUser[uid].nn = g.nn;
+      byUser[uid].count += amt;
+      byUser[uid].gifts[gfid] = (byUser[uid].gifts[gfid] || 0) + amt;
+    }
+  }
+  return { totalPieces, byGift, byUser };
+}
+
+/** 日报数据概览：礼物金额拆分（catalog 已在 fetchGiftListPayload 中换算为「元」）
+ * - 收入：isPaid 礼物的「主播侧分成价」value × 件数
+ * - 付费数：同批礼物的「观众标价」cost × 件数；cost 为 0 时退回用 value（与旧版口径兼容）
+ * - 付费人数：上述观众支出估算 > 0 的去重送礼 uid 数
+ */
+function computeGiftFinancialStats(roomId, startTs, endTs, catalogMap) {
+  const { byGift, byUser } = aggregateGiftsInTimeRange(roomId, startTs, endTs);
+  let streamerIncomeYuan = 0;
+  let audiencePaidYuan = 0;
+  for (const [gfid, v] of Object.entries(byGift)) {
+    const meta = catalogMap && catalogMap[gfid];
+    if (!meta || meta.isPaid !== true) continue;
+    const costPiece = Number(meta.cost) || 0;
+    const valPiece = Number(meta.value) || 0;
+    if (valPiece > 0) streamerIncomeYuan += valPiece * v.count;
+    const spendPiece = costPiece > 0 ? costPiece : valPiece;
+    if (spendPiece > 0) audiencePaidYuan += spendPiece * v.count;
+  }
+  let paidUserCount = 0;
+  for (const u of Object.values(byUser)) {
+    let uvSpend = 0;
+    for (const [gfid, c] of Object.entries(u.gifts)) {
+      const meta = catalogMap && catalogMap[gfid];
+      if (!meta || meta.isPaid !== true) continue;
+      const costPiece = Number(meta.cost) || 0;
+      const valPiece = Number(meta.value) || 0;
+      const spendPiece = costPiece > 0 ? costPiece : valPiece;
+      if (spendPiece > 0) uvSpend += spendPiece * c;
+    }
+    if (uvSpend > 0) paidUserCount++;
+  }
+  return {
+    giftSenderCount: Object.keys(byUser).length,
+    paidUserCount,
+    streamerIncomeApproxYuan: streamerIncomeYuan,
+    audiencePaidApproxYuan: audiencePaidYuan,
+  };
+}
+
+/**
+ * 生成供给 AI 的「礼物排行 / 付费维度 / 图标对照」文本（本地归档 + 礼物 catalog，非抓取第三方排行站）。
+ * @param {Record<string, { name?: string, icon?: string, value?: number, isPaid?: boolean }>|null} catalogMap fetchGiftListPayload().gifts
+ */
+function formatGiftRankDigestForAi(roomId, startTs, endTs, catalogMap) {
+  const { totalPieces, byGift, byUser } = aggregateGiftsInTimeRange(roomId, startTs, endTs);
+  const lines = [];
+  lines.push(
+    "说明：以下均来自本服务对该房间的礼物归档与斗鱼礼物配置缓存；不等同斗鱼官方榜单或第三方直播间排行站点（如「在看直播」类数据站）的实时口径，请勿写成官方结算或外链抓取结果。",
+  );
+  if (totalPieces === 0) {
+    lines.push("");
+    lines.push("（统计窗口内无礼物归档记录；礼物需在房间连接期间由服务器存档。）");
+    return lines.join("\n");
+  }
+
+  let paidPieceApprox = 0;
+  let otherPieceApprox = 0;
+  for (const [gfid, v] of Object.entries(byGift)) {
+    const meta = catalogMap && catalogMap[gfid];
+    const amt = v.count;
+    if (meta && meta.isPaid === true) paidPieceApprox += amt;
+    else otherPieceApprox += amt;
+  }
+  lines.push("");
+  lines.push(
+    `窗口内礼物件数合计：${totalPieces}（件数 = 各次赠送数量之和）。其中 catalog 标为「有主播收益」的礼物约 ${paidPieceApprox} 件；其余或未命中 catalog 约 ${otherPieceApprox} 件（仅供参考）。`,
+  );
+
+  lines.push("");
+  lines.push("【按礼物类型 · 送出件数 Top 12】💰= catalog 判定有主播收益；🆓= 无收益或未命中；❔= 无 catalog");
+
+  const giftRows = Object.entries(byGift).map(([gfid, v]) => {
+    const meta = catalogMap && catalogMap[gfid];
+    const name = (v.name || meta?.name || gfid).trim() || gfid;
+    let tag = "❔";
+    if (meta) tag = meta.isPaid ? "💰" : "🆓";
+    const valPiece = Number(meta?.value) || 0;
+    const estStreamerYuan = meta && meta.isPaid && valPiece > 0 ? valPiece * v.count : 0;
+    const iconHint = meta && meta.icon ? "有图标URL" : "无图标";
+    return { gfid, name, count: v.count, tag, estStreamerYuan, iconHint };
+  });
+  giftRows.sort((a, b) => b.count - a.count);
+  giftRows.slice(0, 12).forEach((r, i) => {
+    const valPart = r.estStreamerYuan > 0 ? `；按单件 contribution/10 估算主播侧约 ${r.estStreamerYuan.toFixed(1)} 元` : "";
+    lines.push(`${i + 1}. ${r.tag} ${r.name}（gfid=${r.gfid}，${r.iconHint}）×${r.count} 件${valPart}`);
+  });
+
+  lines.push("");
+  lines.push("【送礼用户 · 件数 Top 10】");
+  const userRows = Object.entries(byUser).map(([uid, u]) => ({ uid, nn: u.nn, count: u.count, gifts: u.gifts }));
+  userRows.sort((a, b) => b.count - a.count);
+  userRows.slice(0, 10).forEach((u, i) => {
+    const topGifts = Object.entries(u.gifts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([gfid, c]) => {
+        const nm = (byGift[gfid]?.name || (catalogMap && catalogMap[gfid]?.name) || gfid).trim();
+        return `${nm}×${c}`;
+      })
+      .join("；");
+    lines.push(`${i + 1}. ${u.nn || "?"}（uid=${u.uid}）合计 ${u.count} 件；偏多：${topGifts || "—"}`);
+  });
+
+  lines.push("");
+  lines.push("【送礼用户 · 有收益礼物估算价值 Top 8】（单件 value×件数；缺 catalog 或未标有收益不计入）");
+  /** @type {Record<string, { nn: string, val: number }>} */
+  const userVal = {};
+  for (const [uid, u] of Object.entries(byUser)) {
+    let tv = 0;
+    for (const [gfid, c] of Object.entries(u.gifts)) {
+      const meta = catalogMap && catalogMap[gfid];
+      const valPiece = Number(meta?.value) || 0;
+      if (meta && meta.isPaid && valPiece > 0) tv += valPiece * c;
+    }
+    if (tv > 0) userVal[uid] = { nn: u.nn || "", val: tv };
+  }
+  const valRows = Object.entries(userVal)
+    .map(([uid, v]) => ({ uid, ...v }))
+    .sort((a, b) => b.val - a.val);
+  if (valRows.length === 0) {
+    lines.push("（无可用估算：可能未拉到礼物 catalog 或窗口内多为无收益礼。）");
+  } else {
+    valRows.slice(0, 8).forEach((r, i) => {
+      lines.push(`${i + 1}. ${r.nn || "?"}（uid=${r.uid}）估算主播收益约 ${r.val.toFixed(1)} 元`);
+    });
+  }
+
+  lines.push("");
+  lines.push(
+    "【写作提示】请在日报/周报中用独立小节做「礼物排行与类型解读」：结合上表名次，说明高频礼物的辨识度（名称/是否常出现带图标的礼物）、💰与🆓的大致格局，并可类比普通「直播间礼物贡献榜」的阅读方式——但不得编造未出现在摘要中的排名，不得声称数据来自特定第三方网站。",
+  );
+
+  return lines.join("\n");
+}
+
+/* ------------------------------------------------------------------ */
+/*  AI export bundle + 触发器：日报 / 周报（调用本机 ai-agent-server）    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 触发器日报/周报的 modelId 与 ai-agent-server /chat 一致。
+ * 未设置 FMZ_TRIGGER_AI_MODEL 时，运行时从 GET /models 拉取当前已配置密钥的全部模型并按顺序降级；显式指定时仅使用该列表顺序。
+ */
+
+/**
+ * 弹幕服务调用 ai-agent-server 的内网基址（不含尾斜杠）。
+ * 默认 http://127.0.0.1:8792（与 server/ai-agent-server.mjs、Vite /__fmz_ai_agent 代理一致）。
+ * 部署分离时可设置 AI_AGENT_INTERNAL_URL；若仅改端口也可设 AI_AGENT_PORT 统一默认主机端口。
+ */
+const AI_AGENT_INTERNAL_PORT = parseInt(String(process.env.AI_AGENT_PORT || "8792"), 10);
+const AI_AGENT_INTERNAL_URL = String(
+  process.env.AI_AGENT_INTERNAL_URL
+    || `http://127.0.0.1:${Number.isFinite(AI_AGENT_INTERNAL_PORT) ? AI_AGENT_INTERNAL_PORT : 8792}`,
+).replace(/\/+$/, "");
+
+function parseExplicitTriggerAiModelIdsFromEnv() {
+  const raw = process.env.FMZ_TRIGGER_AI_MODEL?.trim();
+  if (!raw) return null;
+  return raw.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+const FALLBACK_AI_MODEL_IDS_WHEN_AGENT_LIST_EMPTY = [
+  "gemini-2.5-flash",
+  "gemini-flash-latest",
+  "gemini-2.5-flash-lite",
+  "gemini-2.0-flash-lite",
+  "gemini-2.0-flash",
+];
+
+/** 剔除 Google 列出但仅以 AUDIO/TTS 为输出模态的 Gemini，避免周报等文本任务先试到不可用的模型 */
+function coerceAiTriggerCandidateModelIds(ids) {
+  const list = [...ids];
+  const filtered = list.filter(geminiEligibleForOpenAiCompatTextChat);
+  return filtered.length > 0 ? filtered : [...FALLBACK_AI_MODEL_IDS_WHEN_AGENT_LIST_EMPTY];
+}
+
+let aiAgentListedModelIdsCache = { ids: [], fetchedAt: 0 };
+const AI_AGENT_MODEL_IDS_CACHE_TTL_MS = 120_000;
+
+async function fetchAiAgentListedModelIdsFresh() {
+  const res = await fetch(`${AI_AGENT_INTERNAL_URL}/models`, {
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) return [];
+  let j;
+  try {
+    j = JSON.parse(await res.text());
+  } catch {
+    return [];
+  }
+  const rows = Array.isArray(j.models) ? j.models : [];
+  return rows.map((m) => String(m?.id ?? "").trim()).filter(Boolean);
+}
+
+async function resolveAiAgentTriggerModelCandidates() {
+  const explicit = parseExplicitTriggerAiModelIdsFromEnv();
+  if (explicit?.length) return explicit;
+
+  const now = Date.now();
+  const { ids: cachedIds, fetchedAt } = aiAgentListedModelIdsCache;
+  if (cachedIds.length > 0 && now - fetchedAt < AI_AGENT_MODEL_IDS_CACHE_TTL_MS) {
+    return coerceAiTriggerCandidateModelIds(cachedIds);
+  }
+
+  try {
+    const ids = await fetchAiAgentListedModelIdsFresh();
+    if (ids.length) {
+      const coerced = coerceAiTriggerCandidateModelIds(ids);
+      aiAgentListedModelIdsCache = { ids: coerced, fetchedAt: now };
+      return coerced;
+    }
+  } catch {
+    /* 使用缓存或内置 */
+  }
+
+  return cachedIds.length ? coerceAiTriggerCandidateModelIds(cachedIds) : [...FALLBACK_AI_MODEL_IDS_WHEN_AGENT_LIST_EMPTY];
+}
+
+function chatAiAgentInternalUrlHint() {
+  return `当前 AI_AGENT_INTERNAL_URL=${AI_AGENT_INTERNAL_URL}（可通过环境变量 AI_AGENT_INTERNAL_URL 或 AI_AGENT_PORT 覆盖）；请确认已启动 ai-agent-server（npm run ai-agent-server 或 npm run dev:all）。`;
+}
+
+function isAiAgentUnreachableMessage(msg) {
+  const s = String(msg);
+  return (
+    /\bECONNREFUSED\b/i.test(s)
+    || /fetch failed/i.test(s)
+    || /ENOTFOUND/i.test(s)
+    || /\bUND_ERR_CONNECT_TIMEOUT\b/i.test(s)
+    || /AI agent HTTP/i.test(s)
+  );
+}
+
+function isGeminiQuotaOrRateLimitError(msg) {
+  const s = String(msg);
+  return (
+    /\b429\b/.test(s)
+    || /quota/i.test(s)
+    || /RESOURCE_EXHAUSTED/i.test(s)
+    || /rate\s*limit/i.test(s)
+    || /limit:\s*0/i.test(s)
+  );
+}
+
+/** 当前模型不可用（配额/上游/瞬时故障等）时换下一候选，不限于单一厂商 */
+function isRecoverableAiUpstreamModelError(msg) {
+  const s = String(msg);
+  if (isGeminiQuotaOrRateLimitError(s)) return true;
+  if (/AI agent HTTP (400|401|402|403|404|408|409|413|421|422|423|425|426|427|428|429|500|502|503|504|522|524)\b/i.test(s)) {
+    // 400：多为「模型不接受文本 modality」（如 Gemini TTS 专用），可换下一个候选；排除明显客户端错误短语
+    if (/\b400\b/.test(s) && /\bMISSING\b|invalid\s+json|missing\s+model/i.test(s)) return false;
+    return true;
+  }
+  if (/Upstream error\s*\(\s*(400|404|408|409|413|429|5\d\d)\s*\)/i.test(s)) return true;
+  if (
+    /no\s+longer\s+available|not available|invalid[_ ]?model|model[_ ]not[_ ]found|does not exist|insufficient[_ ]quota|billing|capacity|overload|timed?\s*out|temporar(il)?y unavailable/i.test(
+      s,
+    )
+  ) {
+    return true;
+  }
+  if (/ECONNRESET|ETIMEDOUT|ECONNABORTED|fetch failed|UND_ERR_CONNECT_TIMEOUT/i.test(s)) return true;
+  return false;
+}
+
+/** 遇可恢复错误时在候选中依次尝试其它模型（如 Gemini 失败再试千问/OpenAI）；其它错误或非最后一个候选仍立即抛出 */
+async function chatAiAgentAccumulateFirstAvailable(modelIds, messages) {
+  if (!modelIds.length) {
+    throw new Error("无可用模型候选（请配置 FMZ_TRIGGER_AI_MODEL，或启动 ai-agent-server 并配置至少一类 API 密钥）");
+  }
+  let lastErr = null;
+  for (let i = 0; i < modelIds.length; i++) {
+    const modelId = modelIds[i];
+    try {
+      const text = await chatAiAgentAccumulate(modelId, messages);
+      if (i > 0) console.log(`[ai-report] 使用备选模型 ${modelId} 生成成功`);
+      return text;
+    } catch (e) {
+      lastErr = e;
+      const errMsg = e && e.message ? String(e.message) : String(e);
+      const tryNext = i < modelIds.length - 1 && isRecoverableAiUpstreamModelError(errMsg);
+      if (tryNext) {
+        console.warn(`[ai-report] 模型 ${modelId} 不可用，尝试下一候选:`, errMsg.slice(0, 220));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr || new Error("AI 调用失败");
+}
+
+function humanizeAiReportFailure(msg) {
+  const s = String(msg);
+  if (isRecoverableAiUpstreamModelError(s) && /\b429\b|quota|RESOURCE_EXHAUSTED/i.test(s)) {
+    return "上游配额或限流（如 429）：请检查各平台额度；未设置 FMZ_TRIGGER_AI_MODEL 时会按 ai-agent 模型列表依次切换（例如 Gemini→OpenAI→千问）。也可手写：FMZ_TRIGGER_AI_MODEL=gemini-2.5-flash,qwen-plus,gpt-4o-mini";
+  }
+  if (isAiAgentUnreachableMessage(s)) {
+    return `${s.length > 280 ? `${s.slice(0, 280)}…` : s} — ${chatAiAgentInternalUrlHint()}`;
+  }
+  return s.length > 420 ? `${s.slice(0, 420)}…` : s;
+}
+const MAX_AI_REPORT_ENTRIES = 500;
+
+function buildAiExportPayload(roomId, rangeKey, maxDm, maxG, inclDm, inclG) {
+  const resolved = resolveAiExportRange(rangeKey);
+  if (!resolved) return { ok: false, error: "invalid_range" };
+  const { startTs, endTs, label } = resolved;
+  const dm = inclDm ? collectDanmakuLinesInRange(roomId, startTs, endTs, maxDm) : { lines: [], totalMatched: 0, truncated: false };
+  const gif = inclG ? collectGiftLinesInRange(roomId, startTs, endTs, maxG) : { lines: [], totalMatched: 0, truncated: false };
+  const danmakuText = inclDm
+    ? (dm.lines.length ? dm.lines.join("\n") : "(该时间范围内无录制弹幕；请确认后台已开启录制并有历史 jsonl。)")
+    : "(本次导出未包含弹幕。)";
+  const giftText = inclG
+    ? (gif.lines.length ? gif.lines.join("\n") : "(该时间范围内无礼物归档记录；礼物需在连接直播间时由服务器存档。)")
+    : "(本次导出未包含礼物。)";
+  return {
+    ok: true,
+    roomId,
+    range: rangeKey,
+    rangeLabel: label,
+    startTs,
+    endTs,
+    includeDanmaku: inclDm,
+    includeGifts: inclG,
+    danmakuMatched: dm.totalMatched,
+    danmakuIncluded: dm.lines.length,
+    danmakuTruncated: dm.truncated,
+    giftMatched: gif.totalMatched,
+    giftIncluded: gif.lines.length,
+    giftTruncated: gif.truncated,
+    danmakuText,
+    giftText,
+  };
+}
+
+function loadAiReportsStore() {
+  try {
+    if (existsSync(AI_REPORTS_FILE)) {
+      const j = JSON.parse(readFileSync(AI_REPORTS_FILE, "utf-8"));
+      if (j && Array.isArray(j.entries)) return j;
+    }
+  } catch { /* ignore */ }
+  return { entries: [] };
+}
+
+function saveAiReportsStore(store) {
+  writeFileSync(AI_REPORTS_FILE, JSON.stringify(store, null, 2), "utf-8");
+}
+
+function appendAiReportEntry(entry) {
+  const store = loadAiReportsStore();
+  store.entries.unshift(entry);
+  if (store.entries.length > MAX_AI_REPORT_ENTRIES) store.entries.length = MAX_AI_REPORT_ENTRIES;
+  saveAiReportsStore(store);
+}
+
+/** 软隐藏：不落库删除，仅标记 hidden；列表 GET 不返回
+ * @returns {"ok"|"not_found"|"persist_failed"}
+ */
+function hideAiReportEntry(roomId, entryId) {
+  const store = loadAiReportsStore();
+  const rid = String(roomId);
+  const eid = String(entryId);
+  const entry = store.entries.find((e) => String(e.roomId) === rid && String(e.id) === eid);
+  if (!entry) return "not_found";
+  if (entry.hidden) return "ok";
+  entry.hidden = true;
+  try {
+    saveAiReportsStore(store);
+    return "ok";
+  } catch (e) {
+    entry.hidden = false;
+    console.error("[ai-reports] hide save failed:", e);
+    return "persist_failed";
+  }
+}
+
+async function chatAiAgentAccumulate(modelId, messages) {
+  const res = await fetch(`${AI_AGENT_INTERNAL_URL}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify({ modelId, messages }),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`AI agent HTTP ${res.status}: ${t.slice(0, 500)}`);
+  }
+  const reader = res.body?.getReader?.();
+  if (!reader) throw new Error("AI agent 无响应体");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data: ")) continue;
+      const payload = trimmed.slice(6);
+      if (payload === "[DONE]") continue;
+      try {
+        const parsed = JSON.parse(payload);
+        const delta = parsed.choices?.[0]?.delta?.content;
+        if (delta) text += delta;
+      } catch { /* skip */ }
+    }
+  }
+  return text;
+}
+
+/** 去掉模型偶发的 Markdown 符号，正文按纯文本排版展示 */
+function sanitizeAiReportBodyPlain(text) {
+  let s = String(text ?? "").replace(/\r\n/g, "\n");
+  s = s.replace(/<\/?(?:b|strong)\b[^>]*>/gi, "");
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+  } while (s !== prev);
+  s = s.replace(/\*{2,}/g, "");
+  /* 保留行首 #～###：前端 parseAiReportBody 依赖此识别小节标题 */
+  return s.trimEnd();
+}
+
+function normalizeAiPersistOverviewHeading(line) {
+  return String(line || "")
+    .trim()
+    .replace(/^#{1,3}\s+/, "")
+    .replace(/^【\s*/, "")
+    .replace(/\s*】\s*$/, "")
+    .replace(/\s+/g, "");
+}
+
+function isPersistAiDataOverviewSectionTitle(line) {
+  const compact = normalizeAiPersistOverviewHeading(line).replace(/\s+/g, "");
+  if (/^【数据概览】/.test(compact)) return true;
+  return /^(?:一、)?数据概览/.test(compact);
+}
+
+function looksPersistAiTelemetryOverviewLine(ln) {
+  const s = ln.trim();
+  if (!s || s.length > 96) return false;
+  if (/^(周期|统计周期)\s+\S*\d/.test(s)) return true;
+  if (/^日期\s+\S*\d/.test(s)) return true;
+  if (/^(日期（统计区间）|日期)\s*[｜|]\s*\S/.test(s)) return true;
+  if (/^(主播|房间号)\s*[｜|]\s*\S/.test(s)) return true;
+  if (/^弹幕数/.test(s)) return true;
+  if (/^弹幕人数/.test(s)) return true;
+  if (/^收入（主播收入）/.test(s)) return true;
+  if (/^主播收入\s*[｜|]\s*\S/.test(s)) return true;
+  if (/^主播收入\s+\S*\d/.test(s)) return true;
+  if (/^收入\s*[｜|]\s*\S/.test(s)) return true;
+  if (/^付费数/.test(s)) return true;
+  if (/^花费/.test(s)) return true;
+  if (/^付费人数/.test(s)) return true;
+  if (/^送礼人数/.test(s)) return true;
+  if (/^礼物人数/.test(s)) return true;
+  if (/^(房间|直播间)\s+\d/.test(s)) return true;
+  if (/^弹幕\s*[｜|]\s*.+\d/.test(s)) return true;
+  if (/^弹幕\s+\d/.test(s)) return true;
+  if (/^礼物\s*[｜|]\s*.+\d/.test(s)) return true;
+  if (/^礼物\s+\d/.test(s)) return true;
+  if (/^付费\S*\s+\d/.test(s)) return true;
+  if (/^口径说明/.test(s)) return true;
+  return false;
+}
+
+/** 去掉模型写在文首的「数据概览」电报块（仪表盘卡片已展示） */
+function stripLeadingAiWrittenDataOverviewPlain(bodyPlain) {
+  const raw = String(bodyPlain ?? "").replace(/\r\n/g, "\n");
+  const lines = raw.split("\n");
+  let i = 0;
+  while (i < lines.length && !lines[i].trim()) i++;
+  if (i >= lines.length) return "";
+
+  if (isPersistAiDataOverviewSectionTitle(lines[i])) {
+    i++;
+    while (i < lines.length && !lines[i].trim()) i++;
+    while (i < lines.length && looksPersistAiTelemetryOverviewLine(lines[i])) i++;
+    while (i < lines.length && !lines[i].trim()) i++;
+    while (i < lines.length && /^口径说明/.test(lines[i].trim())) {
+      i++;
+      while (i < lines.length && !lines[i].trim()) i++;
+    }
+    return lines.slice(i).join("\n").trimStart();
+  }
+
+  let j = i;
+  while (j < lines.length && looksPersistAiTelemetryOverviewLine(lines[j])) j++;
+  if (j > i) {
+    while (j < lines.length && !lines[j].trim()) j++;
+    return lines.slice(j).join("\n").trimStart();
+  }
+
+  return raw.trim();
+}
+
+const FMZ_REPORT_META_START = "<<<FMZ_REPORT_META";
+const FMZ_REPORT_META_END = ">>>";
+
+/** 剥离 AI 末尾围栏 JSON；正文不含围栏内容 */
+function stripFmzReportMeta(raw) {
+  const s = String(raw ?? "");
+  const i = s.lastIndexOf(FMZ_REPORT_META_START);
+  if (i < 0) return { content: s.trimEnd(), metaRaw: null };
+  const j = s.indexOf(FMZ_REPORT_META_END, i + FMZ_REPORT_META_START.length);
+  if (j < 0) return { content: s.trimEnd(), metaRaw: null };
+  const jsonStr = s.slice(i + FMZ_REPORT_META_START.length, j).trim();
+  const tail = s.slice(j + FMZ_REPORT_META_END.length).trim();
+  const head = s.slice(0, i).trimEnd();
+  const content = tail ? `${head}\n\n${tail}`.trim() : head;
+  let metaRaw = null;
+  try {
+    metaRaw = JSON.parse(jsonStr);
+  } catch {
+    try {
+      metaRaw = JSON.parse(jsonStr.replace(/\r/g, "").replace(/\n/g, " "));
+    } catch {
+      metaRaw = null;
+    }
+  }
+  return { content, metaRaw };
+}
+
+/** @returns {{ mentalityScore: number, bestDanmakuQuote: string, bestDanmakuReason: string, mentalityRubric: string } | null} */
+function normalizeAiReportMeta(metaRaw) {
+  if (!metaRaw || typeof metaRaw !== "object") return null;
+  let ms = Number(metaRaw.mentalityScore);
+  if (!Number.isFinite(ms)) return null;
+  ms = Math.min(100, Math.max(-100, Math.round(ms)));
+  const bd = metaRaw.bestDanmaku && typeof metaRaw.bestDanmaku === "object" ? metaRaw.bestDanmaku : {};
+  return {
+    mentalityScore: ms,
+    bestDanmakuQuote: sanitizeAiReportBodyPlain(String(bd.quote || "")).trim().slice(0, 280),
+    bestDanmakuReason: sanitizeAiReportBodyPlain(String(bd.reason || "")).trim().slice(0, 280),
+    mentalityRubric: sanitizeAiReportBodyPlain(String(metaRaw.mentalityRubric || "")).trim().slice(0, 320),
+  };
+}
+
+async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
+  const rangeKey = kind === "daily" ? "prev_calendar_day" : "prev_calendar_week";
+  const exp = buildAiExportPayload(roomId, rangeKey, 8000, 2500, true, true);
+  if (!exp.ok) throw new Error("导出范围无效");
+
+  let catalogMap = null;
+  try {
+    const pack = await fetchGiftListPayload(roomId);
+    catalogMap = pack && pack.gifts ? pack.gifts : null;
+  } catch {
+    /* catalog 失败仍可仅用归档摘要 */
+  }
+  const giftRankDigest = formatGiftRankDigestForAi(roomId, exp.startTs, exp.endTs, catalogMap);
+
+  const info = await fetchRoomInfo(roomId);
+  const roomDisplay = info?.owner_name ? `${info.owner_name} #${roomId}` : `#${roomId}`;
+  const dataInfo = [
+    "【数据信息】以下为导出窗口与抽样口径（仅供定性参考）。**客户端仪表盘顶部已展示结构化「数据概览」**；正文勿写「数据概览」小节或电报数字清单（勿列周期、房间、条数、付费笔数等）。下列数字行仅供理解样本规模，正文请从「概要信息」起笔。",
+    `周期｜${exp.rangeLabel}`,
+    `房间｜${roomDisplay}｜${roomId}`,
+    `弹幕归档｜窗口内录制 chatmsg 共匹配 ${exp.danmakuMatched} 条｜下文至多摘录 ${exp.danmakuIncluded} 条｜截断 ${exp.danmakuTruncated ? "是" : "否"}`,
+    `礼物归档｜窗口内匹配 ${exp.giftMatched} 条｜下文至多摘录 ${exp.giftIncluded} 条｜截断 ${exp.giftTruncated ? "是" : "否"}`,
+    "另有「礼物排行与礼物类型摘要」须在后续小节引用解读；勿冒充外链实时榜。",
+  ].join("\n");
+  const dailyIntro =
+    "生成本直播间「日报」：数据统计范围为「上一个完整自然日」（服务器本地日历：当日 0:00 起至次日 0:00 止）内的弹幕与礼物摘录与心态侧写，写短写实。";
+  const weeklyIntro =
+    "生成本直播间「周报」：数据统计范围为「上一个完整自然周」（周一至周日，服务器本地日历）内的弹幕与礼物摘录与心态侧写，写短写实。";
+  const bothInstr = `依据下列「弹幕」「礼物」摘录与「礼物排行与礼物类型摘要」，写简练结论即可（勿复述题干）：弹幕焦点与情绪节奏；有无明显刷屏或节奏突变；礼物概况；结合摘要点名高频礼物、活跃用户与付费礼/免费礼大致格局（勿捏造外链）；数据不足处一句话交代。
+评选一条最佳弹幕：摘自摘录原文，加中文引号，附一句理由。`;
+  const proseStyle =
+    "【篇幅与版面】全文求精简；正文为「宋体式」正文排印，禁止使用粗体视觉效果：不要使用 HTML 的 b/strong 标签，不要依赖加黑来强调。语气平实，少用感叹。禁止 Markdown（星号、井号标题、代码围栏）；小节标题用「一、」「二、」或单行标题即可。段间空一行；少用 emoji。不要用单独成行的大标题复述「斗鱼直播间日报/周报」或仅「日报/周报」二字（客户端已有版式）。**正文勿写「数据概览」**（仪表盘卡片已承载）；请从定性「概要信息」起笔（可用「一、概要信息」），3～6 句综述氛围、互动与礼物侧印象、冷场或爆点，可一句话交代样本/摘录局限。";
+  const mentality =
+    "【主播心态】据弹幕氛围（攻击性、负面情绪比例、支持与玩笑）、礼物互动是否缓和节奏等作简短阅卷式判断；须有摘录依据。写明整数 mentalityScore，范围 −100～+100（0 中性；负偏压抑或被围攻感；正偏有支撑）。禁止臆造。";
+  const statsFirst =
+    "【输出格式】勿写「数据概览」。正文从「概要信息」写起，其后为弹幕观察、礼物与排行解读、主播心态（整数分 + 短批）、结语等；勿输出与仪表盘同构的电报数字清单。";
+  const structure =
+    "建议顺序：概要信息 → 弹幕与互动 → 礼物与排行 → 主播心态 → 结语；可合并删减后段，概要信息勿省。";
+  const fmzMetaFence = `【机器可读围栏 — 必须在全文最后输出】正文与小节全部写完后，单独换行输出围栏块；围栏外不要再追加其它说明文字：
+<<<FMZ_REPORT_META
+{"mentalityScore":0,"bestDanmaku":{"quote":"最佳弹幕原文摘录","reason":"一句评选理由"},"mentalityRubric":"一两句阅卷批语即可：弹幕氛围与谩骂/礼物等对加减分的依据"}
+>>>
+其中 mentalityScore 必须与正文「主播心态」小节所写的整数一致，范围为 -100～+100；quote/reason 与正文最佳弹幕一致；JSON 须合法（字符串内的换行请转义为 \\n）。`;
+
+  const intro = kind === "daily" ? dailyIntro : weeklyIntro;
+  const task = `${intro}\n\n${proseStyle}\n\n${bothInstr}\n\n${mentality}\n\n${statsFirst}\n\n${structure}\n\n${fmzMetaFence}`;
+  const rankBlock = `--- 礼物排行与礼物类型摘要（本地归档 + catalog） ---\n${giftRankDigest}`;
+  const excerpts = `--- 弹幕摘录 ---\n${exp.danmakuText}\n\n--- 礼物摘录 ---\n${exp.giftText}`;
+  const userBlock = `${dataInfo}\n\n${rankBlock}\n\n【分析任务】\n${task}\n\n${excerpts}`;
+  const systemContent =
+    kind === "daily"
+      ? "你是斗鱼直播间数据分析师，写中文日报。篇幅紧凑；正文一律常规字重，禁止粗体（不要用 HTML b/strong）。仪表盘顶部已有「数据概览」；你从「概要信息」定性写起，勿自写数据概览或电报数字清单。禁止 Markdown。礼物解读引用消息内排行摘要。文末输出 <<<FMZ_REPORT_META ... >>>。"
+      : "你是斗鱼直播间数据分析师，写中文周报。篇幅紧凑；正文一律常规字重，禁止粗体（不要用 HTML b/strong）。仪表盘顶部已有「数据概览」；你从「概要信息」定性写起，勿自写数据概览或电报数字清单。禁止 Markdown。礼物解读引用消息内排行摘要。文末输出 <<<FMZ_REPORT_META ... >>>。";
+  const modelCandidates = await resolveAiAgentTriggerModelCandidates();
+  const rawAiText = await chatAiAgentAccumulateFirstAvailable(modelCandidates, [
+    { role: "system", content: systemContent },
+    { role: "user", content: userBlock },
+  ]);
+  const { content: bodyContent, metaRaw } = stripFmzReportMeta(rawAiText);
+  const bodyPlain = sanitizeAiReportBodyPlain(bodyContent);
+  const metaNorm = normalizeAiReportMeta(metaRaw);
+  const avatarUrl = typeof info?.avatar === "string" ? info.avatar.trim() : "";
+
+  let dailyOverview;
+  let weeklyOverview;
+  const dmStats = computeDanmakuStatsInRange(roomId, exp.startTs, exp.endTs);
+  const fin = computeGiftFinancialStats(roomId, exp.startTs, exp.endTs, catalogMap);
+  const overviewMetrics = {
+    streamerName: typeof info?.owner_name === "string" ? info.owner_name.trim() : "",
+    roomId: String(roomId),
+    danmakuTotal: dmStats.total,
+    danmakuUniqueUsers: dmStats.uniqueUsers,
+    giftSenderCount: fin.giftSenderCount,
+    paidUserCount: fin.paidUserCount,
+    streamerIncomeApproxYuan: fin.streamerIncomeApproxYuan,
+    audiencePaidApproxYuan: fin.audiencePaidApproxYuan,
+  };
+  if (kind === "daily") {
+    dailyOverview = {
+      ...overviewMetrics,
+      dateYmd: fmtLocalYmd(exp.startTs),
+      weekdayCn: weekdayCnLocal(exp.startTs),
+    };
+  } else if (kind === "weekly") {
+    weeklyOverview = {
+      ...overviewMetrics,
+      rangeLabel: exp.rangeLabel,
+    };
+  }
+
+  const strippedAi = stripLeadingAiWrittenDataOverviewPlain(bodyPlain);
+  const persistedContent = strippedAi.trimEnd();
+
+  const createdAt = Date.now();
+  const titleDate = new Date(createdAt).toLocaleString("zh-CN", { hour12: false });
+  const id = `rpt_${createdAt}_${Math.random().toString(36).slice(2, 9)}`;
+  const periodKey = buildAiReportPeriodKey(roomId, kind, exp.startTs, exp.endTs);
+  const shadowed = hidePriorAiReportsForSameSlot(roomId, kind, periodKey, exp.rangeLabel);
+  for (const x of shadowed) {
+    broadcastToSSE("ai-report-deleted", x);
+  }
+
+  const entry = {
+    id,
+    roomId,
+    kind,
+    triggerId: triggerId || "",
+    triggeredBy: triggeredBy || "",
+    createdAt,
+    periodKey,
+    periodLabel: exp.rangeLabel,
+    /** 标题突出：生成时间 + 直播间名（房间号）；日报/周报由 kind + 版头 kicker 承载 */
+    title: `${titleDate} · ${roomDisplay}`,
+    content: persistedContent,
+    streamerAvatar: avatarUrl,
+    ...(metaNorm || {}),
+    ...(dailyOverview ? { dailyOverview } : {}),
+    ...(weeklyOverview ? { weeklyOverview } : {}),
+  };
+  appendAiReportEntry(entry);
+  broadcastToSSE("ai-report", { roomId, entry });
+  console.log(
+    `[ai-report] saved ${kind} room=${roomId} slot=${periodKey} chars=${persistedContent.length}${shadowed.length ? ` shadowed=${shadowed.length}` : ""}${metaNorm ? ` meta_score=${metaNorm.mentalityScore}` : ""}`,
+  );
+}
+
+function queueAiReportJob(roomId, kind, triggerId, triggeredBy) {
+  runAiReportJob(roomId, kind, triggerId, triggeredBy).catch((e) => {
+    const rawMsg = e && e.message ? String(e.message) : String(e);
+    const msg = humanizeAiReportFailure(rawMsg);
+    console.warn(`[ai-report] ${roomId} ${kind} failed:`, rawMsg);
+    try {
+      const logEntry = {
+        triggerId: triggerId || "",
+        pattern: "",
+        action: kind === "daily" ? "ai-daily-report" : "ai-weekly-report",
+        content: `失败：${msg}`,
+        nickname: "系统",
+        uid: "0",
+        fullText: `[ai-report] ${roomId} ${kind}: ${rawMsg}`,
+        roomId,
+        ts: Date.now(),
+        summary: `[AI 报告失败] 触发「${triggerId || "?"}」· 房间 ${roomId} · ${kind === "daily" ? "日报" : "周报"} · ${msg}`,
+      };
+      actionLog.push(logEntry);
+      if (actionLog.length > 500) actionLog = actionLog.slice(-500);
+      saveActionLog(actionLog);
+      broadcastToSSE("trigger", logEntry);
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /*  Douyu STT protocol helpers                                        */
 /* ------------------------------------------------------------------ */
 
@@ -803,14 +2091,35 @@ function processTriggers(danmaku, roomId) {
   const txt = danmaku.txt || "";
   for (const trigger of triggerConfig.triggers) {
     if (!trigger.enabled) continue;
+    if (isScheduleTriggerNode(trigger)) continue;
     // Check room binding: if roomIds is set and non-empty, only match specified rooms
     if (trigger.roomIds && trigger.roomIds.length > 0 && !trigger.roomIds.includes(roomId)) continue;
     if (!txt.startsWith(trigger.pattern)) continue;
     const content = txt.substring(trigger.pattern.length).trim();
-    if (!content) continue;
+    const allowEmptyContent = trigger.action === "ai-daily-report" || trigger.action === "ai-weekly-report";
+    if (!allowEmptyContent && !content) continue;
     const conn = backendRooms.get(roomId);
     if (conn) conn.stats.triggered++;
-    const logEntry = { triggerId: trigger.id, pattern: trigger.pattern, action: trigger.action, content, nickname: danmaku.nn, uid: danmaku.uid, fullText: txt, roomId, ts: Date.now() };
+    const logContent = content || (allowEmptyContent ? "(触发)" : content);
+    const logEntry = {
+      triggerId: trigger.id,
+      pattern: trigger.pattern,
+      action: trigger.action,
+      content: logContent,
+      nickname: danmaku.nn,
+      uid: danmaku.uid,
+      fullText: txt,
+      roomId,
+      ts: Date.now(),
+      summary: buildTriggerLogSummary({
+        trigger,
+        source: "danmaku",
+        pattern: trigger.pattern,
+        plainContent: logContent,
+        nickname: danmaku.nn,
+        roomId,
+      }),
+    };
     if (trigger.action === "log") console.log(`[danmaku-trigger] [${roomId}] ${danmaku.nn}: ${txt} → "${content}"`);
     actionLog.push(logEntry);
     if (actionLog.length > 500) actionLog = actionLog.slice(-500);
@@ -823,6 +2132,123 @@ function processTriggers(danmaku, roomId) {
       if (songResult) {
         broadcastToSSE("song-request", { roomId, ...songResult });
       }
+    }
+    if (trigger.action === "ai-daily-report") {
+      queueAiReportJob(roomId, "daily", trigger.id, danmaku.nn || "弹幕");
+    }
+    if (trigger.action === "ai-weekly-report") {
+      queueAiReportJob(roomId, "weekly", trigger.id, danmaku.nn || "弹幕");
+    }
+  }
+}
+
+function fireScheduledTrigger(trigger) {
+  const payload = typeof trigger.payload === "string" ? trigger.payload : "";
+  const contentTrim = payload.trim();
+  const displayContent = contentTrim || "(空)";
+  let rooms = trigger.roomIds && trigger.roomIds.length > 0
+    ? trigger.roomIds.map((x) => String(x).trim()).filter(Boolean)
+    : [...backendRooms.keys()];
+  rooms = [...new Set(rooms)];
+
+  const fakeDanmaku = {
+    nn: "系统",
+    uid: "0",
+    txt: contentTrim ? `[定时] ${contentTrim}` : "[定时]",
+    level: "",
+    bnn: "",
+    bl: "",
+    brid: "",
+    ic: "",
+    photo: "",
+    ts: Date.now(),
+    type: "chatmsg",
+  };
+
+  if (rooms.length === 0) {
+    const logEntry = {
+      triggerId: trigger.id,
+      pattern: "[定时]",
+      action: trigger.action,
+      content: displayContent,
+      nickname: "系统",
+      uid: "0",
+      fullText: contentTrim ? `[定时] ${contentTrim}` : "[定时]",
+      roomId: "",
+      ts: Date.now(),
+      source: "schedule",
+      summary: buildTriggerLogSummary({
+        trigger,
+        source: "schedule",
+        pattern: "[定时]",
+        plainContent: contentTrim,
+        nickname: "系统",
+        roomId: "",
+      }),
+    };
+    if (trigger.action === "log") console.log(`[danmaku-schedule] (无已连接房间) ${trigger.id}: ${contentTrim || "(无说明)"}`);
+    actionLog.push(logEntry);
+    if (actionLog.length > 500) actionLog = actionLog.slice(-500);
+    saveActionLog(actionLog);
+    broadcastToSSE("trigger", logEntry);
+    return;
+  }
+
+  for (const roomId of rooms) {
+    const logEntry = {
+      triggerId: trigger.id,
+      pattern: "[定时]",
+      action: trigger.action,
+      content: displayContent,
+      nickname: "系统",
+      uid: "0",
+      fullText: contentTrim ? `[定时] ${contentTrim}` : "[定时]",
+      roomId,
+      ts: Date.now(),
+      source: "schedule",
+      summary: buildTriggerLogSummary({
+        trigger,
+        source: "schedule",
+        pattern: "[定时]",
+        plainContent: contentTrim,
+        nickname: "系统",
+        roomId,
+      }),
+    };
+    if (trigger.action === "log") console.log(`[danmaku-schedule] [${roomId}] ${contentTrim || "(无说明)"}`);
+    actionLog.push(logEntry);
+    if (actionLog.length > 500) actionLog = actionLog.slice(-500);
+    saveActionLog(actionLog);
+    broadcastToSSE("trigger", logEntry);
+
+    if (trigger.action === "song-request" && contentTrim) {
+      try {
+        const songResult = recordSongRequest(roomId, contentTrim, fakeDanmaku);
+        if (songResult) broadcastToSSE("song-request", { roomId, ...songResult });
+      } catch (e) {
+        console.warn(`[danmaku-schedule] song-request failed:`, e.message);
+      }
+    }
+    if (trigger.action === "ai-daily-report") {
+      queueAiReportJob(roomId, "daily", trigger.id, "定时触发器");
+    }
+    if (trigger.action === "ai-weekly-report") {
+      queueAiReportJob(roomId, "weekly", trigger.id, "定时触发器");
+    }
+  }
+}
+
+function tickScheduledTriggers() {
+  const nowMs = Date.now();
+  const nowDate = new Date(nowMs);
+  for (const t of triggerConfig.triggers) {
+    if (!t.enabled || !isScheduleTriggerNode(t)) continue;
+    try {
+      if (!shouldFireScheduledTrigger(t, nowDate, nowMs)) continue;
+      fireScheduledTrigger(t);
+      markScheduleFired(t, nowDate, nowMs);
+    } catch (e) {
+      console.warn(`[danmaku-schedule] tick error ${t.id}:`, e.message);
     }
   }
 }
@@ -955,11 +2381,30 @@ function createWebCaptureConnection(roomId, sseRes) {
       sendSSE("danmaku", danmaku);
       const txt = danmaku.txt || "";
       for (const trigger of triggerConfig.triggers) {
-        if (!trigger.enabled || !txt.startsWith(trigger.pattern)) continue;
+        if (!trigger.enabled || isScheduleTriggerNode(trigger) || !txt.startsWith(trigger.pattern)) continue;
         const content = txt.substring(trigger.pattern.length).trim();
         if (!content) continue;
         ctx.stats.triggered++;
-        const logEntry = { triggerId: trigger.id, pattern: trigger.pattern, action: trigger.action, content, nickname: danmaku.nn, uid: danmaku.uid, fullText: txt, ts: Date.now(), source: "web" };
+        const logEntry = {
+          triggerId: trigger.id,
+          pattern: trigger.pattern,
+          action: trigger.action,
+          content,
+          nickname: danmaku.nn,
+          uid: danmaku.uid,
+          fullText: txt,
+          roomId: ctx.roomId,
+          ts: Date.now(),
+          source: "web",
+          summary: buildTriggerLogSummary({
+            trigger,
+            source: "web",
+            pattern: trigger.pattern,
+            plainContent: content,
+            nickname: danmaku.nn,
+            roomId: ctx.roomId,
+          }),
+        };
         if (trigger.action === "log") console.log(`[danmaku-web-trigger] ${danmaku.nn}: ${txt} → "${content}"`);
         actionLog.push(logEntry);
         if (actionLog.length > 500) actionLog = actionLog.slice(-500);
@@ -1023,6 +2468,14 @@ function readBody(req) {
   });
 }
 
+/** @param {import("http").IncomingMessage} req */
+function headerPassword(req) {
+  const h = req.headers["x-password"];
+  if (Array.isArray(h)) return String(h[0] ?? "").trim();
+  if (typeof h === "string") return h.trim();
+  return "";
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const path = url.pathname;
@@ -1081,7 +2534,7 @@ const server = http.createServer(async (req, res) => {
   // DELETE /rooms/:roomId — remove a backend room (password required)
   if (path.startsWith("/rooms/") && req.method === "DELETE") {
     const roomId = decodeURIComponent(path.substring("/rooms/".length));
-    const pw = req.headers["x-password"] || "";
+    const pw = headerPassword(req);
     if (pw !== BACKEND_PASSWORD) return jsonReply(res, { ok: false, error: "密码错误" }, 403);
     if (!backendRooms.has(roomId)) return jsonReply(res, { ok: false, error: "Room not found" }, 404);
     disconnectBackendRoom(roomId);
@@ -1114,16 +2567,47 @@ const server = http.createServer(async (req, res) => {
   // --- Triggers ---
   if (path === "/triggers" && req.method === "GET") return jsonReply(res, { ok: true, triggers: triggerConfig.triggers });
   if (path === "/triggers" && req.method === "PUT") {
-    try { const body = await readBody(req); if (!Array.isArray(body.triggers)) return jsonReply(res, { ok: false, error: "triggers array required" }, 400); triggerConfig.triggers = body.triggers; saveTriggers(triggerConfig); return jsonReply(res, { ok: true, triggers: triggerConfig.triggers }); } catch (e) { return jsonReply(res, { ok: false, error: e.message }, 400); }
+    try {
+      const body = await readBody(req);
+      if (!Array.isArray(body.triggers)) return jsonReply(res, { ok: false, error: "triggers array required" }, 400);
+      triggerConfig = hydrateTriggerConfig({ triggers: body.triggers });
+      saveTriggers(triggerConfig);
+      return jsonReply(res, { ok: true, triggers: triggerConfig.triggers });
+    } catch (e) { return jsonReply(res, { ok: false, error: e.message }, 400); }
   }
   if (path === "/triggers" && req.method === "POST") {
-    try { const body = await readBody(req); const trigger = { id: body.id || `trigger_${Date.now()}`, pattern: body.pattern || "#", action: body.action || "log", enabled: body.enabled !== false, description: body.description || "", roomIds: Array.isArray(body.roomIds) ? body.roomIds : [] }; triggerConfig.triggers.push(trigger); saveTriggers(triggerConfig); return jsonReply(res, { ok: true, trigger }); } catch (e) { return jsonReply(res, { ok: false, error: e.message }, 400); }
+    try {
+      const body = await readBody(req);
+      const trigger = normalizeTrigger({
+        id: body.id,
+        kind:
+          typeof body.kind === "string" && String(body.kind).toLowerCase() === "schedule"
+            ? "schedule"
+            : triggerLooksScheduled(body)
+              ? "schedule"
+              : "danmaku",
+        pattern: body.pattern,
+        action: body.action,
+        enabled: body.enabled,
+        description: body.description,
+        roomIds: body.roomIds,
+        schedule: body.schedule,
+        payload: body.payload,
+      });
+      triggerConfig.triggers.push(trigger);
+      saveTriggers(triggerConfig);
+      return jsonReply(res, { ok: true, trigger });
+    } catch (e) { return jsonReply(res, { ok: false, error: e.message }, 400); }
   }
   if (path.startsWith("/triggers/") && req.method === "DELETE") {
     const id = path.substring("/triggers/".length);
     const idx = triggerConfig.triggers.findIndex((t) => t.id === id);
     if (idx === -1) return jsonReply(res, { ok: false, error: "Not found" }, 404);
-    triggerConfig.triggers.splice(idx, 1); saveTriggers(triggerConfig); return jsonReply(res, { ok: true });
+    triggerConfig.triggers.splice(idx, 1);
+    saveTriggers(triggerConfig);
+    delete scheduleFireState[id];
+    saveScheduleFireState();
+    return jsonReply(res, { ok: true });
   }
 
   // --- Action log ---
@@ -1131,7 +2615,12 @@ const server = http.createServer(async (req, res) => {
     const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 50));
     const roomId = url.searchParams.get("roomId") || null;
     let filtered = actionLog;
-    if (roomId) filtered = actionLog.filter(e => e.roomId === roomId);
+    if (roomId) {
+      filtered = actionLog.filter((e) =>
+        e.roomId === roomId
+        || (e.source === "schedule" && (!e.roomId || e.roomId === "")),
+      );
+    }
     return jsonReply(res, { ok: true, log: filtered.slice(-limit).reverse(), total: filtered.length });
   }
   if (path === "/action-log/clear" && req.method === "POST") { actionLog = []; saveActionLog(actionLog); return jsonReply(res, { ok: true }); }
@@ -1268,11 +2757,84 @@ const server = http.createServer(async (req, res) => {
     return jsonReply(res, { ok: true });
   }
 
+  // GET /ai-range-export/:roomId — 为 AI 汇总某房间在给定时间范围内的录制弹幕 + 归档礼物
+  if (path.startsWith("/ai-range-export/") && req.method === "GET") {
+    const rid = decodeURIComponent(path.substring("/ai-range-export/".length));
+    if (!rid) return jsonReply(res, { ok: false, error: "roomId required" }, 400);
+    const rangeKey = (url.searchParams.get("range") || "today").trim();
+    const maxDm = Math.min(20_000, Math.max(100, Number(url.searchParams.get("maxDanmaku")) || 8000));
+    const maxG = Math.min(20_000, Math.max(50, Number(url.searchParams.get("maxGifts")) || 2500));
+    const inclDm = url.searchParams.get("includeDanmaku") !== "0";
+    const inclG = url.searchParams.get("includeGifts") !== "0";
+    if (!inclDm && !inclG) {
+      return jsonReply(res, { ok: false, error: "includeDanmaku 与 includeGifts 至少启用一项" }, 400);
+    }
+
+    const bundle = buildAiExportPayload(rid, rangeKey, maxDm, maxG, inclDm, inclG);
+    if (!bundle.ok) {
+      return jsonReply(res, {
+        ok: false,
+        error: "无效的时间范围（range）；指定日：day:YYYY-MM-DD；指定周：week:YYYY-MM-DD（填入该周内任意一天）；滚动：24h / 7days；日历窗口：prev_calendar_day（上一自然日）/ prev_calendar_week（上周一至周日）",
+      }, 400);
+    }
+    return jsonReply(res, bundle);
+  }
+
+  // POST /ai-reports/hide — 软隐藏一条日报/周报（推荐：密码在 JSON body，避免部分反代丢弃 X-Password）
+  if (path === "/ai-reports/hide" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const pw = headerPassword(req) || String(body.password ?? "").trim();
+      if (pw !== BACKEND_PASSWORD) return jsonReply(res, { ok: false, error: "密码错误" }, 403);
+      const rid = String(body.roomId ?? "").trim();
+      const eid = String(body.entryId ?? "").trim();
+      if (!rid || !eid) return jsonReply(res, { ok: false, error: "roomId 与 entryId 必填" }, 400);
+      const hid = hideAiReportEntry(rid, eid);
+      if (hid === "not_found") return jsonReply(res, { ok: false, error: "报告不存在" }, 404);
+      if (hid === "persist_failed") return jsonReply(res, { ok: false, error: "写入 ai-reports.json 失败" }, 500);
+      broadcastToSSE("ai-report-deleted", { roomId: rid, entryId: eid });
+      return jsonReply(res, { ok: true });
+    } catch {
+      return jsonReply(res, { ok: false, error: "请求体须为 JSON：{ roomId, entryId, password? }" }, 400);
+    }
+  }
+
+  // DELETE /ai-reports/:roomId/:entryId — 软隐藏（需 X-Password 或改用 POST /ai-reports/hide）
+  if (path.startsWith("/ai-reports/") && req.method === "DELETE") {
+    const rest = path.slice("/ai-reports/".length);
+    const slash = rest.indexOf("/");
+    if (slash <= 0) return jsonReply(res, { ok: false, error: "用法：DELETE /ai-reports/:roomId/:entryId" }, 400);
+    const rid = decodeURIComponent(rest.slice(0, slash));
+    const eid = decodeURIComponent(rest.slice(slash + 1));
+    if (!rid || !eid || rest.slice(slash + 1).includes("/")) {
+      return jsonReply(res, { ok: false, error: "roomId 与 entryId 无效" }, 400);
+    }
+    const pw = headerPassword(req);
+    if (pw !== BACKEND_PASSWORD) return jsonReply(res, { ok: false, error: "密码错误" }, 403);
+    const hid = hideAiReportEntry(rid, eid);
+    if (hid === "not_found") return jsonReply(res, { ok: false, error: "报告不存在" }, 404);
+    if (hid === "persist_failed") return jsonReply(res, { ok: false, error: "写入 ai-reports.json 失败" }, 500);
+    broadcastToSSE("ai-report-deleted", { roomId: rid, entryId: eid });
+    return jsonReply(res, { ok: true });
+  }
+
+  // GET /ai-reports/:roomId — 已生成的日报/周报列表（按房间；不含 hidden）
+  if (path.startsWith("/ai-reports/") && req.method === "GET") {
+    const rid = decodeURIComponent(path.substring("/ai-reports/".length));
+    if (!rid) return jsonReply(res, { ok: false, error: "roomId required" }, 400);
+    const store = loadAiReportsStore();
+    const entries = store.entries
+      .filter((e) => String(e.roomId) === rid && !e.hidden)
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    return jsonReply(res, { ok: true, roomId: rid, entries });
+  }
+
   jsonReply(res, { error: "Not found" }, 404);
 });
 
 server.listen(PORT, () => {
   console.log(`[douyu-danmaku] Server listening on http://127.0.0.1:${PORT}`);
+  console.log(`[douyu-danmaku] AI report triggers → ai-agent-server ${AI_AGENT_INTERNAL_URL}`);
 
   // Auto-reconnect saved backend rooms on startup
   const savedRooms = loadSavedRooms();
@@ -1282,4 +2844,6 @@ server.listen(PORT, () => {
       connectBackendRoom(rid);
     }
   }
+
+  setInterval(tickScheduledTriggers, 15_000);
 });

@@ -259,14 +259,42 @@ const danmakuRef = ref<any>(null);
 
 /** PluginHost ref to access side panel state */
 const pluginHostRef = ref<InstanceType<typeof PluginHost> | null>(null);
-const sidePlugin = computed(() => pluginHostRef.value?.activeSidePlugin ?? null);
+/** 当前侧栏内显示的插件（用户点「AI」收起侧栏时为空，插件仍为开启） */
+const visibleSidePlugin = computed(() => pluginHostRef.value?.visibleSidePlugin ?? null);
 function closeSidePlugin() {
-  if (sidePlugin.value) pluginHostRef.value?.closePlugin(sidePlugin.value.id);
+  const docked = pluginHostRef.value?.activeSidePlugin ?? null;
+  if (docked) pluginHostRef.value?.closePlugin(docked.id);
 }
 
 /* ---- Side panel resize drag ---- */
 const sidePanelWidth = ref(420);
 const isResizing = ref(false);
+
+/** AI 侧栏宽度（刷新后保留） */
+const LS_AI_SIDE_PANEL_W = "fmz_ai_side_panel_width";
+
+function hydrateSidePanelWidth(): void {
+  try {
+    const n = parseInt(localStorage.getItem(LS_AI_SIDE_PANEL_W) || "", 10);
+    if (!Number.isFinite(n)) return;
+    sidePanelWidth.value = Math.max(280, Math.min(n, 800));
+  } catch {
+    /* ignore */
+  }
+}
+
+let sidePanelWidthSaveTimer: ReturnType<typeof setTimeout> | null = null;
+watch(sidePanelWidth, (w) => {
+  if (sidePanelWidthSaveTimer != null) clearTimeout(sidePanelWidthSaveTimer);
+  sidePanelWidthSaveTimer = setTimeout(() => {
+    sidePanelWidthSaveTimer = null;
+    try {
+      localStorage.setItem(LS_AI_SIDE_PANEL_W, String(w));
+    } catch {
+      /* ignore */
+    }
+  }, 200);
+});
 
 function onResizeStart(e: MouseEvent) {
   e.preventDefault();
@@ -337,6 +365,7 @@ function onWindowHashChange() {
 }
 
 onMounted(() => {
+  hydrateSidePanelWidth();
   applyHashToState();
   if (
     typeof window !== "undefined" &&
@@ -359,6 +388,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("hashchange", onWindowHashChange);
+  if (sidePanelWidthSaveTimer != null) {
+    clearTimeout(sidePanelWidthSaveTimer);
+    sidePanelWidthSaveTimer = null;
+  }
 });
 
 watch(
@@ -407,8 +440,11 @@ watch(showBaobao, (visible) => {
       <PluginHost ref="pluginHostRef" />
     </template>
   </SettingsBar>
-  <div class="app-body" :class="{ 'has-side-panel': !!sidePlugin, 'is-resizing': isResizing }">
-  <div class="app-main">
+  <div class="app-body" :class="{ 'has-side-panel': !!visibleSidePlugin, 'is-resizing': isResizing }">
+  <div
+    class="app-main"
+    :class="{ 'app-main--danmaku-fill': tab === 'danmaku' && F_DOUYU_DANMAKU }"
+  >
   <nav class="nav" aria-label="主导航">
     <button v-if="F_PRELIMINARY" :class="{ on: tab === 'pre' }" type="button" @click="selectTab('pre')">预赛数据</button>
     <button v-if="F_USERS" :class="{ on: tab === 'users' }" type="button" @click="selectTab('users')">用户积分</button>
@@ -422,7 +458,7 @@ watch(showBaobao, (visible) => {
     <button v-if="F_CRIMES" :class="{ on: tab === 'crimes' }" type="button" @click="selectTab('crimes')">细数宝罪</button>
     <button v-if="F_DOUYU_DANMAKU" :class="{ on: tab === 'danmaku' }" type="button" @click="selectTab('danmaku')">窃听宝语</button>
   </nav>
-  <main>
+  <main :class="{ 'main--danmaku-fill': tab === 'danmaku' && F_DOUYU_DANMAKU }">
     <PreliminaryPanel
       v-if="F_PRELIMINARY && PreliminaryPanel && tab === 'pre'"
       ref="preRef"
@@ -483,10 +519,10 @@ watch(showBaobao, (visible) => {
 
   <!-- Side panel (inline, same level as main content) -->
   <Transition name="side-slide">
-    <aside v-if="sidePlugin" class="app-side-panel" :style="{ width: sidePanelWidth + 'px', minWidth: sidePanelWidth + 'px' }">
+    <aside v-if="visibleSidePlugin" class="app-side-panel" :style="{ width: sidePanelWidth + 'px', minWidth: sidePanelWidth + 'px' }">
       <div class="side-panel-resize-handle" @mousedown="onResizeStart" />
       <div class="side-panel-body">
-        <component :is="sidePlugin.component!" />
+        <component :is="visibleSidePlugin.component!" />
       </div>
     </aside>
   </Transition>
@@ -508,10 +544,59 @@ watch(showBaobao, (visible) => {
 .app-main {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
+}
+/* 侧栏展开时避免出现「整块主列 + 侧栏」双滚动轴：仅在主内容区滚动 */
+.app-body.has-side-panel .app-main {
+  overflow: hidden;
+}
+/* 侧栏展开时：非窃听宝语 Tab 在主区域纵向滚动（按需出现滚动条） */
+.app-body.has-side-panel .app-main > main:not(.main--danmaku-fill) {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+/* ---- 桌面端窃听宝语（≥601px）：主列为 flex，main 仅在内容超高时出现滚动条；手机端不套用 ---- */
+@media (min-width: 601px) {
+  .app-main.app-main--danmaku-fill {
+    overflow-y: hidden;
+  }
+  .app-main.app-main--danmaku-fill > main.main--danmaku-fill {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: auto;
+    max-width: none;
+    margin: 0 auto;
+    width: 100%;
+  }
+  /* 侧栏 + 弹幕：同样在 main 按需滚动，不出现「禁滚」 */
+  .app-body.has-side-panel .app-main > main.main--danmaku-fill {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+    overflow-y: auto;
+    max-width: none;
+    margin: 0 auto;
+    width: 100%;
+  }
+}
+@media (max-width: 600px) {
+  .app-body.has-side-panel .app-main > main.main--danmaku-fill {
+    flex: 1;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
 }
 
 /* ---- Side panel (same level as main) ---- */
@@ -578,11 +663,6 @@ watch(showBaobao, (visible) => {
   background: var(--surface);
   color: var(--primary);
   border-color: var(--border);
-}
-main {
-  max-width: 1200px;
-  margin: 0 auto;
-  flex: 1;
 }
 .panel-hud {
   margin: 0.75rem 1.25rem 0;

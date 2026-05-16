@@ -131,7 +131,8 @@ function toggleBaobaoMode() {
         title="宝宝版开关 — 开启后显示拾观宝片、遥忆宝章等专属功能"
         @click="toggleBaobaoMode"
       >
-        {{ form.baobaoMode ? '👶 宝宝版' : '👶' }}
+        <span class="sr-only">{{ form.baobaoMode ? '宝宝版已开启，点击关闭' : '宝宝版已关闭，点击开启' }}</span>
+        <span aria-hidden="true">👶</span>
       </button>
 
       <!-- Gear icon to toggle settings dropdown -->
@@ -269,51 +270,95 @@ function toggleBaobaoMode() {
   gap: 0.5rem;
 }
 
-/* Baobao mode toggle */
+/* Baobao mode toggle — 与 AI 顶栏圆钮同尺寸 */
 .baobao-toggle {
-  height: 36px;
-  padding: 0 0.7rem;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--muted);
-  font-size: 0.85rem;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-  white-space: nowrap;
-}
-.baobao-toggle:hover {
-  background: var(--bg);
-  color: var(--text);
-}
-.baobao-toggle.active {
-  background: rgba(236, 72, 153, 0.15);
-  color: #ec4899;
-  border-color: rgba(236, 72, 153, 0.4);
-}
-
-/* Gear button */
-.gear-btn {
+  position: relative;
   width: 36px;
   height: 36px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--muted);
-  font-size: 1.2rem;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(236, 72, 153, 0.45);
+  background: linear-gradient(
+    135deg,
+    rgba(236, 72, 153, 0.12) 0%,
+    rgba(244, 114, 182, 0.1) 100%
+  );
+  color: #f9a8d4;
+  font-size: 1.05rem;
+  line-height: 1;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+.baobao-toggle:hover {
+  border-color: rgba(236, 72, 153, 0.8);
+  background: linear-gradient(
+    135deg,
+    rgba(236, 72, 153, 0.22) 0%,
+    rgba(244, 114, 182, 0.18) 100%
+  );
+  color: #fce7f3;
+  transform: scale(1.08);
+  box-shadow: 0 0 12px rgba(236, 72, 153, 0.28);
+}
+.baobao-toggle.active {
+  background: linear-gradient(135deg, #ec4899 0%, #f472b6 100%);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 0 14px rgba(236, 72, 153, 0.4);
+}
+.baobao-toggle.active:hover {
+  color: #fff;
+  box-shadow: 0 0 18px rgba(236, 72, 153, 0.5);
+  transform: scale(1.08);
+}
+
+/* Gear button — 与 AI 圆钮同款轮廓（配色设置） */
+.gear-btn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(124, 77, 255, 0.45);
+  background: linear-gradient(
+    135deg,
+    rgba(124, 77, 255, 0.1) 0%,
+    rgba(77, 171, 255, 0.1) 100%
+  );
+  color: #a78bfa;
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
 }
 .gear-btn:hover,
 .gear-btn.active {
-  background: var(--bg);
-  color: var(--primary);
+  border-color: rgba(124, 77, 255, 0.85);
+  background: linear-gradient(
+    135deg,
+    rgba(124, 77, 255, 0.22) 0%,
+    rgba(77, 171, 255, 0.2) 100%
+  );
+  color: #c4b5fd;
+  transform: scale(1.08);
+  box-shadow: 0 0 12px rgba(124, 77, 255, 0.28);
+}
+.gear-btn.active {
+  background: linear-gradient(135deg, #7c4dff 0%, #4dabff 100%);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 0 14px rgba(124, 77, 255, 0.38);
+}
+.gear-btn.active:hover {
+  color: #fff;
+  box-shadow: 0 0 18px rgba(124, 77, 255, 0.5);
 }
 
 /* Dropdown wrapper */
@@ -431,5 +476,22 @@ input.color-hex {
   min-width: 0;
   max-width: 120px;
   font-family: ui-monospace, monospace;
+}
+
+/* 覆盖表单区通用 button，避免顶栏圆钮继承 padding */
+.header-actions > .dropdown-wrapper > .gear-btn,
+.header-actions > .baobao-toggle {
+  padding: 0;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 </style>

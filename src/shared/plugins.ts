@@ -1,4 +1,5 @@
 import { defineAsyncComponent, ref, type Component } from "vue";
+import aiBotIconUrl from "../../image/BOT.jpg?url";
 
 /** Descriptor for a floating-panel plugin (Chrome-extension style). */
 export interface PluginDescriptor {
@@ -8,6 +9,8 @@ export interface PluginDescriptor {
   label: string;
   /** Emoji or icon character */
   icon: string;
+  /** When set, PluginHost shows this image instead of emoji in menu / pills / float header */
+  iconUrl?: string;
   /** Short description */
   description: string;
   /** The Vue component to render inside the floating panel */
@@ -45,7 +48,8 @@ export const ALL_PLUGINS: PluginDescriptor[] = [
     id: "ai-agent",
     label: "AI 分析",
     icon: "🤖",
-    description: "将弹幕数据发送给 AI 进行智能分析",
+    iconUrl: aiBotIconUrl,
+    description: "对话式 AI；快捷指令仅自动拼装约定内容与导出摘录后发一条请求，可多轮追问。",
     component:
       __FEATURE_AI_AGENT__
         ? defineAsyncComponent(
