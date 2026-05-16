@@ -1995,8 +1995,14 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
     };
   }
 
-  const strippedAi = stripLeadingAiWrittenDataOverviewPlain(bodyPlain);
-  const persistedContent = strippedAi.trimEnd();
+  let strippedAi = stripLeadingAiWrittenDataOverviewPlain(bodyPlain);
+  let persistedContent = strippedAi.trimEnd();
+  if (!persistedContent && bodyPlain.trim()) {
+    console.warn(
+      `[ai-report] 去「数据概览」后正文为空，保留去围栏后原文（room=${roomId} ${kind}）；多为模型仅输出电报统计短行触发误判。`,
+    );
+    persistedContent = bodyPlain.trimEnd();
+  }
 
   const createdAt = Date.now();
   const titleDate = new Date(createdAt).toLocaleString("zh-CN", { hour12: false });
