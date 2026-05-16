@@ -531,6 +531,18 @@ Environment=PORT=8791
 WantedBy=multi-user.target
 ```
 
+#### 日报 AI 体积（热门直播间推荐）
+
+终稿请求过大时，上游可能返回空正文。可将本机 **`deploy/fmz-danmaku.env.example`** 复制到远端 **`/opt/fmz-danmaku-server/danmaku.env`**，并增加 **drop-in**（勿改主 unit，便于升级覆盖）：
+
+```bash
+mkdir -p /etc/systemd/system/fmz-danmaku.service.d
+# 内容见仓库 deploy/fmz-danmaku.service.d-ai-report.conf.example
+nano /etc/systemd/system/fmz-danmaku.service.d/ai-report.conf
+systemctl daemon-reload
+systemctl restart fmz-danmaku
+```
+
 启用并启动：
 
 ```bash

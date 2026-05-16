@@ -1,0 +1,4 @@
+# 放入远端：/etc/systemd/system/fmz-danmaku.service.d/ai-report.conf
+# 然后：systemctl daemon-reload && systemctl restart fmz-danmaku
+[Service]
+EnvironmentFile=-/opt/fmz-danmaku-server/danmaku.env

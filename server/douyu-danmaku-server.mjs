@@ -13,7 +13,7 @@
 
 import http from "node:http";
 import net from "node:net";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, unlinkSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +21,8 @@ import { geminiEligibleForOpenAiCompatTextChat } from "./gemini-openai-compat-ch
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8791;
+/** 仓库根（本文件在 server/ 下），不依赖 process.cwd */
+const REPO_ROOT = join(__dirname, "..");
 const DATA_DIR = join(__dirname, "data", "danmaku");
 
 if (!existsSync(DATA_DIR)) {
@@ -72,7 +74,7 @@ function saveRoomsList() {
 const roomInfoCache = new Map(); // roomId -> { data, fetchedAt }
 const ROOM_INFO_TTL = 60_000; // 1 minute cache
 
-const giftListCache = new Map(); // roomId -> { data: fetchGiftPayload, fetchedAt }
+const giftListCache = new Map(); // roomId -> { data, fetchedAt, manualMtime }
 const GIFT_LIST_TTL = 300_000; // 5 minutes cache
 
 /** 斗鱼 webconf 静态 JSON：背包 / 道具礼（全局，与直播间无关）；JSONP:`DYConfigCallback({...})` */
@@ -228,11 +230,91 @@ async function getPropGiftConfigMapCached() {
  * either namespace, so we must merge both sources into a single lookup map.
  *
  * Revenue classification (isPaid):
- * - v3 gifts: priceType === "YUCHI" → isPaid=true (streamer earns revenue)
+ * - v3 gifts: priceType === "YUCHI"（鱼翅）必为付费收益；非 YUWAN 且（contribution>0 或标价 price>0）亦标为付费（覆盖「金币」、部分活动礼在 CDN 里 contribution 为 0 的情况）
  * - prop gifts: pc >= 100 → isPaid=true (heuristic; most low-pc gifts are free items)
  *
  * `source` field: "v3" = from CDN v3 API, "prop" = from prop_gift_config
+ *
+ * **Manual overlay** (`server/data/douyu-manual-gift-metrics.json`): 与 CDN 条目**同名**则覆盖
+ * `value`（收入元/件）与 `intimacyScore`（亲密度）；无同名则插入 `source=manual` 的稳定 gfid 条目，供名称反查与统计。
  */
+
+/* ------------------------------------------------------------------ */
+/*  Global manual gift metrics (when CDN/prop missing or unreliable)   */
+/* ------------------------------------------------------------------ */
+
+const MANUAL_GIFT_METRICS_PATH = join(__dirname, "data", "douyu-manual-gift-metrics.json");
+
+function loadManualGiftMetricsFile() {
+  try {
+    if (!existsSync(MANUAL_GIFT_METRICS_PATH)) return null;
+    const j = JSON.parse(readFileSync(MANUAL_GIFT_METRICS_PATH, "utf-8"));
+    if (!j || !Array.isArray(j.entries)) return null;
+    return j;
+  } catch {
+    return null;
+  }
+}
+
+function getManualGiftMetricsMtimeMs() {
+  try {
+    if (!existsSync(MANUAL_GIFT_METRICS_PATH)) return 0;
+    return statSync(MANUAL_GIFT_METRICS_PATH).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function normalizeGiftNameForManual(s) {
+  return String(s ?? "").trim().toLowerCase();
+}
+
+/**
+ * 合并 `douyu-manual-gift-metrics.json`：与现有礼单**同名**则覆盖 value、亲密度与 isPaid；否则插入仅手填条目（稳定 gfid）。
+ */
+function applyManualGiftMetricsToMap(map) {
+  const blob = loadManualGiftMetricsFile();
+  if (!blob?.entries?.length || !map || typeof map !== "object") return;
+  for (const entry of blob.entries) {
+    const name = String(entry.name ?? "").trim();
+    const gfidManual = String(entry.gfid ?? "").trim();
+    if (!name || !gfidManual) continue;
+    const rev = Number(entry.revenueYuan);
+    const inti = Number(entry.intimacyScore);
+    const revN = Number.isFinite(rev) ? rev : 0;
+    const intiN = Number.isFinite(inti) ? inti : 0;
+    const kn = normalizeGiftNameForManual(name);
+    let hitId = null;
+    for (const [id, info] of Object.entries(map)) {
+      if (!info || typeof info !== "object") continue;
+      if (normalizeGiftNameForManual(info.name) === kn) {
+        hitId = id;
+        break;
+      }
+    }
+    if (hitId != null) {
+      map[hitId].value = revN;
+      map[hitId].intimacyScore = intiN;
+      map[hitId].isPaid = revN > 0;
+      map[hitId].manualMetrics = true;
+      if (!map[hitId].priceType) map[hitId].priceType = "MANUAL";
+    } else {
+      map[gfidManual] = {
+        name,
+        icon: "",
+        cost: 0,
+        value: revN,
+        intimacyScore: intiN,
+        from: 1,
+        source: "manual",
+        isPaid: revN > 0,
+        priceType: "MANUAL",
+        raw: null,
+        manualMetrics: true,
+      };
+    }
+  }
+}
 
 /**
  * Build merged gift map: v3 API (room-specific) + prop_gift_config (global legacy).
@@ -240,7 +322,14 @@ async function getPropGiftConfigMapCached() {
  */
 async function fetchGiftListPayload(roomId) {
   const cached = giftListCache.get(roomId);
-  if (cached && Date.now() - cached.fetchedAt < GIFT_LIST_TTL) return cached.data;
+  const manualMtime = getManualGiftMetricsMtimeMs();
+  if (
+    cached &&
+    Date.now() - cached.fetchedAt < GIFT_LIST_TTL &&
+    cached.manualMtime === manualMtime
+  ) {
+    return cached.data;
+  }
   try {
     // Fetch both sources in parallel
     const [propCfg, v3Result] = await Promise.all([
@@ -277,7 +366,7 @@ async function fetchGiftListPayload(roomId) {
     // --- Source 2: v3 CDN API (new IDs, room-specific) ---
     // v3 gifts are all direct (from=1); tabIds=2 is "privilege" tab, not backpack
     // Unit conversion: price/100 = 元 (cost), contribution/10 = 元 (value)
-    // Revenue: priceType === "YUCHI" → isPaid=true (streamer earns revenue)
+    // Revenue: YUCHI 必为付费；非 YUWAN 且（contribution>0 或标价 price>0）亦计付费，避免「金币」等虚拟币礼 contribution=0 时被误判为免费
     let v3Count = 0;
     if (v3Result) {
       for (const [id, entry] of Object.entries(v3Result)) {
@@ -295,6 +384,14 @@ async function fetchGiftListPayload(roomId) {
           if (pv.devote !== undefined) value = pv.devote / 10;
           propRaw = pv.raw ?? null;
         }
+        const pt = entry._priceType;
+        const rawContrib = Number(entry.value);
+        const rawPrice = Number(entry.cost);
+        const v3IsPaid =
+          pt === "YUCHI" ||
+          (pt !== "YUWAN" &&
+            ((Number.isFinite(rawContrib) && rawContrib > 0) ||
+              (Number.isFinite(rawPrice) && rawPrice > 0)));
         map[id] = {
           name: entry.name,
           icon: entry.icon,
@@ -302,8 +399,8 @@ async function fetchGiftListPayload(roomId) {
           value,
           from: fromVal,
           source: entry.source,
-          isPaid: entry._priceType === "YUCHI",
-          priceType: entry._priceType || undefined,
+          isPaid: v3IsPaid,
+          priceType: pt || undefined,
           raw: entry.raw,
           ...(propRaw ? { propRaw } : {}),
         };
@@ -314,6 +411,8 @@ async function fetchGiftListPayload(roomId) {
     if (!map["0"]) {
       map["0"] = { name: "未知礼物", icon: "", cost: 0, value: 0, from: 1, source: "fallback", isPaid: false, raw: null };
     }
+
+    applyManualGiftMetricsToMap(map);
 
     // --- Build backpackCatalog: from=2 gifts that exist in prop_gift_config ---
     /** @type {Record<string, { name: string, pc: number, devote: number, type: number|null, icon: string, overlaidFromProp: boolean, raw?: object|null }>} */
@@ -351,7 +450,7 @@ async function fetchGiftListPayload(roomId) {
     };
 
     const pack = { gifts: map, stats, backpackCatalog, backpackCatalogStats };
-    giftListCache.set(roomId, { data: pack, fetchedAt: Date.now() });
+    giftListCache.set(roomId, { data: pack, fetchedAt: Date.now(), manualMtime });
     console.log(`[danmaku] Gift list for room ${roomId}: v3=${v3Count}, prop=${propCount}, backpack=${roomBackpackGiftIds}, total=${stats.totalCount}`);
     return pack;
   } catch (e) {
@@ -899,9 +998,163 @@ function giftPiecesFromStoredRecord(g) {
   return 1;
 }
 
+/**
+ * 将斗鱼 STT 礼物相关报文统一成与历史 `dgb` 归档兼容的形态。
+ *
+ * - **dgb**：原始送礼（经典路径）。
+ * - **gdp**：本房间礼物文案事件（常见为「某某 赠送了 某礼×N」）；钻粉/部分活动礼仅下发 gdp、不下发 dgb，此前会被完全忽略。
+ * - **spbc**：广播类送礼；仅当 `drid` 与当前房间一致时记入，避免全站大礼物灌入本房间。
+ *
+ * 归一化后 `type` 固定为 `dgb` 便于前端/统计沿用；真实来源放在 `_giftWire`。
+ * @returns {object|null}
+ */
+function normalizeDouyuGiftSttToRecord(roomId, msg) {
+  if (!msg || typeof msg !== "object") return null;
+  const t = msg.type;
+  const rid = String(roomId ?? "").trim();
+
+  if (t === "dgb") {
+    return { ...msg, _giftWire: "dgb" };
+  }
+
+  if (t === "gdp") {
+    const gfn = String(msg.gfn ?? msg.gn ?? "").trim();
+    const gfcntRaw = msg.gfcnt ?? msg.gc ?? msg.cnt ?? "1";
+    const gfidHint = String(msg.gfid ?? msg.gid ?? msg.giftId ?? msg.pid ?? "").trim();
+    return {
+      ...msg,
+      type: "dgb",
+      _giftWire: "gdp",
+      ...(gfn !== "" ? { gfn } : {}),
+      gfcnt: String(gfcntRaw),
+      ...(gfidHint !== "" ? { gfid: gfidHint } : {}),
+    };
+  }
+
+  if (t === "spbc") {
+    const drid = String(msg.drid ?? msg.rid ?? "").trim();
+    if (!drid || drid !== rid) return null;
+    const nn = String(msg.sn ?? msg.nn ?? "").trim();
+    const gfn = String(msg.gn ?? msg.gfn ?? "").trim();
+    const gfcntRaw = msg.gc ?? msg.gfcnt ?? "1";
+    const gfid = String(msg.gfid ?? msg.gid ?? msg.giftId ?? "0").trim() || "0";
+    return {
+      ...msg,
+      type: "dgb",
+      _giftWire: "spbc",
+      ...(nn !== "" ? { nn } : {}),
+      ...(gfn !== "" ? { gfn } : {}),
+      gfcnt: String(gfcntRaw),
+      gfid,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * 从斗鱼 STT 礼物报文推断「事件发生」毫秒时间戳，用于按自然日统计。
+ * 若报文无可用字段或值离谱，返回 null → 由 recordGift 退回 Date.now()（接通时间）。
+ * 见：`cst` / `timestamp` / `ts` / `betime` 等在不同下行里可能出现，且可能为秒或毫秒。
+ */
+function giftSttEventTimeMs(msg, receiveHintMs = Date.now()) {
+  if (!msg || typeof msg !== "object") return null;
+  const keys = ["cst", "timestamp", "ts", "betime", "stk", "nti", "nt_ts", "livetime"];
+  /** @type {number[]} */
+  const cand = [];
+  for (const k of keys) {
+    const raw = msg[k];
+    if (raw == null || raw === "") continue;
+    const n = Number(String(raw).trim());
+    if (!Number.isFinite(n)) continue;
+    let ms;
+    if (n > 1e12) ms = Math.floor(n);
+    else if (n > 1e9) ms = Math.floor(n * 1000);
+    else continue;
+    if (ms < 946684800000 || ms > 4102444800000) continue;
+    cand.push(ms);
+  }
+  if (cand.length === 0) return null;
+  const win = 30 * 86400000;
+  for (const ms of cand) {
+    if (Math.abs(ms - receiveHintMs) <= win) return ms;
+  }
+  return cand[0];
+}
+
+/**
+ * 归档条目上的 ts（若老数据异常则尽量得到有限数）
+ */
+function archivedGiftEntryTsMs(g) {
+  const v = g?.ts;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** 日志用：毫秒时间戳 → Asia/Shanghai 可读字符串 */
+function giftLogFmtShanghai(ms) {
+  if (!Number.isFinite(ms)) return String(ms);
+  return new Date(ms).toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+/**
+ * 同步写一行诊断日志。
+ * 优先写 `server/data/danmaku/` 与 `仓库根/.fmz-dev/logs/`（路径由 __dirname 推导，**不依赖 cwd**）。
+ * `danmaku.log` 里常见只有 fmz-dev 分隔线，是因为 stdout 经管道缓冲；本函数用 appendFileSync 直接落盘。
+ */
+function danmakuSyncLog(line) {
+  const stamp = `[${new Date().toISOString()}] ${line}\n`;
+  console.log(line);
+  const fmzLogsDir = join(REPO_ROOT, ".fmz-dev", "logs");
+  const targets = [
+    { path: join(DATA_DIR, "danmaku-trace.log"), label: "DATA_DIR" },
+    { path: join(fmzLogsDir, "danmaku-trace.log"), label: "REPO_ROOT/.fmz-dev/logs" },
+  ];
+  for (const { path: p, label } of targets) {
+    try {
+      mkdirSync(dirname(p), { recursive: true });
+      appendFileSync(p, stamp, "utf8");
+    } catch (e) {
+      try {
+        mkdirSync(DATA_DIR, { recursive: true });
+        appendFileSync(
+          join(DATA_DIR, "danmaku-trace-write-errors.log"),
+          `${stamp}[${label}] ${p}: ${e?.message || String(e)}\n`,
+          "utf8",
+        );
+      } catch {
+        /* */
+      }
+    }
+  }
+  try {
+    mkdirSync(fmzLogsDir, { recursive: true });
+    appendFileSync(join(fmzLogsDir, "danmaku.log"), stamp, "utf8");
+  } catch {
+    /* 与 npm 占用同文件时可能失败 */
+  }
+}
+
+danmakuSyncLog(
+  `[danmaku] 模块已加载（将 listen PORT=${PORT}） REPO_ROOT=${REPO_ROOT}`,
+);
+
 function recordGift(roomId, msg) {
-  // Save all available fields from the dgb message
-  const entry = { ...msg, roomId, ts: Date.now() };
+  // Save all available fields from the normalized gift message (dgb-compatible)
+  const receiveMs = Date.now();
+  const eventMs = giftSttEventTimeMs(msg, receiveMs);
+  const ts = eventMs ?? receiveMs;
+  const entry = { ...msg, roomId, ts };
   migrateOldGiftFile(roomId);
   const index = loadGiftIndex(roomId);
   // Get current chunk
@@ -1266,8 +1519,8 @@ function collectGiftLinesInRange(roomId, startTs, endTs, maxLines) {
   for (let i = 0; i < index.fileCount; i++) {
     const chunk = loadJsonFile(giftChunkPath(roomId, i), []);
     for (const g of chunk) {
-      const ts = g.ts || 0;
-      if (ts < startTs || ts > endTs) continue;
+      const ts = archivedGiftEntryTsMs(g);
+      if (!(ts > 0) || ts < startTs || ts > endTs) continue;
       bucket.push({ ts, g });
     }
   }
@@ -1285,14 +1538,99 @@ function collectGiftLinesInRange(roomId, startTs, endTs, maxLines) {
     const n = giftPiecesFromStoredRecord(g);
     return `[${time}] ${g.nn || "匿名"} 赠送 ${name} ×${n}`;
   });
+  console.log(
+    `[danmaku] collectGiftLinesInRange roomId=${roomId} inclusive=[${giftLogFmtShanghai(startTs)} ~ ${giftLogFmtShanghai(endTs)}] ms=[${startTs}, ${endTs}] totalMatched=${totalMatched} returnedLines=${lines.length}(max=${maxLines}) truncated=${truncated} giftChunkFiles=${index.fileCount}`,
+  );
   return { lines, totalMatched, truncated };
 }
 
 /**
+ * 手填礼物的别名 → 与主名相同的 gfid（resolveArchivedGiftGfid 用 gfn 反查）。
+ * 斗鱼 gdp/dgb 常为简称（如「赤兔」），与手动表 canonical 名「赤兔宝马」不一致时需配 aliases。
+ */
+function mergeManualGiftAliasesIntoNameIndex(m, catalogMap) {
+  const blob = loadManualGiftMetricsFile();
+  if (!blob?.entries?.length) return;
+  for (const entry of blob.entries) {
+    const gfidManual = String(entry.gfid ?? "").trim();
+    const primary = normalizeGiftNameForManual(entry.name);
+    if (!gfidManual || !primary) continue;
+    let targetGfid = m.has(primary) ? m.get(primary) : null;
+    if (targetGfid == null && catalogMap && catalogMap[gfidManual]) targetGfid = gfidManual;
+    if (targetGfid == null) continue;
+    const aliases = Array.isArray(entry.aliases) ? entry.aliases : [];
+    for (const al of aliases) {
+      const k = normalizeGiftNameForManual(al);
+      if (!k) continue;
+      m.set(k, targetGfid);
+    }
+  }
+}
+
+/**
+ * 从房间礼单建「礼物展示名 → gfid」索引（小写、去首尾空）；同名多 id 时取先遍历到的。
+ * 合并 `douyu-manual-gift-metrics.json` 中 entries[].aliases。
+ * @param {Record<string, { name?: string }>|null|undefined} catalogMap
+ * @returns {Map<string, string>}
+ */
+function buildGiftNameToGfidIndex(catalogMap) {
+  /** @type {Map<string, string>} */
+  const m = new Map();
+  if (catalogMap && typeof catalogMap === "object") {
+    for (const [id, meta] of Object.entries(catalogMap)) {
+      if (!id || id === "0") continue;
+      const n = String(meta?.name ?? "").trim().toLowerCase();
+      if (!n) continue;
+      if (!m.has(n)) m.set(n, id);
+    }
+  }
+  mergeManualGiftAliasesIntoNameIndex(m, catalogMap);
+  return m;
+}
+
+/**
+ * 归档聚合用 gfid：优先保证与行内礼物展示名（gfn）能在礼单中对上，否则手填兜底（如「赤兔宝马」）无法计入收入。
+ *
+ * 典型坏例：下行带了占位/错误 gfid，但 gfn 为正确中文名；礼单里该 id 无名或与 gfn 不一致，若盲信 gfid 会落到无 isPaid 的条目上。
+ *
+ * @param {object} g 归档礼物行
+ * @param {Map<string, string>|null|undefined} nameToGfid
+ * @param {Record<string, { name?: string }>|null|undefined} [catalogMap] 当前房间 merge 后礼单；传入时才可做「展示名 vs gfn」一致性校验
+ */
+function resolveArchivedGiftGfid(g, nameToGfid, catalogMap = null) {
+  const raw = String(g.gfid ?? "").trim();
+  const gfn = String(g.gfn ?? "").trim();
+  const gfnLower = gfn ? gfn.toLowerCase() : "";
+  const fromName =
+    gfnLower && nameToGfid && nameToGfid.size > 0 ? nameToGfid.get(gfnLower) : undefined;
+
+  if (fromName && gfn) {
+    if (!raw || raw === "0") return fromName;
+    if (!catalogMap) return raw;
+
+    const rawMeta = catalogMap[raw];
+    const rawNameNorm = String(rawMeta?.name ?? "").trim()
+      ? normalizeGiftNameForManual(rawMeta.name)
+      : "";
+    const gfnNorm = normalizeGiftNameForManual(gfn);
+
+    if (!rawMeta || (rawNameNorm && rawNameNorm !== gfnNorm) || (!rawNameNorm && Boolean(gfnNorm))) {
+      return fromName;
+    }
+  }
+
+  if (raw && raw !== "0") return raw;
+  if (fromName) return fromName;
+  return raw || "0";
+}
+
+/**
  * 统计时间窗内礼物：按 gfid / 用户聚合（与 collectGiftLinesInRange 同源数据）。
+ * @param {Map<string, string>|null} [nameToGfid] 若有，则对缺 gfid/为0 或与礼单名不一致的记录按 gfn 反查礼单
+ * @param {Record<string, { name?: string }>|null} [catalogMap] 与 fetchGiftListPayload().gifts 同源，供 resolveArchivedGiftGfid 校验
  * @returns {{ totalPieces: number, byGift: Record<string, { count: number, name: string }>, byUser: Record<string, { nn: string, count: number, gifts: Record<string, number> }> }}
  */
-function aggregateGiftsInTimeRange(roomId, startTs, endTs) {
+function aggregateGiftsInTimeRange(roomId, startTs, endTs, nameToGfid = null, catalogMap = null) {
   migrateOldGiftFile(roomId);
   const index = loadGiftIndex(roomId);
   /** @type {Record<string, { count: number, name: string }>} */
@@ -1303,9 +1641,9 @@ function aggregateGiftsInTimeRange(roomId, startTs, endTs) {
   for (let i = 0; i < index.fileCount; i++) {
     const chunk = loadJsonFile(giftChunkPath(roomId, i), []);
     for (const g of chunk) {
-      const ts = g.ts || 0;
-      if (ts < startTs || ts > endTs) continue;
-      const gfid = String(g.gfid ?? "0");
+      const ts = archivedGiftEntryTsMs(g);
+      if (!(ts > 0) || ts < startTs || ts > endTs) continue;
+      const gfid = resolveArchivedGiftGfid(g, nameToGfid, catalogMap);
       const amt = giftPiecesFromStoredRecord(g);
       totalPieces += amt;
       if (!byGift[gfid]) byGift[gfid] = { count: 0, name: "" };
@@ -1328,7 +1666,8 @@ function aggregateGiftsInTimeRange(roomId, startTs, endTs) {
  * - 付费人数：上述观众支出估算 > 0 的去重送礼 uid 数
  */
 function computeGiftFinancialStats(roomId, startTs, endTs, catalogMap) {
-  const { byGift, byUser } = aggregateGiftsInTimeRange(roomId, startTs, endTs);
+  const nameIdx = buildGiftNameToGfidIndex(catalogMap);
+  const { byGift, byUser } = aggregateGiftsInTimeRange(roomId, startTs, endTs, nameIdx, catalogMap);
   let streamerIncomeYuan = 0;
   let audiencePaidYuan = 0;
   for (const [gfid, v] of Object.entries(byGift)) {
@@ -1366,7 +1705,8 @@ function computeGiftFinancialStats(roomId, startTs, endTs, catalogMap) {
  * @param {Record<string, { name?: string, icon?: string, value?: number, isPaid?: boolean }>|null} catalogMap fetchGiftListPayload().gifts
  */
 function formatGiftRankDigestForAi(roomId, startTs, endTs, catalogMap) {
-  const { totalPieces, byGift, byUser } = aggregateGiftsInTimeRange(roomId, startTs, endTs);
+  const nameIdx = buildGiftNameToGfidIndex(catalogMap);
+  const { totalPieces, byGift, byUser } = aggregateGiftsInTimeRange(roomId, startTs, endTs, nameIdx, catalogMap);
   const lines = [];
   lines.push(
     "说明：以下均来自本服务对该房间的礼物归档与斗鱼礼物配置缓存；不等同斗鱼官方榜单或第三方直播间排行站点（如「在看直播」类数据站）的实时口径，请勿写成官方结算或外链抓取结果。",
@@ -1659,8 +1999,52 @@ const MAX_AI_REPORT_ENTRIES = 500;
 const AI_REPORT_CHUNK_DM_LINES = Math.max(200, Number(process.env.FMZ_AI_REPORT_CHUNK_DM_LINES) || 1600);
 /** 单段摘录字符数超过该值时，自动缩小每段行数，避免单段仍过大 */
 const AI_REPORT_CHUNK_FORCE_CHARS = Math.max(50_000, Number(process.env.FMZ_AI_REPORT_CHUNK_FORCE_CHARS) || 220_000);
-/** 正式成文时附带均匀抽样的原文行数，供「最佳弹幕」等须引原文的场景 */
-const AI_REPORT_VERBATIM_DM_SAMPLE = Math.max(80, Number(process.env.FMZ_AI_REPORT_VERBATIM_DM_SAMPLE) || 420);
+/** 发给 AI 的礼物明细行数上限（全量常顶爆上下文；排行摘要已单独提供） */
+const AI_REPORT_MAX_GIFT_LINES_IN_PROMPT = Math.max(80, Number(process.env.FMZ_AI_REPORT_MAX_GIFT_LINES) || 650);
+/** 仅日报：弹幕总字符超此值且当前只会打一段时，强制拆成多段预摘要 */
+const AI_REPORT_DAILY_FORCE_CHUNK_TEXT_CHARS = Math.max(30_000, Number(process.env.FMZ_AI_REPORT_DAILY_FORCE_CHUNK_CHARS) || 96_000);
+/** 强制拆段时的最少段数（在日文本字符触发时） */
+const AI_REPORT_DAILY_FORCE_MIN_PARTS = Math.max(2, Math.min(8, Number(process.env.FMZ_AI_REPORT_DAILY_FORCE_MIN_PARTS) || 3));
+/** 分段日报合成时，均匀抽样并入模的原文弹幕行数（供「最佳弹幕」等逐字引用） */
+const AI_REPORT_VERBATIM_DM_SAMPLE = Math.max(40, Number(process.env.FMZ_AI_REPORT_VERBATIM_DM_SAMPLE) || 160);
+
+/**
+ * @param {string[]} giftLines
+ * @param {string} giftTextFallback
+ */
+function limitGiftLinesForAiPrompt(giftLines, giftTextFallback) {
+  const lines = Array.isArray(giftLines) ? giftLines : [];
+  if (!lines.length) return { text: giftTextFallback, truncated: false, included: 0 };
+  if (lines.length <= AI_REPORT_MAX_GIFT_LINES_IN_PROMPT) {
+    return { text: lines.join("\n"), truncated: false, included: lines.length };
+  }
+  const sampled = sampleLinesEvenly(lines, AI_REPORT_MAX_GIFT_LINES_IN_PROMPT);
+  return { text: sampled.join("\n"), truncated: true, included: sampled.length };
+}
+
+/**
+ * 在「字符量/礼物量」仍巨大但只有一段弹幕时，强制拆多段做预摘要（主要救日报）。
+ * @param {string[]} dmLines
+ * @param {string} joinedDm
+ * @param {{ kind: string, giftTextLen: number }} ctx
+ * @returns {string[][]}
+ */
+function computeDanmakuLineChunksMaybeForceDaily(dmLines, joinedDm, ctx) {
+  let chunks = computeDanmakuLineChunks(dmLines, joinedDm);
+  const n = dmLines.length;
+  if (!n) return chunks;
+  const textLen = String(joinedDm || "").length;
+  const giftLen = ctx.giftTextLen || 0;
+  if (ctx.kind !== "daily" || chunks.length > 1) return chunks;
+  const heavy = textLen >= AI_REPORT_DAILY_FORCE_CHUNK_TEXT_CHARS || giftLen >= 140_000;
+  if (!heavy) return chunks;
+  const parts = Math.min(AI_REPORT_DAILY_FORCE_MIN_PARTS, n);
+  const forceSize = Math.max(250, Math.ceil(n / parts));
+  chunks = [];
+  for (let i = 0; i < n; i += forceSize) chunks.push(dmLines.slice(i, i + forceSize));
+  if (chunks.length < 2) return computeDanmakuLineChunks(dmLines, joinedDm);
+  return chunks;
+}
 
 /**
  * @param {string[]} lines
@@ -1902,9 +2286,7 @@ function looksPersistAiTelemetryOverviewLine(ln) {
   if (/^礼物人数/.test(s)) return true;
   if (/^(房间|直播间)\s+\d/.test(s)) return true;
   if (/^弹幕\s*[｜|]\s*.+\d/.test(s)) return true;
-  if (/^弹幕\s+\d/.test(s)) return true;
   if (/^礼物\s*[｜|]\s*.+\d/.test(s)) return true;
-  if (/^礼物\s+\d/.test(s)) return true;
   if (/^付费\S*\s+\d/.test(s)) return true;
   if (/^口径说明/.test(s)) return true;
   return false;
@@ -1999,18 +2381,27 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
   }
   const giftRankDigest = formatGiftRankDigestForAi(roomId, exp.startTs, exp.endTs, catalogMap);
 
+  const giftLimited = limitGiftLinesForAiPrompt(exp.giftLines || [], exp.giftText);
   const dmLines = exp.danmakuLines || [];
-  const lineChunks = computeDanmakuLineChunks(dmLines, exp.danmakuText);
+  const lineChunks = computeDanmakuLineChunksMaybeForceDaily(dmLines, exp.danmakuText, {
+    kind,
+    giftTextLen: giftLimited.text.length,
+  });
   const useMultiPass = lineChunks.length > 1;
   const modelCandidates = await resolveAiAgentTriggerModelCandidates();
+
+  /** 分段预摘要全文；终稿为空时用于兜底展示 */
+  let multipassChunkSummariesText = null;
 
   /** @type {string} */
   let danmakuExcerptBlock;
   /** @type {string|null} */
   let multiPassNote = null;
   if (useMultiPass) {
-    console.log(`[ai-report] 分段预摘要: ${lineChunks.length} 段, 弹幕 ${dmLines.length} 行`);
-    const chunkSummaries = await summarizeDanmakuChunksForFinalReport(
+    console.log(
+      `[ai-report] 分段预摘要: ${lineChunks.length} 段, 弹幕 ${dmLines.length} 行, 礼物入模 ${giftLimited.included} 行`,
+    );
+    multipassChunkSummariesText = await summarizeDanmakuChunksForFinalReport(
       modelCandidates,
       roomDisplay,
       exp.rangeLabel,
@@ -2018,7 +2409,7 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
     );
     const verbatim = sampleLinesEvenly(dmLines, AI_REPORT_VERBATIM_DM_SAMPLE).join("\n");
     danmakuExcerptBlock =
-      `--- 弹幕：分段要点（模型预读 ${lineChunks.length} 段）---\n${chunkSummaries}`
+      `--- 弹幕：分段要点（模型预读 ${lineChunks.length} 段）---\n${multipassChunkSummariesText}`
       + `\n\n--- 弹幕：原文均匀抽样（供引用，勿改行内正文）---\n${verbatim}`;
     multiPassNote =
       `弹幕成文｜体量较大，已分 ${lineChunks.length} 段预摘要，并均匀抽样 ${Math.min(dmLines.length, AI_REPORT_VERBATIM_DM_SAMPLE)} 条原文行供引用；评选「最佳弹幕」须逐字来自本消息内的原文抽样或分段要点中的「原文：」行，禁止编造。`;
@@ -2026,12 +2417,17 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
     danmakuExcerptBlock = `--- 弹幕摘录 ---\n${exp.danmakuText}`;
   }
 
+  const giftPromptNote = giftLimited.truncated
+    ? `礼物摘录｜窗口内匹配 ${exp.giftMatched} 条，为控制上下文已均匀抽样 ${giftLimited.included} 条进入下文（排行摘要仍完整）。`
+    : null;
+
   const dataInfoLines = [
     "【数据信息】以下为导出窗口与抽样口径（仅供定性参考）。**客户端仪表盘顶部已展示结构化「数据概览」**；正文勿写「数据概览」小节或电报数字清单（勿列周期、房间、条数、付费笔数等）。下列数字行仅供理解样本规模，正文请从「概要信息」起笔。",
     `周期｜${exp.rangeLabel}`,
     `房间｜${roomDisplay}｜${roomId}`,
     `弹幕归档｜窗口内录制 chatmsg 共匹配 ${exp.danmakuMatched} 条｜下文至多摘录 ${exp.danmakuIncluded} 条｜截断 ${exp.danmakuTruncated ? "是" : "否"}`,
     multiPassNote,
+    giftPromptNote,
     `礼物归档｜窗口内匹配 ${exp.giftMatched} 条｜下文至多摘录 ${exp.giftIncluded} 条｜截断 ${exp.giftTruncated ? "是" : "否"}`,
     "另有「礼物排行与礼物类型摘要」须在后续小节引用解读；勿冒充外链实时榜。",
   ].filter(Boolean);
@@ -2059,16 +2455,20 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
   const intro = kind === "daily" ? dailyIntro : weeklyIntro;
   const task = `${intro}\n\n${proseStyle}\n\n${bothInstr}\n\n${mentality}\n\n${statsFirst}\n\n${structure}\n\n${fmzMetaFence}`;
   const rankBlock = `--- 礼物排行与礼物类型摘要（本地归档 + catalog） ---\n${giftRankDigest}`;
-  const excerpts = `${danmakuExcerptBlock}\n\n--- 礼物摘录 ---\n${exp.giftText}`;
+  const excerpts = `${danmakuExcerptBlock}\n\n--- 礼物摘录 ---\n${giftLimited.text}`;
   const userBlock = `${dataInfo}\n\n${rankBlock}\n\n【分析任务】\n${task}\n\n${excerpts}`;
   const systemContent =
     kind === "daily"
       ? "你是斗鱼直播间数据分析师，写中文日报。篇幅紧凑；正文一律常规字重，禁止粗体（不要用 HTML b/strong）。仪表盘顶部已有「数据概览」；你从「概要信息」定性写起，勿自写数据概览或电报数字清单。禁止 Markdown。礼物解读引用消息内排行摘要。文末输出 <<<FMZ_REPORT_META ... >>>。"
       : "你是斗鱼直播间数据分析师，写中文周报。篇幅紧凑；正文一律常规字重，禁止粗体（不要用 HTML b/strong）。仪表盘顶部已有「数据概览」；你从「概要信息」定性写起，勿自写数据概览或电报数字清单。禁止 Markdown。礼物解读引用消息内排行摘要。文末输出 <<<FMZ_REPORT_META ... >>>。";
+  console.log(
+    `[ai-report] ${kind} room=${roomId} multipass=${useMultiPass} userBlock≈${userBlock.length} 字`,
+  );
   const rawAiText = await chatAiAgentAccumulateFirstAvailable(modelCandidates, [
     { role: "system", content: systemContent },
     { role: "user", content: userBlock },
   ]);
+  console.log(`[ai-report] rawOutLen=${String(rawAiText || "").length}`);
   const { content: bodyContent, metaRaw } = stripFmzReportMeta(rawAiText);
   const bodyPlain = sanitizeAiReportBodyPlain(bodyContent);
   const metaNorm = normalizeAiReportMeta(metaRaw);
@@ -2108,6 +2508,32 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
       `[ai-report] 去「数据概览」后正文为空，保留去围栏后原文（room=${roomId} ${kind}）；多为模型仅输出电报统计短行触发误判。`,
     );
     persistedContent = bodyPlain.trimEnd();
+  }
+  if (!persistedContent.trim()) {
+    const rawStr = String(rawAiText || "");
+    const rawLen = rawStr.length;
+    const bodyAfterFenceLen = String(bodyContent ?? "").trim().length;
+    const preview = rawStr.slice(0, 480).replace(/\s+/g, " ");
+    const chunkFallback =
+      useMultiPass && multipassChunkSummariesText && multipassChunkSummariesText.trim();
+    if (chunkFallback) {
+      persistedContent = [
+        "【说明】终稿模型未返回可读正文（热门房间常见：user 消息过长导致上游截断或空输出）。下方为分段预摘要的自动拼接，未经终稿润色；可略减小 FMZ_AI_REPORT_CHUNK_DM_LINES / FMZ_AI_REPORT_MAX_GIFT_LINES 后重试日报。",
+        "",
+        multipassChunkSummariesText.trim(),
+      ].join("\n");
+      console.warn(
+        `[ai-report] empty final body; using chunk-summary fallback room=${roomId} ${kind} rawLen=${rawLen} bodyAfterFence=${bodyAfterFenceLen} userBlockLen=${userBlock.length} chunkChars=${multipassChunkSummariesText.length} preview=${preview}`,
+      );
+    } else {
+      persistedContent = [
+        "【说明】本次未生成可读正文。常见原因：上游返回为空或仅含围栏、上下文过大被截断、或网络中断。",
+        "请稍后重试。若在热门直播间反复出现，可在服务器为 fmz-danmaku 调整环境变量：FMZ_AI_REPORT_MAX_GIFT_LINES（礼物入模行数上限）、FMZ_AI_REPORT_DAILY_FORCE_CHUNK_CHARS、FMZ_AI_REPORT_CHUNK_DM_LINES、FMZ_AI_REPORT_VERBATIM_DM_SAMPLE；并查看 fmz-ai-agent、fmz-danmaku 日志中的 [ai-report]。",
+      ].join("\n");
+      console.warn(
+        `[ai-report] empty body after strip room=${roomId} ${kind} rawLen=${rawLen} bodyAfterFence=${bodyAfterFenceLen} userBlockLen=${userBlock.length} multipass=${useMultiPass} preview=${preview}`,
+      );
+    }
   }
 
   const createdAt = Date.now();
@@ -2436,8 +2862,9 @@ function connectBackendRoom(roomId) {
       recordDanmakuForRoom(conn, danmaku);
       processTriggers(danmaku, roomId);
     }
-    if (msg.type === "dgb") {
-      const giftEntry = recordGift(roomId, msg);
+    const giftNorm = normalizeDouyuGiftSttToRecord(roomId, msg);
+    if (giftNorm) {
+      const giftEntry = recordGift(roomId, giftNorm);
       broadcastToSSE("gift", giftEntry);
     }
     if (msg.type === "uenter") broadcastToSSE("enter", { type: "uenter", uid: msg.uid || "", nn: msg.nn || "", roomId, ts: Date.now() });
@@ -2565,6 +2992,11 @@ function createWebCaptureConnection(roomId, sseRes) {
         sendSSE("trigger", logEntry);
       }
     }
+    const giftNorm = normalizeDouyuGiftSttToRecord(ctx.roomId, msg);
+    if (giftNorm) {
+      const giftEntry = recordGift(ctx.roomId, giftNorm);
+      sendSSE("gift", giftEntry);
+    }
   }
 
   function onData(chunk) {
@@ -2607,8 +3039,16 @@ function destroyWebCaptureConnection(ctx) {
 /*  HTTP server                                                       */
 /* ------------------------------------------------------------------ */
 
-function jsonReply(res, data, status = 200) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, X-Password" });
+function jsonReply(res, data, status = 200, extraHeaders = null) {
+  /** @type {Record<string, string>} */
+  const headers = {
+    "Content-Type": "application/json; charset=utf-8",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-Password",
+    ...(extraHeaders && typeof extraHeaders === "object" ? extraHeaders : {}),
+  };
+  res.writeHead(status, headers);
   res.end(JSON.stringify(data));
 }
 
@@ -2619,6 +3059,207 @@ function readBody(req) {
     req.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf-8"))); } catch (e) { reject(e); } });
     req.on("error", reject);
   });
+}
+
+/**
+ * /gifts/:rid/stats 的 range 参数归一（斗鱼观众口径常用北京时间自然日）
+ * @param {string|null|undefined} raw
+ */
+function normalizeGiftStatsRangeParam(raw) {
+  if (raw == null) return "today";
+  let s = String(raw).trim().normalize("NFKC");
+  s = s.replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E]/g, "").trim();
+  const lower = s.toLowerCase();
+  if (lower === "undefined" || lower === "null" || lower === "[object object]") return "today";
+  const ascii = lower.replace(/[^\x20-\x7e]/g, "");
+  if (
+    s === "昨日" ||
+    s === "昨天" ||
+    lower === "yesterday" ||
+    /^yesterday\b/i.test(ascii) ||
+    lower === "prev_day" ||
+    lower === "prev-day"
+  ) {
+    return "yesterday";
+  }
+  if (s === "今日" || s === "今天" || lower === "today" || /^today\b/i.test(ascii)) return "today";
+  if (s === "本周" || lower === "week" || /^week\b/i.test(ascii)) return "week";
+  if (s === "本月" || lower === "month" || /^month\b/i.test(ascii)) return "month";
+  if (s === "近7天" || s === "7天" || lower === "7days" || /^7days\b/i.test(ascii)) return "7days";
+  if (s === "近30天" || s === "30天" || lower === "30days" || /^30days\b/i.test(ascii)) return "30days";
+  return lower;
+}
+
+/** 取 URL 中声明的统计 range（便于排查重复 query / 别名参数） */
+function pickGiftStatsRangeQueryRaw(url) {
+  const keyOrder = ["range", "window", "giftRange"];
+  for (const k of keyOrder) {
+    const all = url.searchParams.getAll(k);
+    if (!all.length) continue;
+    for (let i = all.length - 1; i >= 0; i--) {
+      const s = String(all[i] ?? "").trim();
+      if (s) return s;
+    }
+  }
+  return "";
+}
+
+/** 86400000；上海无夏令时，自然日与固定 24h 对齐 */
+const GIFT_STATS_MS_PER_DAY = 86400000;
+
+/**
+ * 锚点时刻在上海时区下的日历日与「今日 0 点」「明日 0 点」「本月 1 日 0 点」
+ * 使用 en-CA 得稳定 YYYY-MM-DD，避免人工拼 parts 遗漏
+ * @param {number} anchorMs
+ * @returns {{ y: number, mo: number, d: number, ymdStr: string, todayStart: number, nextDayStart: number, monthStart: number } | null}
+ */
+function shanghaiGiftStatsDayAnchors(anchorMs) {
+  const raw = Number(anchorMs);
+  const a = Number.isFinite(raw) ? raw : Date.now();
+  const dt = new Date(a);
+  if (Number.isNaN(dt.getTime())) return null;
+  const ymdStr = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(dt);
+  const segs = ymdStr.split("-");
+  if (segs.length !== 3) return null;
+  const [ys, mos, ds] = segs;
+  const y = Number(ys);
+  const mo = Number(mos);
+  const d = Number(ds);
+  if (![y, mo, d].every((n) => Number.isFinite(n))) return null;
+
+  const todayStart = Date.parse(`${ymdStr}T00:00:00+08:00`);
+  if (!Number.isFinite(todayStart)) return null;
+
+  const monthYmd = `${ys}-${mos}-01`;
+  const monthStart = Date.parse(`${monthYmd}T00:00:00+08:00`);
+  if (!Number.isFinite(monthStart)) return null;
+
+  const nextDayStart = todayStart + GIFT_STATS_MS_PER_DAY;
+  return { y, mo, d, ymdStr, todayStart, nextDayStart, monthStart };
+}
+
+/** 与本地 Date#getDay() 一致：0=周日 … 6=周六；按 Asia/Shanghai */
+function shanghaiGetDaySun0(ms) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Shanghai", weekday: "long" }).formatToParts(new Date(ms));
+  const long = parts.find((p) => p.type === "weekday")?.value ?? "";
+  /** @type {Record<string, number>} */
+  const map = {
+    Sunday: 0,
+    Monday: 1,
+    Tuesday: 2,
+    Wednesday: 3,
+    Thursday: 4,
+    Friday: 5,
+    Saturday: 6,
+  };
+  return map[long] ?? 0;
+}
+
+/**
+ * 统计时间窗：除 yesterday 外均无 endTs（仅下界）；yesterday 为 [昨日00:00, 今日00:00)（上海时区）
+ * 锚点经 en-CA+Shanghai 解析，保证 todayStart / yesterday 的 end 为合法上海日界；返回毫秒为整数。
+ * @returns {{ startTs: number, endTs?: number }}
+ */
+function computeGiftStatsTimeWindow(rangeCanon, nowMs = Date.now()) {
+  const fmt = (ms) =>
+    Number.isFinite(ms)
+      ? new Date(ms).toLocaleString("zh-CN", {
+          timeZone: "Asia/Shanghai",
+          hour12: false,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })
+      : "(invalid)";
+
+  let ax = shanghaiGiftStatsDayAnchors(nowMs);
+  if (!ax) {
+    console.warn(`[danmaku] computeGiftStatsTimeWindow: 无效 nowMs=${JSON.stringify(nowMs)}，改用 Date.now()`);
+    ax = shanghaiGiftStatsDayAnchors(Date.now());
+  }
+  if (!ax) {
+    console.error("[danmaku] computeGiftStatsTimeWindow: 第二次仍无法解析 Asia/Shanghai 日历锚点");
+    ax = shanghaiGiftStatsDayAnchors(Date.now());
+  }
+  if (!ax) {
+    throw new Error("computeGiftStatsTimeWindow: fatal calendar (Asia/Shanghai)");
+  }
+
+  const { todayStart, nextDayStart, monthStart } = ax;
+
+  /** @type {{ startTs: number, endTs?: number }} */
+  let out;
+  switch (rangeCanon) {
+    case "yesterday":
+      out = { startTs: todayStart - GIFT_STATS_MS_PER_DAY, endTs: todayStart };
+      break;
+    case "today":
+      out = { startTs: todayStart };
+      break;
+    case "week": {
+      const day = shanghaiGetDaySun0(todayStart);
+      const diff = day === 0 ? 6 : day - 1;
+      out = { startTs: todayStart - diff * GIFT_STATS_MS_PER_DAY };
+      break;
+    }
+    case "month":
+      out = { startTs: monthStart };
+      break;
+    case "7days":
+      out = { startTs: nextDayStart - 7 * GIFT_STATS_MS_PER_DAY };
+      break;
+    case "30days":
+      out = { startTs: nextDayStart - 30 * GIFT_STATS_MS_PER_DAY };
+      break;
+    default:
+      out = { startTs: todayStart };
+      break;
+  }
+
+  out.startTs = Math.trunc(out.startTs);
+  if (out.endTs !== undefined) {
+    out.endTs = Math.trunc(out.endTs);
+  }
+
+  if (rangeCanon === "yesterday") {
+    if (!Number.isFinite(out.startTs) || !Number.isFinite(out.endTs) || out.endTs !== out.startTs + GIFT_STATS_MS_PER_DAY) {
+      out.startTs = Math.trunc(todayStart - GIFT_STATS_MS_PER_DAY);
+      out.endTs = Math.trunc(todayStart);
+      console.warn("[danmaku] computeGiftStatsTimeWindow: yesterday 窗口已按锚点修正");
+    }
+  } else if (out.endTs !== undefined) {
+    delete out.endTs;
+  }
+
+  if (!Number.isFinite(out.startTs)) {
+    console.error("[danmaku] computeGiftStatsTimeWindow: startTs 非法", out);
+    if (rangeCanon === "yesterday") {
+      out.startTs = Math.trunc(ax.todayStart - GIFT_STATS_MS_PER_DAY);
+      out.endTs = Math.trunc(ax.todayStart);
+    } else {
+      out.startTs = Math.trunc(ax.todayStart);
+      delete out.endTs;
+    }
+  }
+
+  const endPart =
+    out.endTs === undefined
+      ? "endTs=（无，统计至当前）"
+      : `endTs=${out.endTs}（${fmt(out.endTs)}，区间为 [start,end)）`;
+
+  console.log(
+    `[danmaku] computeGiftStatsTimeWindow range=${rangeCanon} nowMs=${nowMs} → startTs=${out.startTs}（${fmt(out.startTs)}） ${endPart}`,
+  );
+
+  return out;
 }
 
 /** @param {import("http").IncomingMessage} req */
@@ -2835,57 +3476,51 @@ const server = http.createServer(async (req, res) => {
     const index = loadGiftIndex(rid);
     return jsonReply(res, { ok: true, gifts, totalCount: index.totalCount });
   }
-  // GET /gifts/:roomId/stats — get gift value stats for a room within a time range
+  // GET /gifts/:roomId/stats — 礼物统计面板数据：按 range 对应的上海自然日/滚动窗过滤归档，聚合成 stats
   if (path.match(/^\/gifts\/[^/]+\/stats$/) && req.method === "GET") {
+    // ① 房间号：路径第二段，与前端 encodeURIComponent(rid) 对应
     const rid = decodeURIComponent(path.split("/")[2]);
-    const range = url.searchParams.get("range") || "today";
-    const now = new Date();
-    let startTs;
-    switch (range) {
-      case "today": {
-        const d = new Date(now); d.setHours(0, 0, 0, 0);
-        startTs = d.getTime();
-        break;
-      }
-      case "week": {
-        const d = new Date(now); const day = d.getDay(); const diff = day === 0 ? 6 : day - 1;
-        d.setDate(d.getDate() - diff); d.setHours(0, 0, 0, 0);
-        startTs = d.getTime();
-        break;
-      }
-      case "7days": {
-        const d = new Date(now); d.setHours(24, 0, 0, 0); // end of today
-        startTs = d.getTime() - 7 * 24 * 60 * 60 * 1000;
-        break;
-      }
-      case "month": {
-        const d = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-        startTs = d.getTime();
-        break;
-      }
-      case "30days": {
-        const d = new Date(now); d.setHours(24, 0, 0, 0);
-        startTs = d.getTime() - 30 * 24 * 60 * 60 * 1000;
-        break;
-      }
-      default: {
-        const d = new Date(now); d.setHours(0, 0, 0, 0);
-        startTs = d.getTime();
-      }
+    // ② 原始 query 中的 range（可能来自 range / window / giftRange；重复 key 取最后一个）
+    const rangeQueryRaw = pickGiftStatsRangeQueryRaw(url);
+    // ③ 归一化字符串 → yesterday | today | week | 7days | month | 30days | 其它小写串
+    const rangeIn = normalizeGiftStatsRangeParam(rangeQueryRaw || null);
+    /** @type {Set<string>} */
+    const knownRanges = new Set(["yesterday", "today", "week", "7days", "month", "30days"]);
+    // ④ 最终采用的 range：未知值回落到 today（与前端展示「归一为 today」一致）
+    const range = knownRanges.has(rangeIn) ? rangeIn : "today";
+    if (rangeIn !== range) {
+      console.warn(`[danmaku] GET /gifts/.../stats 未知 range=${JSON.stringify(rangeIn)}（原始 query=${JSON.stringify(rangeQueryRaw)}），已按 today 处理`);
     }
-    // Load all gifts and filter by time range
+    // ⑤ 时间窗：昨日等为 [startTs,endTs) 半开区间；今日/本周等往往只有 startTs，endTs 为 undefined
+    const { startTs, endTs } = computeGiftStatsTimeWindow(range, Date.now());
+
+    // ⑥ 读该房间礼物归档索引与分片 JSON，必要时把旧单文件迁移成分片格式
     migrateOldGiftFile(rid);
-    const index = loadGiftIndex(rid);
+    const index = loadGiftIndex(rid); // 结果：fileCount=分片数、totalCount≈历史总条数（统计前）
+    // ⑦ 拉斗鱼礼单（含 gfid→name/value），用于 resolveArchivedGiftGfid 反查
+    const giftPack = await fetchGiftListPayload(rid);
+    const nameIdx = buildGiftNameToGfidIndex(giftPack?.gifts);
+    // ⑧ 聚合容器：面板上的总件数、按礼物、按用户
     const stats = { totalValue: 0, totalCount: 0, byGift: {}, byUser: {} };
+    let matchedGiftRows = 0; // 落在时间窗内的归档行数（一条可能贡献多件）
     for (let i = 0; i < index.fileCount; i++) {
       const chunk = loadJsonFile(giftChunkPath(rid, i), []);
       for (const g of chunk) {
-        if ((g.ts || 0) < startTs) continue;
-        const gfid = g.gfid || "0";
+        const ts = archivedGiftEntryTsMs(g); // 归档写入时的 ts（优先礼物事件时间，见 recordGift）
+        // ⑨ 半开区间：ts ∈ [startTs, endTs) 才计入；无 endTs 则只要求 ts >= startTs
+        if (!(ts > 0) || ts < startTs) continue;
+        if (Number.isFinite(endTs) && ts >= endTs) continue;
+        matchedGiftRows++;
+        const gfid = resolveArchivedGiftGfid(g, nameIdx, giftPack?.gifts);
         const amount = giftPiecesFromStoredRecord(g);
-        // byGift: { gfid: { count, name } }
+        // byGift: { gfid: { count, name? } }；name 来自归档 gfn，供前端展示「本时间窗」礼物名，避免误用近期实时列表
         if (!stats.byGift[gfid]) stats.byGift[gfid] = { count: 0 };
         stats.byGift[gfid].count += amount;
+        const gfn = String(g.gfn ?? "").trim();
+        if (gfn) stats.byGift[gfid].name = gfn;
+        else if (!stats.byGift[gfid].name && giftPack?.gifts?.[gfid]?.name) {
+          stats.byGift[gfid].name = String(giftPack.gifts[gfid].name);
+        }
         // byUser: { uid: { nn, level, bnn, bl, brid, count, gifts: { gfid: count } } }
         const uid = g.uid || "anon";
         if (!stats.byUser[uid]) stats.byUser[uid] = { nn: g.nn || "", level: g.level || "", bnn: g.bnn || "", bl: g.bl || "", brid: g.brid || "", count: 0, gifts: {} };
@@ -2898,10 +3533,29 @@ const server = http.createServer(async (req, res) => {
         stats.byUser[uid].count += amount;
         if (!stats.byUser[uid].gifts[gfid]) stats.byUser[uid].gifts[gfid] = 0;
         stats.byUser[uid].gifts[gfid] += amount;
-        stats.totalCount += amount;
+        stats.totalCount += amount; // 面板「总件数」：所有礼物的份数之和
       }
     }
-    return jsonReply(res, { ok: true, stats, range, startTs });
+    const endHint = Number.isFinite(endTs) ? "[start,end) 终点不含" : "仅下界，统计至当前";
+    // ⑩ 同步落盘 + console，避免 fmz-dev 管道缓冲导致「日志文件只有启动分隔线」
+    danmakuSyncLog(
+      `[danmaku] GET /gifts/stats rid=${rid} range=${range} ${endHint} window=[${giftLogFmtShanghai(startTs)} ~ ${Number.isFinite(endTs) ? giftLogFmtShanghai(endTs) : "∞"}] ms=[${startTs}, ${endTs ?? "—"}] matchedRows=${matchedGiftRows} totalPieces=${stats.totalCount} giftChunkFiles=${index.fileCount}`,
+    );
+    // ⑪ 返回 JSON：前端 loadGiftStats 消费 stats、startTs、endTs、range*
+    return jsonReply(
+      res,
+      {
+        ok: true,
+        stats,
+        range,
+        rangeNormalized: rangeIn,
+        rangeQueryRaw: rangeQueryRaw || null,
+        startTs,
+        endTs: endTs ?? null,
+      },
+      200,
+      { "Cache-Control": "no-store" },
+    );
   }
   // POST /gifts/:roomId/clear — clear gift records for a room
   if (path.match(/^\/gifts\/[^/]+\/clear$/) && req.method === "POST") {
@@ -2988,6 +3642,9 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`[douyu-danmaku] Server listening on http://127.0.0.1:${PORT}`);
   console.log(`[douyu-danmaku] AI report triggers → ai-agent-server ${AI_AGENT_INTERNAL_URL}`);
+  danmakuSyncLog(
+    `[danmaku] 服务就绪 PORT=${PORT} cwd=${process.cwd()} 同步日志: server/data/danmaku/danmaku-trace.log 与 .fmz-dev/logs/danmaku-trace.log`,
+  );
 
   // Auto-reconnect saved backend rooms on startup
   const savedRooms = loadSavedRooms();

@@ -319,7 +319,14 @@ if (!skipConfig) {
     ["deploy/nginx-fmz-dashboard.conf", join(cfgNginx, "nginx-fmz-dashboard.conf")],
     ["deploy/nginx-fmz-dashboard-locations.inc", join(cfgNginx, "nginx-fmz-dashboard-locations.inc")],
   ];
-  const systemdPairs = [["deploy/fmz-ai-agent.service", join(cfgSystemd, "fmz-ai-agent.service")]];
+  const systemdPairs = [
+    ["deploy/fmz-ai-agent.service", join(cfgSystemd, "fmz-ai-agent.service")],
+    ["deploy/fmz-danmaku.env.example", join(cfgSystemd, "fmz-danmaku.env.example")],
+    [
+      "deploy/fmz-danmaku.service.d-ai-report.conf.example",
+      join(cfgSystemd, "fmz-danmaku.service.d-ai-report.conf.example"),
+    ],
+  ];
   let any = false;
   for (const [relSrc, absDest] of [...nginxPairs, ...systemdPairs]) {
     const absSrc = join(root, relSrc);
