@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="js/theme-boot.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>管理后台 · 废墟重建计划</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <header class="site-header">
+      <a href="index.html" class="brand brand-link">
+        <span class="logo" aria-hidden="true">♪</span>
+        <span class="brand-name">废墟重建计划</span>
+      </a>
+      <div class="header-end">
+        <nav class="nav nav-site">
+          <a href="index.html">首页</a>
+          <a href="playlist.html">忽闻宝声</a>
+          <a href="treasures.html">视若珍宝</a>
+          <a href="awards.html">中军帐下</a>
+          <a href="admin.html" aria-current="page">管理</a>
+        </nav>
+        <div class="theme-picker" role="group" aria-label="主题颜色">
+          <span class="theme-picker-label">主题</span>
+          <button type="button" class="theme-swatch theme-swatch--nocturne" data-set-theme="nocturne" title="夜幕青" aria-label="夜幕青"></button>
+          <button type="button" class="theme-swatch theme-swatch--ember" data-set-theme="ember" title="熔珀金" aria-label="熔珀金"></button>
+          <button type="button" class="theme-swatch theme-swatch--aurora" data-set-theme="aurora" title="极光紫" aria-label="极光紫"></button>
+        </div>
+      </div>
+    </header>
+
+    <main class="admin-main">
+      <section id="panel-login" class="admin-panel">
+        <h1 class="admin-title">管理员登录</h1>
+        <p class="admin-lede">
+          使用 Supabase 中的邮箱账号登录。首次使用请在 SQL Editor 将你的用户 UUID 写入
+          <code>admin_users</code> 表。
+        </p>
+        <p id="config-error" class="admin-error admin-error--config hidden" hidden></p>
+        <form id="form-login" class="admin-form">
+          <label class="field">
+            <span class="field-label">邮箱</span>
+            <input class="input" type="email" name="email" required autocomplete="username" />
+          </label>
+          <label class="field">
+            <span class="field-label">密码</span>
+            <input class="input" type="password" name="password" required autocomplete="current-password" />
+          </label>
+          <button type="submit" class="btn btn-primary">登录</button>
+          <p id="login-error" class="admin-error" role="alert"></p>
+        </form>
+      </section>
+
+      <section id="panel-dash" class="admin-panel hidden" hidden>
+        <div class="admin-toolbar">
+          <h1 class="admin-title">站点管理</h1>
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-logout">退出登录</button>
+        </div>
+        <p id="dash-msg" class="admin-msg" role="status"></p>
+
+        <div class="admin-card">
+          <h2 class="admin-subtitle" id="form-add-title">新增歌曲</h2>
+          <form id="form-song" class="admin-form admin-form-grid">
+            <input type="hidden" name="id" id="field-id" value="" />
+            <label class="field">
+              <span class="field-label">标题</span>
+              <input class="input" name="title" id="field-title" required maxlength="200" />
+            </label>
+            <label class="field">
+              <span class="field-label">艺人</span>
+              <input class="input" name="artist" id="field-artist" required maxlength="200" />
+            </label>
+            <label class="field field-span">
+              <span class="field-label">备注（可选）</span>
+              <input class="input" name="note" id="field-note" maxlength="500" />
+            </label>
+            <label class="field">
+              <span class="field-label">排序</span>
+              <input class="input" name="sort_order" id="field-sort" type="number" value="0" step="1" />
+            </label>
+            <div class="field-span admin-form-actions">
+              <button type="submit" class="btn btn-primary" id="btn-save">保存</button>
+              <button type="button" class="btn btn-ghost" id="btn-cancel-edit">取消编辑</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="admin-card">
+          <h2 class="admin-subtitle">已有歌曲</h2>
+          <div class="admin-table-wrap">
+            <table class="admin-table" id="song-table">
+              <thead>
+                <tr>
+                  <th>排序</th>
+                  <th>标题</th>
+                  <th>艺人</th>
+                  <th>备注</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="song-table-body"></tbody>
+            </table>
+          </div>
+          <p id="table-empty" class="admin-muted hidden">暂无歌曲，请在上方新增。</p>
+        </div>
+
+        <div class="admin-card">
+          <h2 class="admin-subtitle">点歌上报（忽闻宝声）</h2>
+          <p class="admin-muted">
+            访客在歌单页点击歌曲主体后写入云端表 <code>song_pick_requests</code>，仅管理员可见；不会自动发邮件或短信。
+          </p>
+          <div class="admin-table-wrap">
+            <table class="admin-table" id="pick-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>歌曲</th>
+                  <th>艺人</th>
+                  <th>访客标识</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="pick-table-body"></tbody>
+            </table>
+          </div>
+          <p id="pick-table-empty" class="admin-muted hidden">暂无点歌上报。</p>
+        </div>
+
+        <div class="admin-card">
+          <h2 class="admin-subtitle">相册待审核（视若珍宝）</h2>
+          <p class="admin-muted">
+            访客上传后需在此通过审核才会出现在
+            <a href="treasures.html">视若珍宝</a> 相册墙。若数据库尚未升级，请在 Supabase SQL Editor 执行
+            <code>supabase/gallery_approval_migration.sql</code>。
+          </p>
+          <div class="admin-table-wrap">
+            <table class="admin-table" id="gallery-pending-table">
+              <thead>
+                <tr>
+                  <th>预览</th>
+                  <th>说明</th>
+                  <th>时间</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="gallery-pending-body"></tbody>
+            </table>
+          </div>
+          <p id="gallery-pending-empty" class="admin-muted hidden">暂无待审核照片。</p>
+        </div>
+
+        <div class="admin-card">
+          <h2 class="admin-subtitle" id="award-form-title">新增获奖记录（中军帐下）</h2>
+          <form id="form-award" class="admin-form admin-form-grid">
+            <input type="hidden" id="award-field-id" value="" />
+            <label class="field field-span">
+              <span class="field-label">标题</span>
+              <input class="input" id="award-field-title" required maxlength="200" />
+            </label>
+            <label class="field field-span">
+              <span class="field-label">详情</span>
+              <textarea class="input" id="award-field-detail" rows="2" maxlength="2000"></textarea>
+            </label>
+            <label class="field field-span">
+              <span class="field-label">来源链接（可选）</span>
+              <input class="input" id="award-field-source" type="url" maxlength="2000" placeholder="https://" />
+            </label>
+            <label class="field">
+              <span class="field-label">日期</span>
+              <input class="input" id="award-field-date" type="date" />
+            </label>
+            <label class="field">
+              <span class="field-label">排序</span>
+              <input class="input" id="award-field-sort" type="number" value="0" step="1" />
+            </label>
+            <div class="field-span admin-form-actions">
+              <button type="submit" class="btn btn-primary" id="btn-award-save">保存记录</button>
+              <button type="button" class="btn btn-ghost" id="btn-award-cancel">取消编辑</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="admin-card">
+          <h2 class="admin-subtitle">已有获奖记录</h2>
+          <div class="admin-table-wrap">
+            <table class="admin-table" id="award-table">
+              <thead>
+                <tr>
+                  <th>排序</th>
+                  <th>标题</th>
+                  <th>日期</th>
+                  <th>详情</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="award-table-body"></tbody>
+            </table>
+          </div>
+          <p id="award-table-empty" class="admin-muted hidden">暂无记录。</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span><a href="index.html">首页</a> · <a href="playlist.html">忽闻宝声</a> · <a href="awards.html">获奖公示</a></span>
+    </footer>
+
+    <script src="js/theme.js"></script>
+    <script src="config.js"></script>
+    <script src="js/core/dom.js"></script>
+    <script src="js/pages/admin.js" defer></script>
+  </body>
+</html>

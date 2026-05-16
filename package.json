@@ -16,12 +16,17 @@
     "quota": false,
     "crimes": true,
     "douyuDanmaku": true,
-    "aiAgent": true
+    "aiAgent": true,
+    "ruinsRebuild": "local"
   },
   "type": "module",
   "scripts": {
     "dev": "vite",
     "dev:all": "node scripts/dev-all.mjs",
+    "dev:services:start": "node scripts/fmz-dev.mjs start",
+    "dev:services:stop": "node scripts/fmz-dev.mjs stop",
+    "dev:services:restart-changed": "node scripts/fmz-dev.mjs restart-changed",
+    "dev:services:status": "node scripts/fmz-dev.mjs status",
     "build": "vite build",
     "reactions-server": "npm run start --prefix server",
     "defense-tower-server": "node server/defense-tower-server.mjs",

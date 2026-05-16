@@ -1,0 +1,6 @@
+# Supabase CLI 项目配置（可选）。部署 Edge Function 时使用。
+# 文档：https://supabase.com/docs/guides/functions
+
+[functions.song-pick-email]
+# 由 Database Webhook 调用，不携带用户 JWT；请配合 PICK_WEBHOOK_SECRET 请求头使用。
+verify_jwt = false

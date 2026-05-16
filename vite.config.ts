@@ -13,21 +13,25 @@ const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf-8")) a
 const releaseLabel = String(pkg.fmzReleaseLabel ?? `v${pkg.version}`).trim();
 const rawFeatures = (pkg.fmzFeatures ?? {}) as Record<string, boolean | string>;
 
+/** 打生产包时（vite build）排除 `"local"`；开发时 `vite` 仍开启这些项。不依赖 bump-patch，裸跑 build 也不会带上仅限本地的功能。 */
+const prodBundle = process.env.NODE_ENV === "production";
+
 /**
- * Resolve feature flags: false = off, "local" = dev-only, true = always on.
- * During dev (vite dev / vite preview) both "local" and true are treated as enabled.
- * During build (vite build, called by `npm run pack`) bump-patch.mjs already
- * downgrades "local" → false before the build runs, so only true survives.
+ * Resolve feature flags: false = off, "local" = dev-only (off in vite build), true = always on.
  */
 const features = Object.fromEntries(
-  Object.entries(rawFeatures).map(([k, v]) => [k, v === true || v === "local"]),
+  Object.entries(rawFeatures).map(([k, v]) => [
+    k,
+    v === true || (v === "local" && !prodBundle),
+  ]),
 ) as Record<string, boolean>;
 
 /** 夜观星象面板；未配置时与 sanguo 同步。sanguo 仍可单独为 true 以保留代理与后台采集服务 */
 const sanguoUiEnabled =
   Object.prototype.hasOwnProperty.call(rawFeatures, "sanguoUi") &&
   rawFeatures.sanguoUi !== undefined
-    ? rawFeatures.sanguoUi === true || rawFeatures.sanguoUi === "local"
+    ? rawFeatures.sanguoUi === true ||
+      (rawFeatures.sanguoUi === "local" && !prodBundle)
     : !!features.sanguo;
 
 /** 与官网 SPA Origin 一致（官方为 https://fmz.dongdongne.com ，勿用 api2）；可设 FMZ_UPSTREAM_BROWSER_ORIGIN 覆盖 */
@@ -196,6 +200,7 @@ export default defineConfig({
     __FEATURE_CRIMES__: JSON.stringify(!!features.crimes),
     __FEATURE_DOUYU_DANMAKU__: JSON.stringify(!!features.douyuDanmaku),
     __FEATURE_AI_AGENT__: JSON.stringify(!!features.aiAgent),
+    __FEATURE_RUINS_REBUILD__: JSON.stringify(!!features.ruinsRebuild),
   },
   server: {
     /** 显式0.0.0.0：本机局域网请用 http://内网IP:5173，不要用公网 IP（多数路由器不支持回环） */

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="js/theme-boot.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>忽闻宝声 · 废墟重建计划</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&family=Great+Vibes&family=JetBrains+Mono:wght@400;500&family=Noto+Serif+SC:wght@500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <header class="site-header">
+      <a href="index.html" class="brand brand-link">
+        <span class="logo" aria-hidden="true">♪</span>
+        <span class="brand-name">废墟重建计划</span>
+      </a>
+      <div class="header-end">
+        <nav class="nav nav-site">
+          <a href="index.html">首页</a>
+          <a href="playlist.html" aria-current="page">忽闻宝声</a>
+          <a href="treasures.html">视若珍宝</a>
+          <a href="awards.html">中军帐下</a>
+          <a href="admin.html">管理</a>
+        </nav>
+        <div class="theme-picker" role="group" aria-label="主题颜色">
+          <span class="theme-picker-label">主题</span>
+          <button type="button" class="theme-swatch theme-swatch--nocturne" data-set-theme="nocturne" title="夜幕青" aria-label="夜幕青"></button>
+          <button type="button" class="theme-swatch theme-swatch--ember" data-set-theme="ember" title="熔珀金" aria-label="熔珀金"></button>
+          <button type="button" class="theme-swatch theme-swatch--aurora" data-set-theme="aurora" title="极光紫" aria-label="极光紫"></button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page-main page-main--playlist">
+      <p class="subpage-crumb"><a href="index.html">废墟重建计划</a> / 忽闻宝声</p>
+      <section id="about" class="hero hero--center hero-page-title playlist-hero">
+        <p class="eyebrow eyebrow--center eyebrow-bilingual">
+          <span class="eyebrow-zh">废墟重建计划 · 公开歌单</span>
+          <span class="eyebrow-en" aria-hidden="true">Ruins Reborn · Open Playlist</span>
+        </p>
+        <h1 class="display-title display-title-bilingual">
+          <span class="display-title-zh">忽闻宝声</span>
+          <span class="display-title-en" aria-hidden="true">Precious Echo</span>
+        </h1>
+        <p class="display-subtitle gradient">唱歌就是白溜溜</p>
+        <p class="hint-banner hint-banner--below-title" id="data-status" role="status"></p>
+      </section>
+
+      <section id="playlist" class="playlist">
+        <div class="section-head section-head-bilingual">
+          <h2 class="section-head-title-wrap">
+            <span class="section-head-zh">歌单</span>
+            <span class="section-head-en" aria-hidden="true">Playlist</span>
+          </h2>
+          <p class="section-lede">
+            紧凑列表：点赞与展开评论；点击歌曲主体（歌名区域）可向管理员上报点歌意向（需在
+            <code>config.js</code> 启用云端）。填写 <code>notifyPickWebhookUrl</code>（如 Zapier 收信）或部署
+            <code>supabase/functions/song-pick-email</code> 后，可在上报时通知管理员邮箱。
+          </p>
+        </div>
+
+        <div id="song-list" class="song-list" aria-live="polite"></div>
+        <p id="playlist-empty" class="playlist-empty hidden" hidden>
+          暂无歌曲。请打开 <a href="admin.html">管理后台</a> 添加，或在 Supabase 表 <code>songs</code> 中写入数据。
+        </p>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>© <span id="year"></span> 废墟重建计划 · <a href="index.html">返回首页</a> · <a href="admin.html">管理后台</a></span>
+    </footer>
+
+    <template id="song-card-template">
+      <article class="song-card song-card--compact">
+        <div class="song-main song-main--pickable">
+          <div class="song-meta">
+            <h3 class="song-title"></h3>
+            <p class="song-artist"></p>
+            <p class="song-note"></p>
+          </div>
+          <div class="song-actions">
+            <button type="button" class="btn-like" aria-pressed="false" aria-label="点赞">
+              <span class="like-icon" aria-hidden="true">♥</span>
+              <span class="like-count">0</span>
+            </button>
+          </div>
+        </div>
+        <div class="song-comments">
+          <button type="button" class="btn-toggle-comments" aria-expanded="false">
+            评论 <span class="comment-count">0</span>
+          </button>
+          <div class="comments-panel hidden">
+            <ul class="comment-list"></ul>
+            <form class="comment-form">
+              <label class="field">
+                <span class="sr-only">昵称</span>
+                <input type="text" class="input input-author" name="author" maxlength="40" placeholder="昵称（选填，默认「访客」）" autocomplete="nickname" />
+              </label>
+              <label class="field">
+                <span class="sr-only">评论内容</span>
+                <textarea class="input input-body" name="body" rows="2" maxlength="500" required placeholder="写下你的想法…"></textarea>
+              </label>
+              <div class="form-row">
+                <button type="submit" class="btn btn-primary btn-sm">发送</button>
+                <span class="form-msg" role="status"></span>
+              </div>
+            </form>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <script src="js/theme.js"></script>
+    <script src="config.js"></script>
+    <script src="js/core/dom.js"></script>
+    <script src="js/core/supabase-anon.js"></script>
+    <script src="js/data/extra-playlist-titles.js"></script>
+    <script src="js/data/playlist-samples.js"></script>
+    <script src="js/pages/playlist.js" defer></script>
+  </body>
+</html>

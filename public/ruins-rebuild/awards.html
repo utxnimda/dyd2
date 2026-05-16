@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="js/theme-boot.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>中军帐下 · 废墟重建计划</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <header class="site-header">
+      <a href="index.html" class="brand brand-link">
+        <span class="logo" aria-hidden="true">⚔</span>
+        <span class="brand-name">废墟重建计划</span>
+      </a>
+      <div class="header-end">
+        <nav class="nav nav-site">
+          <a href="index.html">首页</a>
+          <a href="playlist.html">忽闻宝声</a>
+          <a href="treasures.html">视若珍宝</a>
+          <a href="awards.html" aria-current="page">中军帐下</a>
+          <a href="admin.html">管理</a>
+        </nav>
+        <div class="theme-picker" role="group" aria-label="主题颜色">
+          <span class="theme-picker-label">主题</span>
+          <button type="button" class="theme-swatch theme-swatch--nocturne" data-set-theme="nocturne" title="夜幕青" aria-label="夜幕青"></button>
+          <button type="button" class="theme-swatch theme-swatch--ember" data-set-theme="ember" title="熔珀金" aria-label="熔珀金"></button>
+          <button type="button" class="theme-swatch theme-swatch--aurora" data-set-theme="aurora" title="极光紫" aria-label="极光紫"></button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page-main page-war-camp">
+      <p class="subpage-crumb"><a href="index.html">废墟重建计划</a> / 中军帐下</p>
+      <section class="hero hero-compact hero--center hero-page-title war-camp-hero">
+        <p class="eyebrow eyebrow--center war-camp-eyebrow">战争互动 · 战功计量</p>
+        <h1 class="display-title war-camp-title">中军帐下</h1>
+        <p class="display-subtitle war-camp-subtitle">沙场积分榜 · 三军功绩公示</p>
+        <p class="hint-banner hint-banner--below-title" id="awards-status" role="status"></p>
+      </section>
+
+      <section class="war-board-section" aria-labelledby="war-board-heading">
+        <h2 id="war-board-heading" class="war-section-heading">沙场十杰</h2>
+        <p class="war-board-note">以下为演示数据；真实榜单可由外站 API 替换下方脚本中的数据源。</p>
+        <div id="war-leaderboard-mount" class="war-leaderboard-mount"></div>
+      </section>
+
+      <section class="war-rules-section" aria-labelledby="war-rules-heading">
+        <h2 id="war-rules-heading" class="war-section-heading">积分军略</h2>
+        <p class="war-rules-lede">缴获如下战功对应积分；正式对局由服务器按规则结算后汇总总战功。</p>
+        <ul class="war-rules-list">
+          <li><span class="war-rule-item">一统天下</span><span class="war-rule-pts">2000</span></li>
+          <li><span class="war-rule-item">青龙偃月刀</span><span class="war-rule-pts">500</span></li>
+          <li><span class="war-rule-item">赤兔宝马</span><span class="war-rule-pts">100</span></li>
+          <li><span class="war-rule-item">七星灯</span><span class="war-rule-pts">20</span></li>
+          <li><span class="war-rule-item">杜康酒</span><span class="war-rule-pts">1</span></li>
+        </ul>
+      </section>
+
+      <section class="awards-records-section" aria-labelledby="awards-records-heading">
+        <h2 id="awards-records-heading" class="war-section-heading war-section-heading--sub">战功公示</h2>
+        <p class="awards-records-lede">荣誉记录与外链公示。</p>
+        <ul id="awards-list" class="awards-list"></ul>
+        <p id="awards-empty" class="playlist-empty hidden" hidden>暂无记录。</p>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>© <span id="year"></span> 废墟重建计划 · <a href="index.html">返回首页</a></span>
+    </footer>
+
+    <script src="js/theme.js"></script>
+    <script src="config.js"></script>
+    <script src="js/core/supabase-anon.js"></script>
+    <script src="js/pages/awards.js" defer></script>
+  </body>
+</html>

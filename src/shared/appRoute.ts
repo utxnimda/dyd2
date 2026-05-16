@@ -11,11 +11,17 @@ export type MainTab =
   | "quota"
   | "songs"
   | "crimes"
-  | "danmaku";
+  | "danmaku"
+  | "ruins";
 
 export type PrePanelTab = "total" | "nogf" | "perround" | "gf" | "logging";
 
+/** 「废墟重建计划」静态子站点在 Tab 内的分栏（对应 public/ruins-rebuild/*.html） */
+export type RuinsPanelTab = "hub" | "playlist" | "treasures" | "awards" | "admin";
+
 const PRE_SUBS = new Set<string>(["total", "nogf", "perround", "gf", "logging"]);
+
+const RUINS_SUBS = new Set<string>(["hub", "playlist", "treasures", "awards", "admin"]);
 
 export type ParsedAppHash =
   | { kind: "captain-hud" }
@@ -25,11 +31,13 @@ export type ParsedAppHash =
       prePanel: PrePanelTab;
       /** Only for tab===battle: path segment after #/battle/, e.g. all, captain+member */
       battleShowPath: string | null;
+      /** Only for tab===ruins: 子页面（#/ruins/playlist） */
+      ruinsPanel: RuinsPanelTab;
     };
 
 /** Shorthand for the common "main" result with default prePanel & no battleShowPath. */
 function mainResult(tab: MainTab): ParsedAppHash {
-  return { kind: "main", tab, prePanel: "total", battleShowPath: null };
+  return { kind: "main", tab, prePanel: "total", battleShowPath: null, ruinsPanel: "hub" };
 }
 
 /**
@@ -76,13 +84,20 @@ export function parseAppHash(hash: string): ParsedAppHash {
   if (head === "pre" || head === "preliminary") {
     const sub = parts[1];
     const prePanel = sub && PRE_SUBS.has(sub) ? (sub as PrePanelTab) : "total";
-    return { kind: "main", tab: "pre", prePanel, battleShowPath: null };
+    return { kind: "main", tab: "pre", prePanel, battleShowPath: null, ruinsPanel: "hub" };
   }
 
   // Battle has a show-path segment
   if (head === "battle") {
     const seg = parts[1] != null && String(parts[1]).trim() !== "" ? String(parts[1]) : null;
-    return { kind: "main", tab: "battle", prePanel: "total", battleShowPath: seg };
+    return { kind: "main", tab: "battle", prePanel: "total", battleShowPath: seg, ruinsPanel: "hub" };
+  }
+
+  // 废墟重建计划：#/ruins / #/ruins/playlist
+  if (head === "ruins" || head === "fuxu") {
+    const sub = parts[1];
+    const ruinsPanel = sub && RUINS_SUBS.has(sub) ? (sub as RuinsPanelTab) : "hub";
+    return { kind: "main", tab: "ruins", prePanel: "total", battleShowPath: null, ruinsPanel };
   }
 
   // Simple alias lookup
@@ -98,6 +113,7 @@ export function formatAppHash(
   tab: MainTab,
   prePanel: PrePanelTab,
   battleShowPath?: string | null,
+  ruinsPanel?: RuinsPanelTab,
 ): string {
   if (captainHudOnly) return "#/captain-hud";
 
@@ -110,6 +126,11 @@ export function formatAppHash(
   // Preliminary has sub-panel tabs
   if (tab === "pre") {
     return prePanel === "total" ? "#/pre" : `#/pre/${prePanel}`;
+  }
+
+  if (tab === "ruins") {
+    const rp = ruinsPanel ?? "hub";
+    return rp === "hub" ? "#/ruins" : `#/ruins/${rp}`;
   }
 
   // All other tabs are simple

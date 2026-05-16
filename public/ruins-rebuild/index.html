@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="js/theme-boot.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>废墟重建计划</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="intro-splash" class="intro-splash" role="dialog" aria-modal="true" aria-labelledby="intro-splash-title">
+      <h1 id="intro-splash-title" class="intro-splash-title">我爱你，电饭宝</h1>
+    </div>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <header class="site-header">
+      <a href="index.html" class="brand brand-link">
+        <span class="logo" aria-hidden="true">◇</span>
+        <span class="brand-name">废墟重建计划</span>
+      </a>
+      <div class="header-end">
+        <nav class="nav nav-site">
+          <a href="index.html" aria-current="page">首页</a>
+          <a href="playlist.html">忽闻宝声</a>
+          <a href="treasures.html">视若珍宝</a>
+          <a href="awards.html">中军帐下</a>
+          <a href="admin.html">管理</a>
+        </nav>
+        <div class="theme-picker" role="group" aria-label="主题颜色">
+          <span class="theme-picker-label">主题</span>
+          <button type="button" class="theme-swatch theme-swatch--nocturne" data-set-theme="nocturne" title="夜幕青" aria-label="夜幕青"></button>
+          <button type="button" class="theme-swatch theme-swatch--ember" data-set-theme="ember" title="熔珀金" aria-label="熔珀金"></button>
+          <button type="button" class="theme-swatch theme-swatch--aurora" data-set-theme="aurora" title="极光紫" aria-label="极光紫"></button>
+        </div>
+      </div>
+    </header>
+
+    <main class="hub-main">
+      <section class="hub-hero hub-hero--center">
+        <h1 class="display-title">废墟重建计划</h1>
+        <p class="display-subtitle">站点主页 — 由此进入各栏目</p>
+        <p class="lede hub-lede hub-lede--center">
+          可从下方进入音乐栏目「忽闻宝声」、相册「视若珍宝」与公示「中军帐下」；数据接入云端后，多访客端将同步可见。
+        </p>
+      </section>
+
+      <section class="hub-cards" aria-label="子页面导航">
+        <a class="hub-card" href="playlist.html">
+          <span class="hub-card-tag">歌单</span>
+          <h2 class="hub-card-title">忽闻宝声</h2>
+          <p class="hub-card-desc">浏览曲目、点赞与评论。</p>
+          <span class="hub-card-go">进入 →</span>
+        </a>
+        <a class="hub-card" href="treasures.html">
+          <span class="hub-card-tag">相册</span>
+          <h2 class="hub-card-title">视若珍宝</h2>
+          <p class="hub-card-desc">上传照片，汇集点滴影像。</p>
+          <span class="hub-card-go">进入 →</span>
+        </a>
+        <a class="hub-card" href="awards.html">
+          <span class="hub-card-tag">公示</span>
+          <h2 class="hub-card-title">中军帐下</h2>
+          <p class="hub-card-desc">获奖与荣誉记录；可合并外链数据。</p>
+          <span class="hub-card-go">进入 →</span>
+        </a>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>© <span id="year"></span> 废墟重建计划 · <a href="admin.html">管理后台</a></span>
+    </footer>
+
+    <script src="js/theme.js"></script>
+    <script>
+      (function () {
+        var splash = document.getElementById("intro-splash");
+        if (!splash) return;
+        document.body.classList.add("intro-splash-active");
+        function dismiss() {
+          splash.classList.add("is-hidden");
+          document.body.classList.remove("intro-splash-active");
+          splash.setAttribute("aria-hidden", "true");
+        }
+        setTimeout(dismiss, 3000);
+      })();
+    </script>
+  </body>
+</html>

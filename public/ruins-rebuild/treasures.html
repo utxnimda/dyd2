@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="js/theme-boot.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>视若珍宝 · 废墟重建计划</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <header class="site-header">
+      <a href="index.html" class="brand brand-link">
+        <span class="logo" aria-hidden="true">◇</span>
+        <span class="brand-name">废墟重建计划</span>
+      </a>
+      <div class="header-end">
+        <nav class="nav nav-site">
+          <a href="index.html">首页</a>
+          <a href="playlist.html">忽闻宝声</a>
+          <a href="treasures.html" aria-current="page">视若珍宝</a>
+          <a href="awards.html">中军帐下</a>
+          <a href="admin.html">管理</a>
+        </nav>
+        <div class="theme-picker" role="group" aria-label="主题颜色">
+          <span class="theme-picker-label">主题</span>
+          <button type="button" class="theme-swatch theme-swatch--nocturne" data-set-theme="nocturne" title="夜幕青" aria-label="夜幕青"></button>
+          <button type="button" class="theme-swatch theme-swatch--ember" data-set-theme="ember" title="熔珀金" aria-label="熔珀金"></button>
+          <button type="button" class="theme-swatch theme-swatch--aurora" data-set-theme="aurora" title="极光紫" aria-label="极光紫"></button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page-main">
+      <p class="subpage-crumb"><a href="index.html">废墟重建计划</a> / 视若珍宝</p>
+      <section class="hero hero-compact hero--center hero-page-title">
+        <p class="eyebrow eyebrow--center">相册</p>
+        <h1 class="display-title">视若珍宝</h1>
+        <p class="display-subtitle">上传影像，汇集成墙（连接云端后需管理员审核通过才会公开展示）</p>
+        <p class="hint-banner hint-banner--below-title" id="treasures-status" role="status"></p>
+      </section>
+
+      <section class="treasures-upload admin-card">
+        <h2 class="admin-subtitle">上传照片</h2>
+        <form id="form-upload" class="admin-form">
+          <label class="field field-span">
+            <span class="field-label">选择图片</span>
+            <input class="input" type="file" id="file-input" accept="image/jpeg,image/png,image/webp,image/gif" />
+          </label>
+          <label class="field field-span">
+            <span class="field-label">说明（可选）</span>
+            <input class="input" type="text" id="caption-input" maxlength="200" placeholder="一句话描述" />
+          </label>
+          <button type="submit" class="btn btn-primary" id="btn-upload">上传</button>
+          <p id="upload-msg" class="admin-msg" role="status"></p>
+        </form>
+      </section>
+
+      <section class="treasures-grid-wrap">
+        <h2 class="section-head-inline">相册墙</h2>
+        <div id="gallery-grid" class="gallery-grid" aria-live="polite"></div>
+        <p id="gallery-empty" class="playlist-empty">暂无照片，欢迎第一张投稿。</p>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>© <span id="year"></span> 废墟重建计划 · <a href="index.html">返回首页</a></span>
+    </footer>
+
+    <script src="js/theme.js"></script>
+    <script src="config.js"></script>
+    <script src="js/core/supabase-anon.js"></script>
+    <script src="js/pages/treasures.js" defer></script>
+  </body>
+</html>

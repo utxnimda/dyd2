@@ -46,6 +46,7 @@ const FEATURE_LABELS = {
   crimes:      "🎵 细数宝罪",
   douyuDanmaku: "🎯 弹幕捕捉",
   aiAgent:      "🤖 AI 弹幕分析（仅本地）",
+  ruinsRebuild: "废墟重建 · 调试（仅 local，发布关闭）",
 };
 
 /* ------------------------------------------------------------------ */

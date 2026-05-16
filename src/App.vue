@@ -30,6 +30,7 @@ import {
   replaceAppHash,
   type MainTab,
   type PrePanelTab,
+  type RuinsPanelTab,
 } from "./shared/appRoute";
 import {
   formatBattleShowPath as _fmtBSP,
@@ -77,6 +78,9 @@ const CrimesPanel = __FEATURE_CRIMES__
 const DouyuDanmakuPanel = __FEATURE_DOUYU_DANMAKU__
   ? defineAsyncComponent(() => import("./features/danmaku/DouyuDanmakuPanel.vue"))
   : null;
+const RuinsRebuildPanel = __FEATURE_RUINS_REBUILD__
+  ? defineAsyncComponent(() => import("./features/ruins-rebuild/RuinsRebuildPanel.vue"))
+  : null;
 
 // Feature flags exposed to template (Vite replaces these at build time)
 /** 夜观星象 Tab（可与后台采集分离：__FEATURE_SANGUO__ 仍为 true） */
@@ -90,6 +94,7 @@ const F_QUOTA = __FEATURE_QUOTA__;
 const F_AUDIO = __FEATURE_AUDIO__;
 const F_CRIMES = __FEATURE_CRIMES__;
 const F_DOUYU_DANMAKU = __FEATURE_DOUYU_DANMAKU__;
+const F_RUINS_REBUILD = __FEATURE_RUINS_REBUILD__;
 
 // Battle show route — tree-shaken when __FEATURE_BATTLE__ is false
 const formatBattleShowPath = __FEATURE_BATTLE__ ? _fmtBSP : (_?: any) => "";
@@ -134,6 +139,7 @@ const NAV_TAB_ORDER: MainTab[] = [
   "songs",
   "crimes",
   "danmaku",
+  "ruins",
 ];
 
 function isTabAvailable(t: MainTab): boolean {
@@ -160,6 +166,8 @@ function isTabAvailable(t: MainTab): boolean {
       return __FEATURE_CRIMES__;
     case "danmaku":
       return __FEATURE_DOUYU_DANMAKU__;
+    case "ruins":
+      return __FEATURE_RUINS_REBUILD__;
     default:
       return false;
   }
@@ -174,6 +182,7 @@ function firstAvailableMainTab(): MainTab {
 
 const tab = ref<MainTab>(firstAvailableMainTab());
 const prePanelTab = ref<PrePanelTab>("total");
+const ruinsPanelTab = ref<RuinsPanelTab>("hub");
 
 /** 战斗爽展示筛选路径段（#/battle/<此段>），刷新后由 hash 或 localStorage 恢复 */
 const battleShowPath = ref(formatBattleShowPath(loadBattleShowFromStorage()));
@@ -194,8 +203,10 @@ function applyHashToState() {
     captainHudOnly.value = false;
     let nextTab = parsed.tab;
     if (!F_SANGUO_UI && nextTab === "sanguo") nextTab = firstAvailableMainTab();
+    if (!F_RUINS_REBUILD && nextTab === "ruins") nextTab = firstAvailableMainTab();
     tab.value = nextTab;
     prePanelTab.value = parsed.prePanel;
+    ruinsPanelTab.value = parsed.ruinsPanel;
     if (parsed.tab === "battle") {
       let seg = parsed.battleShowPath;
       if (!seg) {
@@ -216,6 +227,7 @@ function syncHashFromState() {
       tab.value,
       prePanelTab.value,
       tab.value === "battle" ? battleShowPath.value : null,
+      tab.value === "ruins" ? ruinsPanelTab.value : undefined,
     ),
   );
 }
@@ -378,6 +390,7 @@ onMounted(() => {
         tab.value,
         prePanelTab.value,
         tab.value === "battle" ? battleShowPath.value : null,
+        tab.value === "ruins" ? ruinsPanelTab.value : undefined,
       ),
     );
   }
@@ -415,6 +428,11 @@ watch(tab, (t, prev) => {
 
 watch(prePanelTab, () => {
   if (captainHudOnly.value || tab.value !== "pre") return;
+  syncHashFromState();
+});
+
+watch(ruinsPanelTab, () => {
+  if (captainHudOnly.value || tab.value !== "ruins") return;
   syncHashFromState();
 });
 
@@ -457,6 +475,7 @@ watch(showBaobao, (visible) => {
     <button v-if="F_AUDIO" :class="{ on: tab === 'songs' }" type="button" @click="selectTab('songs')">忽闻宝声</button>
     <button v-if="F_CRIMES" :class="{ on: tab === 'crimes' }" type="button" @click="selectTab('crimes')">细数宝罪</button>
     <button v-if="F_DOUYU_DANMAKU" :class="{ on: tab === 'danmaku' }" type="button" @click="selectTab('danmaku')">窃听宝语</button>
+    <button v-if="F_RUINS_REBUILD" :class="{ on: tab === 'ruins' }" type="button" @click="selectTab('ruins')">废墟重建 · 调试</button>
   </nav>
   <main :class="{ 'main--danmaku-fill': tab === 'danmaku' && F_DOUYU_DANMAKU }">
     <PreliminaryPanel
@@ -511,6 +530,10 @@ watch(showBaobao, (visible) => {
     <DouyuDanmakuPanel
       v-if="F_DOUYU_DANMAKU && DouyuDanmakuPanel && tab === 'danmaku'"
       ref="danmakuRef"
+    />
+    <RuinsRebuildPanel
+      v-if="F_RUINS_REBUILD && RuinsRebuildPanel && tab === 'ruins'"
+      v-model:panel-tab="ruinsPanelTab"
     />
   </main>
   <!-- Global floating audio player (always available when audio feature is on) -->

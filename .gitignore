@@ -5,6 +5,7 @@ test-results/
 .env*
 server/data/ai-agent-keys.json
 server/local-ai-agent.env
+.fmz-dev/
 __pycache__/
 *.log
 _dgb_*
