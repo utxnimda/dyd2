@@ -1584,6 +1584,8 @@ function isRecoverableAiUpstreamModelError(msg) {
     return true;
   }
   if (/ECONNRESET|ETIMEDOUT|ECONNABORTED|fetch failed|UND_ERR_CONNECT_TIMEOUT/i.test(s)) return true;
+  // 流读到一半断连（服务重启、上游掐断、undici 常见报错 message 为 terminated）
+  if (/\bterminated\b|aborted a request/i.test(s)) return true;
   return false;
 }
 
@@ -1615,6 +1617,11 @@ async function chatAiAgentAccumulateFirstAvailable(modelIds, messages) {
 
 function humanizeAiReportFailure(msg) {
   const s = String(msg);
+  if (/\bterminated\b/i.test(s)) {
+    return /流式响应中途断开|systemctl restart/i.test(s)
+      ? "生成过程中连接被中断（多在跑日报时执行了服务重启/deploy）；请避开维护窗口后重试。"
+      : "生成过程中流被中断（报 terminated）：常见于服务重启、上游断连或代理超时；请稍后重试。";
+  }
   if (isRecoverableAiUpstreamModelError(s) && /\b429\b|quota|RESOURCE_EXHAUSTED/i.test(s)) {
     return "上游配额或限流（如 429）：请检查各平台额度；未设置 FMZ_TRIGGER_AI_MODEL 时会按 ai-agent 模型列表依次切换（例如 Gemini→OpenAI→千问）。也可手写：FMZ_TRIGGER_AI_MODEL=gemini-2.5-flash,qwen-plus,gpt-4o-mini";
   }
@@ -1714,23 +1721,34 @@ async function chatAiAgentAccumulate(modelId, messages) {
   const decoder = new TextDecoder();
   let buffer = "";
   let text = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data: ")) continue;
-      const payload = trimmed.slice(6);
-      if (payload === "[DONE]") continue;
-      try {
-        const parsed = JSON.parse(payload);
-        const delta = parsed.choices?.[0]?.delta?.content;
-        if (delta) text += delta;
-      } catch { /* skip */ }
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data: ")) continue;
+        const payload = trimmed.slice(6);
+        if (payload === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(payload);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) text += delta;
+        } catch { /* skip */ }
+      }
     }
+  } catch (e) {
+    const raw = e && e.message ? String(e.message) : String(e);
+    if (/\bterminated\b|network error|aborted/i.test(raw)) {
+      throw new Error(
+        `${raw} — 流式响应中途断开：常见于刚执行 systemctl restart（弹幕/AI 服务重启）、`
+          + "上游 API 断连或节点杀连接；可稍后重试日报；持久失败请查 journalctl -u fmz-danmaku -u fmz-ai-agent。",
+      );
+    }
+    throw e;
   }
   return text;
 }
