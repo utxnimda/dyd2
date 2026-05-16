@@ -15,6 +15,10 @@
  *   4. SSH to remote: list assets/ files, diff against local release,
  *      delete any files not present in the current release
  *   5. SSH verify BUILD_INFO.txt on remote
+ *
+ * SSH/远端路径可由环境变量覆盖（与 deploy/deploy.local.env.example 一致；
+ * PowerShell 可先执行 . ./deploy/load-deploy-env.ps1 加载 deploy.local.env）：
+ *   FMZ_DEPLOY_SSH_KEY、FMZ_DEPLOY_SSH_USER、FMZ_DEPLOY_SSH_HOST、FMZ_DEPLOY_WEB_ROOT
  */
 import { execSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -26,12 +30,24 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /* ------------------------------------------------------------------ */
 /*  Configuration                                                      */
 /* ------------------------------------------------------------------ */
-const SSH_KEY = String.raw`E:\Workspace\pem\nimda_tencent.pem`;
-const REMOTE_USER = "root";
-const REMOTE_HOST = "118.195.150.4";
-const REMOTE_WEB_ROOT = "/var/www/fmz-dashboard";
+const SSH_KEY = (process.env.FMZ_DEPLOY_SSH_KEY || String.raw`D:\nimda1.pem`).trim();
+const REMOTE_USER = (process.env.FMZ_DEPLOY_SSH_USER || "root").trim();
+const REMOTE_HOST = (process.env.FMZ_DEPLOY_SSH_HOST || "118.195.150.4").trim();
+const REMOTE_WEB_ROOT = (process.env.FMZ_DEPLOY_WEB_ROOT || "/var/www/fmz-dashboard").replace(
+  /\/+$/,
+  "",
+);
 const SSH_CMD = `ssh -i "${SSH_KEY}" ${REMOTE_USER}@${REMOTE_HOST}`;
 const SCP_CMD = `scp -i "${SSH_KEY}"`;
+
+if (!existsSync(SSH_KEY)) {
+  console.error(`❌ SSH 私钥不存在: ${SSH_KEY}`);
+  console.error(
+    "   请放置密钥到该路径，或设置 FMZ_DEPLOY_SSH_KEY；"
+      + "也可在 deploy/deploy.local.env 中填写后执行：. ./deploy/load-deploy-env.ps1",
+  );
+  process.exit(1);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Determine release label                                            */
