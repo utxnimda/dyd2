@@ -1,0 +1,6 @@
+{
+  "_comment": "复制本文件为 ai-agent-keys.json（同目录）。填入真实密钥；勿提交。优先级：环境变量 GEMINI_API_KEY、OPENAI_API_KEY、DASHSCOPE_API_KEY / QWEN_API_KEY 高于本文件对应字段。",
+  "gemini": "",
+  "openai": "",
+  "qwen": ""
+}

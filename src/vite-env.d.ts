@@ -41,6 +41,13 @@ interface ImportMetaEnv {
   readonly VITE_CURRENCY_PROPORTION?: string;
   /** 预赛金库列表条数，官网 PreliminaryData 为 100 */
   readonly VITE_PRELIMINARY_MONEY_PAGE_SIZE?: string;
+  /**
+   * 生产环境 doseeing 头像基址；开发态默认走 Vite 代理 `/doseeing`。
+   * 见 `src/features/battle/doseeingAvatar.ts`
+   */
+  readonly VITE_DOSEEING_BASE?: string;
+  /** 设为 `0` 可关闭头像请求（如 E2E），默认开启 */
+  readonly VITE_DOSEEING_AVATAR?: string;
 }
 
 interface ImportMeta {

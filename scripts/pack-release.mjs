@@ -45,7 +45,7 @@ const FEATURE_LABELS = {
   quota:       "用量看板",
   crimes:      "🎵 细数宝罪",
   douyuDanmaku: "🎯 弹幕捕捉",
-  aiAgent:      "🤖 AI 弹幕分析（仅本地）",
+  aiAgent:      "🤖 AI 分析与对话（前端面板 + ai-agent-server）",
   ruinsRebuild: "废墟重建 · 调试（仅 local，发布关闭）",
 };
 

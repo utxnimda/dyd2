@@ -1,4 +1,6 @@
-data/
+# 归档、本地 DB、密钥等；密钥模板可入库
+data/**
+!data/ai-agent-keys.example.json
 node_modules/
 .env.quota
 .cb-ide-cache-quota.json

@@ -1,16 +1,45 @@
 ---
-description: FMZ 发布流程顺序（打包 → Git → 远端）；单步执行须用户明示
+description: 操作指令词（发布/打包/…）→ 默认动作；「发布」默认同完整发布（pack+deploy）
 alwaysApply: true
 ---
 
-# 发布流程规范
+# FMZ 操作指令（口语 → 动作）
 
-当用户要求 **「发布」「走发布流程」「打包发布」** 等**完整上线**时，默认必须按**严格顺序**执行，**不得省略或颠倒**：
+用户说 **一个词或短语** 时，按下表 **默认** 执行；**「仅」「只」「不要」「跳过」** 会收窄范围。人类可读主表：**`README.md` →「操作指令一览」**。
 
-1. **本地打包**：版本递增并完成归档（与仓库一致，例如 `node scripts/bump-patch.mjs` → `npm run build` → `node scripts/pack-release.mjs --yes`，或项目约定的等价 `npm run pack` 流程）。
-2. **推送 Git**：将本次发布涉及的提交推到 `origin`（或用户指定的远程），除非用户明确说本次不推或无远程权限。
-3. **发布远端**：执行 `npm run deploy`（或脚本约定的 deploy），将 `release/<label>/` 同步到服务器。
+## 指令词 → 助手默认
 
-**例外**：用户**若只需要其中某一步**，必须在话里**特意说明**（例如：「只 push」「只 deploy、不 bump」「只本地 pack 不提交」）。未说明时，按**完整三步**处理。
+| 用户说法 | 助手默认执行 |
+|----------|----------------|
+| **完整发布** / **走发布流程** / **上线** / **发布** | ① `npm run pack` ② `npm run deploy`。**不擅自** `git commit` / `git push`（见下「Git 约束」）；完成后 **提醒** 用户提交 `package.json` / `package-lock.json` 等。 |
+| **打包** | 仅 `npm run pack`（可 `-- --yes` 时说明场景）。 |
+| **提交** | 仅在用户 **当句明确要求** 时执行 `git add` / `git commit`（范围按用户指示）。 |
+| **推送** | 仅在用户 **当句明确要求** 时 `git push`。 |
+| **仅发布** / **只部署** / **只上线服务器** | 仅 `npm run deploy`（确认 `release/<fmzReleaseLabel>/` 与 `package.json` 一致）。 |
+| **仅打包** | 仅 `npm run pack`。 |
+| **仅构建** | 仅 `npm run build`。 |
+| **后面再发布** | 仅 `npm run pack`，**不** `deploy`。 |
+| **开发** | 仅 `npm run dev`。 |
+| **全栈开发** / **开发全服务** | `npm run dev:all` 或 `npm run dev:services:start`（按用户偏好）。 |
+| **停开发服务** | `npm run dev:services:stop`。 |
 
-**注意**：不要将「只提交 / 只改代码」与「完整发布」混为一谈；未要求发布时不要擅自 deploy 或 bump 版本。
+## Git 约束（与全局「不擅自提交」一致）
+
+- **完整发布 / 发布** 的默认流水 **不含** commit/push。
+- 用户说 **「完整发布并提交」**「**帮我提交**」「**含 git**」等 → 才可代做 **commit**；**push** 需用户 **明确** 要求（或用户规则另有规定）。
+- **`release/`** 在 `.gitignore`， **`deploy` 依赖本机已 pack 的目录**。
+
+## 术语（实现层）
+
+| 词 | 通常指 |
+|----|--------|
+| **打包** | `npm run pack` |
+| **发布（技术步骤）** | `npm run deploy` |
+| **发布（用户口语）** | 默认 **pack + deploy**（完整发布），**不是** 只做 deploy |
+
+## 时机
+
+- **马上更新**：用户未说「后面再发布」「暂缓 deploy」→ **完整发布** 在 **pack 之后执行 `deploy`**。
+- 未要求打包/发布时 **不要** 擅自 `pack` / `deploy`。
+
+**本地配置**（`.pem`、`deploy.local.env`、AI keys）见 **`README.md` →「本地配置方式」**。

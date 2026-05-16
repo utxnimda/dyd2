@@ -1655,6 +1655,81 @@ function humanizeAiReportFailure(msg) {
 }
 const MAX_AI_REPORT_ENTRIES = 500;
 
+/** 弹幕超过约此行数时：先分段请模型写「要点」，再合成正式日报/周报，减轻单请求体积与断流 */
+const AI_REPORT_CHUNK_DM_LINES = Math.max(200, Number(process.env.FMZ_AI_REPORT_CHUNK_DM_LINES) || 1600);
+/** 单段摘录字符数超过该值时，自动缩小每段行数，避免单段仍过大 */
+const AI_REPORT_CHUNK_FORCE_CHARS = Math.max(50_000, Number(process.env.FMZ_AI_REPORT_CHUNK_FORCE_CHARS) || 220_000);
+/** 正式成文时附带均匀抽样的原文行数，供「最佳弹幕」等须引原文的场景 */
+const AI_REPORT_VERBATIM_DM_SAMPLE = Math.max(80, Number(process.env.FMZ_AI_REPORT_VERBATIM_DM_SAMPLE) || 420);
+
+/**
+ * @param {string[]} lines
+ * @param {string} joinedText lines.join("\n")
+ * @returns {string[][]}
+ */
+function computeDanmakuLineChunks(lines, joinedText) {
+  const n = lines.length;
+  if (!n) return [];
+  let size = AI_REPORT_CHUNK_DM_LINES;
+  const textLen = String(joinedText || "").length;
+  if (textLen > AI_REPORT_CHUNK_FORCE_CHARS) {
+    const needParts = Math.max(2, Math.ceil(textLen / AI_REPORT_CHUNK_FORCE_CHARS));
+    size = Math.max(400, Math.ceil(n / needParts));
+    size = Math.min(size, AI_REPORT_CHUNK_DM_LINES);
+  }
+  /** @type {string[][]} */
+  const chunks = [];
+  for (let i = 0; i < n; i += size) chunks.push(lines.slice(i, i + size));
+  return chunks;
+}
+
+/**
+ * @param {string[]} lines
+ * @param {number} maxSamples
+ */
+function sampleLinesEvenly(lines, maxSamples) {
+  const n = lines.length;
+  if (n <= maxSamples) return lines.slice();
+  const out = [];
+  const step = (n - 1) / (maxSamples - 1);
+  for (let i = 0; i < maxSamples; i++) out.push(lines[Math.min(n - 1, Math.round(i * step))]);
+  return out;
+}
+
+/**
+ * @param {string[]} modelCandidates
+ * @param {string} roomDisplay
+ * @param {string} rangeLabel
+ * @param {string[][]} lineChunks
+ */
+async function summarizeDanmakuChunksForFinalReport(modelCandidates, roomDisplay, rangeLabel, lineChunks) {
+  const total = lineChunks.length;
+  const parts = [];
+  for (let i = 0; i < total; i++) {
+    const chunkText = lineChunks[i].join("\n");
+    const user = [
+      `房间 ${roomDisplay}，统计窗口 ${rangeLabel}。以下为第 ${i + 1}/${total} 段弹幕摘录（时间连续，勿当全文）。`,
+      "请用中文输出 6～14 条要点，每条单独一行，以「- 」开头。关注：氛围与情绪、主要话题/梗、有无骂战或节奏突变、刷屏与复读、付费或起哄相关口吻。",
+      "不要写正式日报/周报、不要写「数据概览」、不要输出 <<<FMZ_REPORT_META 围栏或 JSON。不要臆造条数或金额。",
+      "若本段有可引用弹幕，最多用两行「原文：」开头，抄录完整单行（须逐字来自下文摘录）。",
+      "---",
+      chunkText,
+    ].join("\n");
+    const summary = await chatAiAgentAccumulateFirstAvailable(modelCandidates, [
+      {
+        role: "system",
+        content:
+          "你是直播弹幕分析助手，只输出要点列表。不要 Markdown 标题、不要粗体。不要输出任何 JSON 或围栏标记。",
+      },
+      { role: "user", content: user },
+    ]);
+    const block = String(summary || "").trim();
+    parts.push(`【分段 ${i + 1}/${total}】\n${block || "（本段未产出要点）"}`);
+    console.log(`[ai-report] 分段预摘要 ${i + 1}/${total}，返回 ${block.length} 字`);
+  }
+  return parts.join("\n\n");
+}
+
 function buildAiExportPayload(roomId, rangeKey, maxDm, maxG, inclDm, inclG) {
   const resolved = resolveAiExportRange(rangeKey);
   if (!resolved) return { ok: false, error: "invalid_range" };
@@ -1684,6 +1759,8 @@ function buildAiExportPayload(roomId, rangeKey, maxDm, maxG, inclDm, inclG) {
     giftTruncated: gif.truncated,
     danmakuText,
     giftText,
+    danmakuLines: inclDm ? dm.lines : [],
+    giftLines: inclG ? gif.lines : [],
   };
 }
 
@@ -1910,6 +1987,9 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
   const exp = buildAiExportPayload(roomId, rangeKey, 8000, 2500, true, true);
   if (!exp.ok) throw new Error("导出范围无效");
 
+  const info = await fetchRoomInfo(roomId);
+  const roomDisplay = info?.owner_name ? `${info.owner_name} #${roomId}` : `#${roomId}`;
+
   let catalogMap = null;
   try {
     const pack = await fetchGiftListPayload(roomId);
@@ -1919,16 +1999,43 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
   }
   const giftRankDigest = formatGiftRankDigestForAi(roomId, exp.startTs, exp.endTs, catalogMap);
 
-  const info = await fetchRoomInfo(roomId);
-  const roomDisplay = info?.owner_name ? `${info.owner_name} #${roomId}` : `#${roomId}`;
-  const dataInfo = [
+  const dmLines = exp.danmakuLines || [];
+  const lineChunks = computeDanmakuLineChunks(dmLines, exp.danmakuText);
+  const useMultiPass = lineChunks.length > 1;
+  const modelCandidates = await resolveAiAgentTriggerModelCandidates();
+
+  /** @type {string} */
+  let danmakuExcerptBlock;
+  /** @type {string|null} */
+  let multiPassNote = null;
+  if (useMultiPass) {
+    console.log(`[ai-report] 分段预摘要: ${lineChunks.length} 段, 弹幕 ${dmLines.length} 行`);
+    const chunkSummaries = await summarizeDanmakuChunksForFinalReport(
+      modelCandidates,
+      roomDisplay,
+      exp.rangeLabel,
+      lineChunks,
+    );
+    const verbatim = sampleLinesEvenly(dmLines, AI_REPORT_VERBATIM_DM_SAMPLE).join("\n");
+    danmakuExcerptBlock =
+      `--- 弹幕：分段要点（模型预读 ${lineChunks.length} 段）---\n${chunkSummaries}`
+      + `\n\n--- 弹幕：原文均匀抽样（供引用，勿改行内正文）---\n${verbatim}`;
+    multiPassNote =
+      `弹幕成文｜体量较大，已分 ${lineChunks.length} 段预摘要，并均匀抽样 ${Math.min(dmLines.length, AI_REPORT_VERBATIM_DM_SAMPLE)} 条原文行供引用；评选「最佳弹幕」须逐字来自本消息内的原文抽样或分段要点中的「原文：」行，禁止编造。`;
+  } else {
+    danmakuExcerptBlock = `--- 弹幕摘录 ---\n${exp.danmakuText}`;
+  }
+
+  const dataInfoLines = [
     "【数据信息】以下为导出窗口与抽样口径（仅供定性参考）。**客户端仪表盘顶部已展示结构化「数据概览」**；正文勿写「数据概览」小节或电报数字清单（勿列周期、房间、条数、付费笔数等）。下列数字行仅供理解样本规模，正文请从「概要信息」起笔。",
     `周期｜${exp.rangeLabel}`,
     `房间｜${roomDisplay}｜${roomId}`,
     `弹幕归档｜窗口内录制 chatmsg 共匹配 ${exp.danmakuMatched} 条｜下文至多摘录 ${exp.danmakuIncluded} 条｜截断 ${exp.danmakuTruncated ? "是" : "否"}`,
+    multiPassNote,
     `礼物归档｜窗口内匹配 ${exp.giftMatched} 条｜下文至多摘录 ${exp.giftIncluded} 条｜截断 ${exp.giftTruncated ? "是" : "否"}`,
     "另有「礼物排行与礼物类型摘要」须在后续小节引用解读；勿冒充外链实时榜。",
-  ].join("\n");
+  ].filter(Boolean);
+  const dataInfo = dataInfoLines.join("\n");
   const dailyIntro =
     "生成本直播间「日报」：数据统计范围为「上一个完整自然日」（服务器本地日历：当日 0:00 起至次日 0:00 止）内的弹幕与礼物摘录与心态侧写，写短写实。";
   const weeklyIntro =
@@ -1952,13 +2059,12 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
   const intro = kind === "daily" ? dailyIntro : weeklyIntro;
   const task = `${intro}\n\n${proseStyle}\n\n${bothInstr}\n\n${mentality}\n\n${statsFirst}\n\n${structure}\n\n${fmzMetaFence}`;
   const rankBlock = `--- 礼物排行与礼物类型摘要（本地归档 + catalog） ---\n${giftRankDigest}`;
-  const excerpts = `--- 弹幕摘录 ---\n${exp.danmakuText}\n\n--- 礼物摘录 ---\n${exp.giftText}`;
+  const excerpts = `${danmakuExcerptBlock}\n\n--- 礼物摘录 ---\n${exp.giftText}`;
   const userBlock = `${dataInfo}\n\n${rankBlock}\n\n【分析任务】\n${task}\n\n${excerpts}`;
   const systemContent =
     kind === "daily"
       ? "你是斗鱼直播间数据分析师，写中文日报。篇幅紧凑；正文一律常规字重，禁止粗体（不要用 HTML b/strong）。仪表盘顶部已有「数据概览」；你从「概要信息」定性写起，勿自写数据概览或电报数字清单。禁止 Markdown。礼物解读引用消息内排行摘要。文末输出 <<<FMZ_REPORT_META ... >>>。"
       : "你是斗鱼直播间数据分析师，写中文周报。篇幅紧凑；正文一律常规字重，禁止粗体（不要用 HTML b/strong）。仪表盘顶部已有「数据概览」；你从「概要信息」定性写起，勿自写数据概览或电报数字清单。禁止 Markdown。礼物解读引用消息内排行摘要。文末输出 <<<FMZ_REPORT_META ... >>>。";
-  const modelCandidates = await resolveAiAgentTriggerModelCandidates();
   const rawAiText = await chatAiAgentAccumulateFirstAvailable(modelCandidates, [
     { role: "system", content: systemContent },
     { role: "user", content: userBlock },

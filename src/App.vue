@@ -26,6 +26,7 @@ import {
 } from "./shared/themePresets";
 import {
   formatAppHash,
+  isEmptyAppHash,
   parseAppHash,
   replaceAppHash,
   type MainTab,
@@ -196,6 +197,11 @@ function refreshDocTitle() {
 
 function applyHashToState() {
   if (typeof window === "undefined") return;
+  if (isEmptyAppHash(window.location.hash)) {
+    captainHudOnly.value = false;
+    refreshDocTitle();
+    return;
+  }
   const parsed = parseAppHash(window.location.hash);
   if (parsed.kind === "captain-hud") {
     captainHudOnly.value = true;

@@ -41,6 +41,17 @@ function mainResult(tab: MainTab): ParsedAppHash {
 }
 
 /**
+ * 无有效路由段（`#` / `#/` / 空）— 与 `parseAppHash` 在「空 hash」时曾默认 `sanguo` 的分支对齐，
+ * 供 App 在首次进入时保留 `firstAvailableMainTab()`，避免误切到夜观星象。
+ */
+export function isEmptyAppHash(hash: string): boolean {
+  let h = (hash || "").replace(/^#/, "").trim();
+  if (h === "captain-hud" || h === "/captain-hud") return false;
+  h = h.replace(/^\/*/, "");
+  return h.split("/").filter(Boolean).length === 0;
+}
+
+/**
  * Map of hash head aliases → MainTab.
  * Entries with multiple aliases (e.g. "baobao" | "bilibili" | "bili") are all listed.
  */

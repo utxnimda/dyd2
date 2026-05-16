@@ -1,6 +1,10 @@
 # fmz-dashboard：版本发布与远端部署（供维护者 / AI 参考）
 
-本文描述从打包到静态资源上线、以及各后端服务部署的固定流程。SSH 密钥与连接信息见本文末尾附录 A。
+**本地密钥 / `.pem` / 各模块 env**：见仓库根目录 **[README.md](../README.md#本地配置方式)（章节「本地配置方式」）**。
+
+---
+
+**与本仓库其它说明的关系**：根目录 [**`README.md`**](../README.md) 为全流程索引（本地调试、**本地配置方式**、`fmzFeatures`、页签/插件/目录）；本文**侧重**远端与运维细节。名词 **打包 / 提交 / 发布** 以 **[`.cursor/rules/fmz-release-workflow.mdc`](../.cursor/rules/fmz-release-workflow.mdc)** 为准。
 
 ---
 
@@ -61,7 +65,7 @@ npm run pack
 1. **必须通过 `npm run pack` 执行**：该命令会先运行 `bump-patch.mjs`（自动将 `"local"` 降为 `false`），再 `vite build`，最后 `pack-release.mjs`（含确认）。**绝不能跳过 `bump-patch.mjs` 直接 build**，否则 `"local"` 模块不会被降级。
 2. **手动设置大版本号时**：如果需要跳过自动 patch 递增（如从 `1.0.x` 升到 `1.1.0`），应先手动修改 `package.json` 的 `version` 和 `fmzReleaseLabel`，然后仍然执行 `npm run pack`（bump-patch 会在新版本基础上 +1 patch，但更重要的是它会降级 `"local"` features）。或者手动运行 `node scripts/bump-patch.mjs` 后再手动改回目标版本号，再 `vite build && node scripts/pack-release.mjs`。
 3. **`BUILD_INFO.txt` 会记录发布的模块列表**：可用于事后审计。
-4. **`--yes` 参数**：仅限 CI 场景跳过交互确认，人工发布时**禁止使用**。
+4. **`--yes` 参数**：CI 或本地脚本可跳过交互；**人工发版**时若使用，仍须在打包前核对 `package.json` 的 **`fmzFeatures`** 与确认面板列表是否可信。
 
 ### 2.2 Feature Flag 三态规则
 
@@ -83,42 +87,35 @@ npm run build
 
 ## 3. 发布流程（推荐顺序）
 
-静态站点**不会**在 `git push` 后自动更新；**源码与文档**仍需先进入版本库并推送到远端，便于备份与协作。建议按下面顺序操作：
+静态站点**不会**在 `git push` 后自动更新。项目约定 **完整链路** 为：**打包 → 提交 → 发布**（见根目录 `README.md` 与 `.cursor/rules/fmz-release-workflow.mdc`）。
 
-1. **提交代码**：`git add -A && git commit`（提交功能代码变更）。
-2. **打包**：执行 `npm run pack`（自动递增版本号 → 构建 → 归档，含模块确认）。
-3. **提交版本号变更**：`git add -A && git commit -m "chore: bump version to x.x.x"`。
-4. **推送到远端**：`git push origin main`。
-5. **上传前端 + 同步后端（与包内 `release/<label>/opt/` 一致）**：`npm run deploy`（静态资源 SCP + 旧 assets 清理 + **若本地存在 `opt/`**：同步到远端 `/opt/<...>/`，`fmz-ai-agent-server` 会 `npm install --omit=dev`，并对映射到的单元 `systemctl restart` + 验证 `BUILD_INFO.txt`）。若**只需静态**、暂不动后端：可设置环境变量 **`FMZ_DEPLOY_SKIP_BACKEND=1`**。
-6. **手动兜底**（极少用）：若某环境未走 `pack-release` 的 `opt/` 或需改 unit，可仍按旧方式单独 `scp` + `systemctl restart`。
-7. **验证**：SSH 到服务器确认 `BUILD_INFO.txt` 版本号和服务状态；抽查关键 API（如弹幕、AI `/models`）。
+**推荐做法（与约定一致）**
 
-示例：
+1. **打包**：`npm run pack`（含 `bump-patch` 递增版本、`vite build`、`pack-release` 归档 `release/<label>/`；人工打包时建议看清模块确认输出，CI 可用 `--yes`）。
+2. **提交**：将**本次功能改动**与 **`package.json` / `package-lock.json` 的版本递增**一并 `git commit`（也可拆成两次 commit：先 `feat:`，再 `chore: bump`）。需要协作/备份时再 **`git push`**。
+3. **发布**：`npm run deploy`（上传 `index.html` + `assets/` + `BUILD_INFO.txt`；若本地 `release/.../opt/` 存在则同步到远端 **`/opt/<...>/`**，对需依赖的服务执行对应安装与 **systemd restart**）。若**只要静态**、暂不同步后端：设置 **`FMZ_DEPLOY_SKIP_BACKEND=1`**。
+4. **手动兜底**（极少用）：未走 `pack-release` 的 `opt/` 或需改 unit 时，可单独 `scp` + `systemctl restart`。
+5. **验证**：SSH 查看 **`BUILD_INFO.txt`**、服务 **`systemctl is-active`**；抽查弹幕、AI `/models` 等。
+
+**说明**：`deploy` 已从 **`release/<label>/opt/fmz-danmaku-server/`** 等同路径同步时，**不必**再为弹幕服务单独 `scp` 一遍，除非应急覆盖单文件。
+
+**分两回提交示例**：
 
 ```bash
-# 1. 提交代码
-git add -A
-git commit -m "feat: some feature"
-
-# 2. 打包（自动 bump + build + pack + 模块确认）
+git add -A && git commit -m "feat: some feature"
 npm run pack
-
-# 3. 提交版本号
-git add -A
-git commit -m "chore: bump version to 1.1.15"
-
-# 4. 推送
+git add -A && git commit -m "chore: bump version to 1.1.15"
 git push origin main
-
-# 5. 上传前端（自动上传 + 清理旧 assets + 验证）
 npm run deploy
+```
 
-# 6. 上传弹幕服务（如有变更）并重启
-scp -i "E:\Workspace\pem\nimda_tencent.pem" server/douyu-danmaku-server.mjs root@118.195.150.4:/opt/fmz-danmaku-server/
-ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "systemctl restart fmz-danmaku"
+**单次提交示例**（功能与 bump 同一笔）：
 
-# 7. 验证
-ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "systemctl is-active fmz-danmaku && cat /var/www/fmz-dashboard/BUILD_INFO.txt"
+```bash
+npm run pack
+git add -A && git commit -m "feat: xxx; chore bump v1.1.15"
+git push origin main
+npm run deploy
 ```
 
 ---
@@ -143,10 +140,10 @@ npm run deploy
 
 也可指定特定版本部署：`node scripts/deploy.mjs v1.1.20`
 
-**手动方式（不推荐）：**
+**手动方式（不推荐）：** 下述命令中的 **`D:/path/to/your-key.pem`** 为占位符，请替换为 **`deploy/deploy.local.env` 中的 `FMZ_DEPLOY_SSH_KEY`**（见仓库根目录 **`README.md` · 本地配置方式**）。后文 §11～§13 中手工 `scp`/`ssh` 示例同此。
 
 ```powershell
-scp -i "E:\Workspace\pem\nimda_tencent.pem" -r release/v1.1.15/assets release/v1.1.15/index.html release/v1.1.15/BUILD_INFO.txt root@118.195.150.4:/var/www/fmz-dashboard/
+scp -i "D:/path/to/your-key.pem" -r release/v1.1.15/assets release/v1.1.15/index.html release/v1.1.15/BUILD_INFO.txt root@118.195.150.4:/var/www/fmz-dashboard/
 ```
 
 ⚠️ 手动 SCP 不会清理旧 assets，多次发布后远端会堆积大量无用文件。
@@ -158,7 +155,7 @@ scp -i "E:\Workspace\pem\nimda_tencent.pem" -r release/v1.1.15/assets release/v1
 ## 5. 验证前端版本是否已生效
 
 ```bash
-ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "cat /var/www/fmz-dashboard/BUILD_INFO.txt"
+ssh -i "D:/path/to/your-key.pem" root@118.195.150.4 "cat /var/www/fmz-dashboard/BUILD_INFO.txt"
 ```
 
 或浏览器访问 `https://www.dianfanbao.net/`，「查看网页源代码」应看到当前 **`data-fmz-version`** / **`data-fmz-label`**，且 **`/assets/index-*.js`** 哈希与本地 **`release/.../index.html`** 一致。
@@ -214,12 +211,11 @@ node scripts/check-reactions.mjs https://www.dianfanbao.net/__fmz_reactions
 
 | 步骤 | 命令或操作 |
 |------|------------|
-| 提交代码 | `git add -A && git commit` |
 | 打包 | `npm run pack` |
-| 提交版本号 | `git add -A && git commit -m "chore: bump version"` |
-| 推送 | `git push origin main` |
-| 上传前端 | `npm run deploy`（自动上传 + 清理旧 assets + 验证） |
-| 上传弹幕服务 | `scp douyu-danmaku-server.mjs` → `/opt/fmz-danmaku-server/` + `systemctl restart fmz-danmaku` |
+| 提交 | `git add -A && git commit`（可与版本 bump 同一笔或分两笔，见 §3） |
+| 推送 | `git push`（协作/备份需要时） |
+| 发布 | `npm run deploy`（静态 + 若存在则 `opt/` 与 systemd；见 `deploy.mjs`） |
+| 弹幕等服务**仅应急** | 单独 `scp` + `systemctl restart`（常规无需：已在 `release/.../opt/` 并由 deploy 同步） |
 | 同步歌曲 | `rsync --exclude='source.*'` 到 `/opt/fmz-audio-server/data/audio/`（§11） |
 | 验前端 | SSH 查看 `BUILD_INFO.txt` 或浏览器检查 `data-fmz-version` |
 | 验赞踩 | `node scripts/check-reactions.mjs https://.../__fmz_reactions` |
@@ -228,7 +224,7 @@ node scripts/check-reactions.mjs https://www.dianfanbao.net/__fmz_reactions
 
 ---
 
-## 8b. 深链（Hash）直达某页
+### 8.1 深链（Hash）直达某页
 
 主界面通过 **`#/路径`** 打开对应标签，便于收藏与 OBS 单链：
 
@@ -243,9 +239,11 @@ node scripts/check-reactions.mjs https://www.dianfanbao.net/__fmz_reactions
 | `.../#/users` | 用户积分 |
 | `.../#/battle` | 战斗爽（与顶栏同级） |
 | `.../#/treasury` | 团员金库 |
-| `.../#/songs` | 🎶 歌曲库 |
-| `.../#/crimes` | 🎵 细数宝罪 |
-| `.../#/danmaku` | 🎯 窃听宝语（弹幕捕捉） |
+| `.../#/songs` | 忽闻宝声（曲库） |
+| `.../#/crimes` | 细数宝罪 |
+| `.../#/danmaku` | 窃听宝语（斗鱼弹幕） |
+| `.../#/ruins` | 废墟重建 · 调试（总览） |
+| `.../#/ruins/playlist` 等 | 废墟子页（playlist / treasures / awards / admin） |
 | `.../#captain-hud` 或 `.../#/captain-hud` | 仅战斗爽全屏（无顶栏，适合 OBS） |
 
 切换标签或预赛子页时，地址栏会 **`replaceState`** 同步（不刷屏历史条目）。
@@ -254,6 +252,7 @@ node scripts/check-reactions.mjs https://www.dianfanbao.net/__fmz_reactions
 
 ## 9. 与本仓库其它文档的关系
 
+- **根目录 [`README.md`](../README.md)**：规范、本地调试、`fmzFeatures`、代理端口、页签/插件、代码目录、打包发布索引。
 - **`tencent-cdn-plan2-8443-origin.md`**：CDN 回源配置（控制台手动操作指南）。
 - **`nginx-fmz-dashboard.conf`** + **`nginx-fmz-dashboard-locations.inc`**：完整站点与反代片段。
 - SSH 密钥与连接方式见本文 **附录 A**。
@@ -275,11 +274,11 @@ node scripts/check-reactions.mjs https://www.dianfanbao.net/__fmz_reactions
 
 ## 11. 歌曲库与音频服务（audio-extractor-server）部署
 
-歌曲库（`🎶 歌曲库` Tab）依赖后端 **`audio-extractor-server.mjs`**（端口 **8789**）提供歌曲列表 API 和音频文件下载。发布时需要同时部署 **前端静态资源** + **后端服务** + **歌曲数据文件**。
+歌曲库（顶栏 **忽闻宝声**，原「歌曲库」Tab）依赖后端 **`audio-extractor-server.mjs`**（端口 **8789**）提供歌曲列表 API 和音频文件下载。发布时需要同时部署 **前端静态资源** + **后端服务** + **歌曲数据文件**。
 
 ### 11.1 Feature Flag
 
-`package.json` 中 `fmzFeatures.audio` 必须为 **`true`**（非 `"local"`），否则发布构建时会被 `bump-patch.mjs` 降为 `false`，歌曲库 Tab 不会出现。
+`package.json` 中 `fmzFeatures.audio` 必须为 **`true`**（非 `"local"`），否则发布构建时会被 `bump-patch.mjs` 降为 `false`，**忽闻宝声** Tab 不会出现。
 
 ```json
 "fmzFeatures": {
@@ -326,7 +325,7 @@ server/data/audio/
 ```bash
 mkdir -p /opt/fmz-audio-server
 # 从本地上传服务端脚本
-scp -i "E:\Workspace\pem\nimda_tencent.pem" server/audio-extractor-server.mjs root@118.195.150.4:/opt/fmz-audio-server/
+scp -i "D:/path/to/your-key.pem" server/audio-extractor-server.mjs root@118.195.150.4:/opt/fmz-audio-server/
 ```
 
 #### 11.3.2 歌曲数据同步
@@ -337,13 +336,13 @@ scp -i "E:\Workspace\pem\nimda_tencent.pem" server/audio-extractor-server.mjs ro
 
 ```powershell
 # 同步所有歌曲数据（含 source.mp3，完整但体积大）
-scp -i "E:\Workspace\pem\nimda_tencent.pem" -o StrictHostKeyChecking=accept-new `
+scp -i "D:/path/to/your-key.pem" -o StrictHostKeyChecking=accept-new `
   -r .\server\data\audio\ `
   root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 
 # 仅同步歌曲文件（排除 source.mp3，节省带宽）
 # 需要在服务器上使用 rsync：
-# rsync -avz --exclude='source.*' -e "ssh -i E:\Workspace\pem\nimda_tencent.pem" ./server/data/audio/ root@118.195.150.4:/opt/fmz-audio-server/data/audio/
+# rsync -avz --exclude='source.*' -e "ssh -i D:/path/to/your-key.pem" ./server/data/audio/ root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 ```
 
 **Linux / WSL 示例（推荐，支持增量 + 排除）：**
@@ -351,7 +350,7 @@ scp -i "E:\Workspace\pem\nimda_tencent.pem" -o StrictHostKeyChecking=accept-new 
 ```bash
 rsync -avz --progress \
   --exclude='source.*' \
-  -e "ssh -i E:\Workspace\pem\nimda_tencent.pem" \
+  -e "ssh -i D:/path/to/your-key.pem" \
   ./server/data/audio/ \
   root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 ```
@@ -464,7 +463,7 @@ curl -sk https://www.dianfanbao.net/__fmz_audio/library
 | 步骤 | 命令或操作 | 说明 |
 |------|------------|------|
 | 确认 feature flag | `package.json` → `fmzFeatures.audio: true` | 非 `"local"` |
-| 打包前端 | `npm run pack` | 歌曲库 Tab 会包含在构建中 |
+| 打包前端 | `npm run pack` | 忽闻宝声 Tab 会包含在构建中 |
 | 上传前端 | `scp` 到 `/var/www/fmz-dashboard/` | 同 §4 |
 | 上传服务端脚本 | `scp audio-extractor-server.mjs` → `/opt/fmz-audio-server/` | 仅脚本变更时需要 |
 | 同步歌曲数据 | `scp -r` 或 `rsync` → `/opt/fmz-audio-server/data/audio/` | **增量同步，排除 source.mp3** |
@@ -479,7 +478,7 @@ curl -sk https://www.dianfanbao.net/__fmz_audio/library
 ```bash
 # 增量同步新歌曲（rsync 只传输新增/变更的文件）
 rsync -avz --progress --exclude='source.*' \
-  -e "ssh -i E:\Workspace\pem\nimda_tencent.pem" \
+  -e "ssh -i D:/path/to/your-key.pem" \
   ./server/data/audio/ \
   root@118.195.150.4:/opt/fmz-audio-server/data/audio/
 ```
@@ -508,7 +507,7 @@ rsync -avz --progress --exclude='source.*' \
 
 ```bash
 mkdir -p /opt/fmz-danmaku-server
-scp -i "E:\Workspace\pem\nimda_tencent.pem" server/douyu-danmaku-server.mjs root@118.195.150.4:/opt/fmz-danmaku-server/
+scp -i "D:/path/to/your-key.pem" server/douyu-danmaku-server.mjs root@118.195.150.4:/opt/fmz-danmaku-server/
 ```
 
 #### systemd 服务
@@ -585,8 +584,8 @@ curl -sk https://www.dianfanbao.net/__fmz_danmaku/triggers
 弹幕服务脚本变更后：
 
 ```bash
-scp -i "E:\Workspace\pem\nimda_tencent.pem" server/douyu-danmaku-server.mjs root@118.195.150.4:/opt/fmz-danmaku-server/
-ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "systemctl restart fmz-danmaku"
+scp -i "D:/path/to/your-key.pem" server/douyu-danmaku-server.mjs root@118.195.150.4:/opt/fmz-danmaku-server/
+ssh -i "D:/path/to/your-key.pem" root@118.195.150.4 "systemctl restart fmz-danmaku"
 ```
 
 **无需重新打包前端**（除非前端也有变更）。
@@ -595,19 +594,20 @@ ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4 "systemctl restar
 
 ## 附录 A：SSH 连接与密钥
 
-### 服务器信息
+**以本机为准**：`scripts/deploy.mjs` 默认私钥为 **`D:\nimda1.pem`**、主机 **`118.195.150.4`**；推荐复制 [`deploy/deploy.local.env.example`](deploy.local.env.example) 为 `deploy.local.env` 后按需覆盖。下文 **IP / 路径** 仅为历史示例。
+
+### 服务器信息（示例）
 
 | 项目 | 值 |
 |------|-----|
 | 公网 IP | `118.195.150.4` |
 | 用户名 | `root` |
-| 密钥文件（本机） | `E:\Workspace\pem\nimda_tencent.pem` |
 | Web 根目录 | `/var/www/fmz-dashboard/` |
 
-### 连接命令
+### 连接命令（示例）
 
 ```powershell
-ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4
+ssh -i "D:\nimda1.pem" root@118.195.150.4
 ```
 
 ### 密钥权限（Windows）
@@ -615,8 +615,8 @@ ssh -i "E:\Workspace\pem\nimda_tencent.pem" root@118.195.150.4
 首次使用需设置仅当前用户可读，否则 OpenSSH 报 `Permissions too open`：
 
 ```powershell
-icacls "E:\Workspace\pem\nimda_tencent.pem" /inheritance:r
-icacls "E:\Workspace\pem\nimda_tencent.pem" /grant:r "%USERDOMAIN%\%USERNAME%:(R)"
+icacls "D:\nimda1.pem" /inheritance:r
+icacls "D:\nimda1.pem" /grant:r "%USERDOMAIN%\%USERNAME%:(R)"
 ```
 
 ### 安全组入站规则
