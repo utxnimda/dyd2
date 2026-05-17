@@ -1509,17 +1509,8 @@ interface GiftInfo {
   raw?: Record<string, unknown> | null;
   /** 命中 webconf prop_gift_config 时的原始条目（服务端附加） */
   propRaw?: Record<string, unknown> | null;
-}
-
-/** `/gift-list` 内嵌的背包对照行（仅存本房间 CDN from=2 的 gfid） */
-interface GiftPropSparseRow {
-  name: string;
-  pc: number;
-  devote: number;
-  type: number | null;
-  icon: string;
-  overlaidFromProp: boolean;
-  raw?: Record<string, unknown> | null;
+  /** 礼单合并来源：v3 / prop / manual / fmz-fallback / gift-photos-w / fallback（服务端附加） */
+  source?: string;
 }
 
 function giftInfoFromNorm(info?: GiftInfo | null): number {
@@ -1528,13 +1519,6 @@ function giftInfoFromNorm(info?: GiftInfo | null): number {
 
 const giftInfoMap = ref<Record<string, GiftInfo>>({});
 const giftInfoLoading = ref(false);
-const giftBackpackCatalogMap = ref<Record<string, GiftPropSparseRow>>({});
-const giftBackpackCatalogStats = ref({
-  totalPropKeys: 0,
-  roomBackpackGiftIds: 0,
-  overlaidFromPropCount: 0,
-  propConfigOk: false,
-});
 
 // Fallback when API (/gift-list) 尚未就绪或离线；应与 server douyu-danmaku-server GIFT_FALLBACK 语义一致（勿写与斗鱼 CDN 相冲的占位名）
 const GIFT_NAMES_FALLBACK: Record<string, string> = {
@@ -1573,23 +1557,31 @@ function giftRecordGfidLabel(g: GiftMsg): string {
   return id === "" ? "" : `#${id}`;
 }
 
-const giftFilteredList = computed(() => {
-  const raw = giftList.value;
+/** 归档 pid / gid / giftId 展示（与下行字段对齐） */
+function giftArchivePidDisplay(g: GiftMsg): string {
+  const v = g.pid ?? g.gid ?? g.giftId;
+  const s = v == null ? "" : String(v).trim();
+  return s === "" ? "—" : s;
+}
+
+function filterGiftMsgs(list: GiftMsg[]): GiftMsg[] {
   const q = giftSearchQuery.value.trim();
-  if (!q) return raw;
+  if (!q) return list;
   const mode = giftSearchMode.value;
-  if (mode === "nn") return raw.filter((g) => (g.nn ?? "").toLowerCase().includes(q.toLowerCase()));
-  if (mode === "uid") return raw.filter((g) => String(g.uid ?? "").includes(q.trim()));
+  if (mode === "nn") return list.filter((g) => (g.nn ?? "").toLowerCase().includes(q.toLowerCase()));
+  if (mode === "uid") return list.filter((g) => String(g.uid ?? "").includes(q.trim()));
   const ql = q.toLowerCase();
   const qt = q.trim();
-  return raw.filter((g) => {
+  return list.filter((g) => {
     const gid = String(g.gfid ?? "");
     const dn = giftRowDisplayName(g).toLowerCase();
     const gfcntTxt = String(g.gfcnt ?? "");
     const blob = [g.gs, g.hits, g.type].map((x) => String(x ?? "")).join(" ").toLowerCase();
     return dn.includes(ql) || gid.includes(qt) || gfcntTxt.includes(qt) || blob.includes(ql);
   });
-});
+}
+
+const giftFilteredList = computed(() => filterGiftMsgs(giftList.value));
 
 /** 最近在礼物队列里见过的 gfid→gfn（同名 id 取较新一条），统计「按礼物」行标题优先用之 */
 const giftGfnLatestByGfid = computed(() => {
@@ -1605,11 +1597,18 @@ const giftGfnLatestByGfid = computed(() => {
   return out;
 });
 
-function giftStatsRowName(gfid: string): string {
-  const id = String(gfid ?? "").trim();
-  const hint = giftGfnLatestByGfid.value[id];
+/** 统计接口 bucket：真实 gfid，或无名但有展示名时的 `__gfn:${normalize}` */
+function giftStatsCatalogId(bucketKey: string): string {
+  return bucketKey.startsWith("__gfn:") ? "0" : String(bucketKey ?? "").trim() || "0";
+}
+
+function giftStatsRowName(bucketKey: string, row?: { count: number; name?: string }): string {
+  const tagged = row?.name?.trim();
+  if (tagged) return tagged;
+  const cid = giftStatsCatalogId(bucketKey);
+  const hint = giftGfnLatestByGfid.value[cid];
   if (hint) return hint;
-  return giftName(id);
+  return giftName(cid);
 }
 
 /** 与 server `giftPiecesFromStoredRecord` 一致：仅 gfcnt（当次个数），不乘 hits/gs */
@@ -1618,41 +1617,6 @@ function giftPiecesAggregateCount(g: GiftMsg): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
 
-const giftDebugRows = computed(() => [...giftFilteredList.value].reverse());
-
-/** 调试：giftInfoMap 全表明细；与 GET /gift-list 同源 */
-const giftCatalogLookupRows = computed(() => {
-  return Object.entries(giftInfoMap.value)
-    .map(([gfid, info]) => ({
-      gfid,
-      from: giftInfoFromNorm(info),
-      fromLabel: giftInfoFromNorm(info) === 2 ? "2·背包" : "1·直接",
-      isPaid: info.isPaid ?? false,
-      paidLabel: info.isPaid ? "💰有收益" : "🆓无收益",
-      name: info.name?.trim() || "—",
-      cost: info.cost ?? 0,
-      value: info.value ?? 0,
-      icon: info.icon?.trim() || "",
-    }))
-    .sort((a, b) => String(a.gfid).localeCompare(String(b.gfid), undefined, { numeric: true }));
-});
-
-/** debug：prop_gift_config 稀疏对照（仅存本房间 from=2 的 gfid） */
-const giftPropCatalogRows = computed(() => {
-  return Object.entries(giftBackpackCatalogMap.value)
-    .map(([gfid, row]) => ({ gfid, ...row }))
-    .sort((a, b) => String(a.gfid).localeCompare(String(b.gfid), undefined, { numeric: true }));
-});
-
-const giftPropCatalogEmptyTip = computed(() => {
-  if (giftPropCatalogRows.value.length > 0) return "";
-  if (!giftBackpackCatalogStats.value.propConfigOk) {
-    return "未取得斗鱼 prop_gift_config（网络不可用或仍为首次加载）。请检查出站网络后刷新礼单／切换房间。";
-  }
-  return "当前房间 CDN gift/v3 礼单里没有 from=2（背包类目）条目。";
-});
-
-/** 当前房间斗鱼礼单条目（gfid）：与 giftInfoMap / 服务端 fetch 同源 — 详见列头悬停提示 */
 /** isPaid: 是否有主播收益（v3: priceType=YUCHI; prop: pc>=100）。from: 1=直连, 2=背包。 */
 const GIFT_FROM_HINT =
   "礼物收益分类：💰isPaid=true 表示主播有实际收益（v3 API: priceType=YUCHI; prop: pc≥100）；🆓isPaid=false 表示无收益（免费礼物/鱼丸等）。from: 1=直连礼物, 2=背包/旧版礼物。cost/value 已在服务器端换算为元。";
@@ -1661,16 +1625,7 @@ const GIFT_STATS_TOTAL_COST_HINT =
   "实际价值仅 Σ(isPaid=true 的礼物 value×件)。无收益礼物(isPaid=false)不包含在内。value=contribution/10，即主播实际收益(元)。";
 
 const GIFT_CATALOG_VALUE_HINT =
-  "服务端合并两个数据源：v3 CDN API（新 ID 20000+，priceType 区分收益）+ prop_gift_config（旧 ID，pc≥100 视为有收益）。cost/value 已换算为元。isPaid=true 💰 表示主播有收益。";
-
-const GIFT_PROP_TABLE_HINT =
-  "斗鱼 webconf「prop_gift_config」静态 JSON（JSONP）；与站内背包礼配置对齐。表中为 from=2 条目；斗鱼全库键数量见脚注。isPaid 由 pc≥100 启发式判断。";
-
-const GIFT_PROP_OVERLAY_HINT =
-  "是否在全站 prop 表中查到该 gfid：**是** 表示用 pc／devote 校准；**否** 表示仅 CDN v3 price／growth 刻度。";
-
-const GIFT_STATS_BY_GIFT_HINT =
-  "「值」行仅 isPaid=true 时显示(value×件)；isPaid=false 标「🆓」不写值。value=contribution/10，即主播实际收益(元)。名称优先最晚同 gfid 的 gfn。";
+  "服务端合并两个数据源：v3 CDN API（新 ID 20000+，priceType 区分收益）+ prop_gift_config（旧 ID，pc≥100 视为有收益）。cost/value 已换算为元。isPaid=true 💰 表示主播有收益。「值」行仅 isPaid=true 时显示(value×件)；isPaid=false 标「🆓」不写值。无名但有下行名称的礼物按名称分行列出（不与 gfid=0 笼统合并）。名称优先统计接口返回的本窗 gfn。";
 
 function giftFmtMoneyYuan(n: number): string {
   if (!Number.isFinite(n)) return "0";
@@ -1748,33 +1703,27 @@ function giftCatalogDebugPrettyJson(v: unknown): string {
   }
 }
 
-/** 礼单查找表：CDN 本条原始片段或映射快照（新窗口） */
+/** 礼单：服务端合并后的完整条目（含 source / raw / propRaw）（新窗口） */
 function openGiftCatalogRawWindow(gfid: string): void {
   const id = String(gfid ?? "").trim();
   const inf = giftInfoMap.value[id];
   if (!inf) return;
 
-  let payload: unknown;
-  let lead: string;
-  const raw = inf.raw;
-  if (raw != null && typeof raw === "object" && !Array.isArray(raw)) {
-    payload = raw;
-    lead = "以下为斗鱼 CDN「gift/v3/web/list」中该 gfid 对应条目的原始 JSON（键已递归排序）；条目含 **from**（1＝直连、2＝背包），并与 cost／value 派生同源。关闭本页即可。";
-  } else {
-    payload = {
-      gfid: id,
-      from: giftInfoFromNorm(inf),
-      isPaid: inf.isPaid ?? false,
-      priceType: inf.priceType || null,
-      name: inf.name,
-      icon: inf.icon,
-      cost: inf.cost,
-      value: inf.value,
-      propRaw: inf.propRaw ?? null,
-      _note: "此为当前 giftInfoMap 可见字段快照。isPaid: 是否有主播收益(v3:priceType=YUCHI / prop:pc≥100)。from：1直连／2背包。",
-    };
-    lead = "无 CDN 原生片段时的映射快照（键递归排序）；关闭本页即可。";
-  }
+  const payload = giftDebugSortKeysDeep({
+    gfid: id,
+    source: inf.source ?? null,
+    name: inf.name,
+    icon: inf.icon,
+    cost: inf.cost,
+    value: inf.value,
+    from: inf.from ?? giftInfoFromNorm(inf),
+    isPaid: inf.isPaid ?? false,
+    priceType: inf.priceType ?? null,
+    raw: inf.raw ?? null,
+    propRaw: inf.propRaw ?? null,
+  });
+  const lead =
+    "服务端合并礼单条目（v3 + prop_gift_config + manual/fallback 等）完整字段；raw / propRaw 为各数据源原生片段。关闭本页即可。";
 
   const pretty = giftCatalogDebugPrettyJson(payload);
   const title = `礼单条目 · gfid=${id}`;
@@ -1784,44 +1733,7 @@ h1{margin:0 0 6px;font:600 14px system-ui;color:#f0f0f0}
 p{margin:0 0 12px;opacity:.72;font:12px system-ui}
 pre{margin:0;white-space:pre-wrap;word-break:break-word}
 </style></head><body>
-<h1>斗鱼礼物礼单 · 原生 / 快照 JSON</h1>
-<p>${giftDebugEscapeHtml(lead)}</p>
-<pre>${giftDebugEscapeHtml(pretty)}</pre>
-</body></html>`;
-  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const w = window.open(url, "_blank", "noopener,noreferrer,width=840,height=920");
-  if (w) {
-    w.focus();
-    setTimeout(() => URL.revokeObjectURL(url), 120_000);
-  } else {
-    URL.revokeObjectURL(url);
-  }
-}
-
-/** debug：prop_gift_config 本条 JSON（新窗口） */
-function openGiftPropRawWindow(gfid: string): void {
-  const id = String(gfid ?? "").trim();
-  const row = giftBackpackCatalogMap.value[id];
-  let payload: unknown;
-  let lead: string;
-  const raw = row?.raw;
-  if (raw != null && typeof raw === "object" && !Array.isArray(raw)) {
-    payload = raw;
-    lead = "以下为斗鱼 「prop_gift_config」该 gfid 条目的快照（键已递归排序）；与 debug「背包／道具对照」同源。关闭本页即可。";
-  } else {
-    payload = { gfid: id, ...(row || {}), _note: "无配置文件原生片段时为服务端返回的稀疏对照字段。" };
-    lead = "无 prop 本条 raw 时为对照稀疏快照（键递归排序）；关闭本页即可。";
-  }
-  const pretty = giftCatalogDebugPrettyJson(payload);
-  const title = `prop gift · gfid=${id}`;
-  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>${giftDebugEscapeHtml(title)}</title><style>
-body{margin:0;padding:14px 16px 24px;background:#121212;color:#d4d4d4;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}
-h1{margin:0 0 6px;font:600 14px system-ui;color:#f0f0f0}
-p{margin:0 0 12px;opacity:.72;font:12px system-ui}
-pre{margin:0;white-space:pre-wrap;word-break:break-word}
-</style></head><body>
-<h1>斗鱼 prop_gift_config · JSON</h1>
+<h1>斗鱼礼物礼单 · 合并条目 JSON</h1>
 <p>${giftDebugEscapeHtml(lead)}</p>
 <pre>${giftDebugEscapeHtml(pretty)}</pre>
 </body></html>`;
@@ -1844,34 +1756,8 @@ async function loadGiftInfoForRoom(rid: string) {
   try {
     const d = await (await fetch(`${API}/gift-list/${encodeURIComponent(rid)}`)).json();
     if (d.ok && d.gifts) giftInfoMap.value = d.gifts;
-    if (d.ok && d.backpackCatalog && typeof d.backpackCatalog === "object") {
-      giftBackpackCatalogMap.value = d.backpackCatalog as Record<string, GiftPropSparseRow>;
-    } else {
-      giftBackpackCatalogMap.value = {};
-    }
-    if (d.ok && d.backpackCatalogStats && typeof d.backpackCatalogStats === "object") {
-      giftBackpackCatalogStats.value = {
-        totalPropKeys: Number(d.backpackCatalogStats.totalPropKeys) || 0,
-        roomBackpackGiftIds: Number(d.backpackCatalogStats.roomBackpackGiftIds) || 0,
-        overlaidFromPropCount: Number(d.backpackCatalogStats.overlaidFromPropCount) || 0,
-        propConfigOk: Boolean(d.backpackCatalogStats.propConfigOk),
-      };
-    } else {
-      giftBackpackCatalogStats.value = {
-        totalPropKeys: 0,
-        roomBackpackGiftIds: 0,
-        overlaidFromPropCount: 0,
-        propConfigOk: false,
-      };
-    }
   } catch {
-    giftBackpackCatalogMap.value = {};
-    giftBackpackCatalogStats.value = {
-      totalPropKeys: 0,
-      roomBackpackGiftIds: 0,
-      overlaidFromPropCount: 0,
-      propConfigOk: false,
-    };
+    /* ignore */
   }
   giftInfoLoading.value = false;
 }
@@ -3772,6 +3658,8 @@ async function onBackendRoomSelect(rid: string) {
   triggerLog.value = [];
   giftList.value = [];
   giftStats.value = null;
+  giftArchiveDebugList.value = [];
+  giftArchiveDebugTotalCount.value = 0;
   // Load recent 100 danmaku from recording
   const msgs = await loadRecentDanmaku(ridNorm);
   backendDanmakuList.value = msgs;
@@ -3784,6 +3672,10 @@ async function onBackendRoomSelect(rid: string) {
   loadGiftInfoForRoom(ridNorm);
   // Reload gift stats if currently on stats tab
   if (giftSubTab.value === 'stats') loadGiftStats(ridNorm, giftStatsRange.value);
+  if (giftSubTab.value === 'debug') {
+    void loadGiftArchiveDebug(ridNorm);
+    void loadGiftPhotosDebug(false);
+  }
   // Fetch room info if missing
   const r = backendRooms.value.find((x) => sameDouyuRoomId(x.roomId, ridNorm));
   if (r && !r.info) fetchRoomInfo(ridNorm).then(info => { r.info = info; });
@@ -3823,11 +3715,231 @@ const giftStatsRange = ref<GiftStatsRange>('today');
 interface GiftStatsData {
   totalValue: number;
   totalCount: number;
-  byGift: Record<string, { count: number }>;
+  byGift: Record<string, { count: number; name?: string }>;
   byUser: Record<string, { nn: string; level: string; bnn: string; bl: string; brid: string; count: number; gifts: Record<string, number> }>;
 }
+
 const giftStats = ref<GiftStatsData | null>(null);
 const giftStatsLoading = ref(false);
+
+/** 调试 Tab：单次拉取的归档上限（须与服务端 GET /gifts/:rid limit 上限一致） */
+const GIFT_ARCHIVE_DEBUG_LIMIT = 25_000;
+const giftArchiveDebugList = ref<GiftMsg[]>([]);
+const giftArchiveDebugTotalCount = ref(0);
+const giftArchiveDebugLoading = ref(false);
+
+async function loadGiftArchiveDebug(rid: string) {
+  giftArchiveDebugLoading.value = true;
+  try {
+    const url = `${API}/gifts/${encodeURIComponent(rid)}?limit=${GIFT_ARCHIVE_DEBUG_LIMIT}`;
+    const d = await (await fetch(url)).json();
+    if (d.ok && Array.isArray(d.gifts)) {
+      giftArchiveDebugList.value = d.gifts as GiftMsg[];
+      const tc = Number(d.totalCount);
+      giftArchiveDebugTotalCount.value = Number.isFinite(tc) ? tc : d.gifts.length;
+    } else {
+      giftArchiveDebugList.value = [];
+      giftArchiveDebugTotalCount.value = 0;
+    }
+  } catch {
+    giftArchiveDebugList.value = [];
+    giftArchiveDebugTotalCount.value = 0;
+  }
+  giftArchiveDebugLoading.value = false;
+}
+
+const giftArchiveDebugHint = computed(() => {
+  if (giftArchiveDebugLoading.value) return "";
+  const n = giftArchiveDebugList.value.length;
+  const total = giftArchiveDebugTotalCount.value;
+  if (!n) return "暂无归档数据（或接口失败）";
+  if (total > n) return `已加载 ${n} 条 · 归档总计约 ${total} 条（单次至多 ${GIFT_ARCHIVE_DEBUG_LIMIT}）`;
+  return `共 ${n} 条`;
+});
+
+const giftDebugArchiveFilteredRows = computed(() =>
+  [...filterGiftMsgs(giftArchiveDebugList.value)].sort((a, b) => b.ts - a.ts),
+);
+
+const GIFT_DEBUG_SOURCE_ORDER = ["v3", "prop", "manual", "fmz-fallback", "gift-photos-w", "fallback", "unknown"];
+
+function giftDebugSourceBlockTitle(sourceKey: string): string {
+  const map: Record<string, string> = {
+    v3: "v3 CDN（gift/v3/web/list）",
+    prop: "prop_gift_config（webconf）",
+    manual: "manual（服务端条目）",
+    "fmz-fallback": "fmz-fallback（战功内置礼单）",
+    "gift-photos-w": "gift-photos-w（写真目录保底 pgId）",
+    fallback: "fallback（未知占位）",
+    unknown: "unknown（缺 source）",
+  };
+  return map[sourceKey] ?? sourceKey;
+}
+
+const giftDebugCatalogBlocks = computed(() => {
+  const buckets: Record<string, { gfid: string; info: GiftInfo }[]> = {};
+  for (const [gfid, info] of Object.entries(giftInfoMap.value)) {
+    const sourceKey = String(info.source ?? "").trim() || "unknown";
+    if (!buckets[sourceKey]) buckets[sourceKey] = [];
+    buckets[sourceKey].push({ gfid, info });
+  }
+  for (const rows of Object.values(buckets)) {
+    rows.sort((a, b) => String(a.gfid).localeCompare(String(b.gfid), undefined, { numeric: true }));
+  }
+  const keys = Object.keys(buckets).sort((a, b) => {
+    const ia = GIFT_DEBUG_SOURCE_ORDER.indexOf(a);
+    const ib = GIFT_DEBUG_SOURCE_ORDER.indexOf(b);
+    const ra = ia === -1 ? 999 : ia;
+    const rb = ib === -1 ? 999 : ib;
+    if (ra !== rb) return ra - rb;
+    return a.localeCompare(b);
+  });
+  return keys.map((sourceKey) => ({
+    sourceKey,
+    title: giftDebugSourceBlockTitle(sourceKey),
+    rows: buckets[sourceKey],
+  }));
+});
+
+/** webconf giftPhotos_w pgInfos 单条（与弹幕 gfid 命名空间可能不同） */
+interface GiftPhotosWPgRow {
+  pgId?: number;
+  name?: string;
+  pic?: string;
+  price?: number;
+  intimacy?: number;
+  lv?: number;
+  tab1?: number;
+  time?: number;
+  isNew?: number;
+  iconTxt?: string;
+}
+
+interface GiftPhotosWDebugPayload {
+  tabInfos: unknown[];
+  pgInfos: GiftPhotosWPgRow[];
+  unlockStar: unknown;
+  awardStar: unknown;
+  fetchedAt: number;
+}
+
+const giftPhotosDebugPayload = ref<GiftPhotosWDebugPayload | null>(null);
+const giftPhotosDebugLoading = ref(false);
+
+async function loadGiftPhotosDebug(force = false) {
+  if (!force && giftPhotosDebugPayload.value) return;
+  giftPhotosDebugLoading.value = true;
+  try {
+    const d = await (await fetch(`${API}/gift-photos-w`)).json();
+    if (d.ok && Array.isArray(d.pgInfos)) {
+      giftPhotosDebugPayload.value = {
+        tabInfos: Array.isArray(d.tabInfos) ? d.tabInfos : [],
+        pgInfos: d.pgInfos as GiftPhotosWPgRow[],
+        unlockStar: d.unlockStar ?? null,
+        awardStar: d.awardStar ?? null,
+        fetchedAt: Number.isFinite(Number(d.fetchedAt)) ? Number(d.fetchedAt) : Date.now(),
+      };
+    } else {
+      if (!giftPhotosDebugPayload.value) giftPhotosDebugPayload.value = null;
+    }
+  } catch {
+    if (!giftPhotosDebugPayload.value) giftPhotosDebugPayload.value = null;
+  }
+  giftPhotosDebugLoading.value = false;
+}
+
+function filterGiftPhotosPgRows(list: GiftPhotosWPgRow[]): GiftPhotosWPgRow[] {
+  const q = giftSearchQuery.value.trim();
+  if (!q) return list;
+  const mode = giftSearchMode.value;
+  const ql = q.toLowerCase();
+  const qt = q.trim();
+  if (mode === "nn") return list.filter((r) => String(r.name ?? "").toLowerCase().includes(ql));
+  if (mode === "uid") return list.filter((r) => String(r.pgId ?? "").includes(qt));
+  return list.filter((r) => {
+    const name = String(r.name ?? "").toLowerCase();
+    const pid = String(r.pgId ?? "");
+    const tab = String(r.tab1 ?? "");
+    const ic = String(r.iconTxt ?? "").toLowerCase();
+    return name.includes(ql) || pid.includes(qt) || tab.includes(qt) || ic.includes(ql);
+  });
+}
+
+const giftPhotosDebugFilteredRows = computed(() => {
+  const rows = giftPhotosDebugPayload.value?.pgInfos ?? [];
+  return [...filterGiftPhotosPgRows(rows)].sort((a, b) =>
+    String(a.pgId ?? "").localeCompare(String(b.pgId ?? ""), undefined, { numeric: true }),
+  );
+});
+
+interface GiftPhotosTabSummaryRow {
+  key: string;
+  tab1Name: string;
+  tab2Count: number;
+  pgIdTotal: number;
+}
+
+const giftPhotosTabSummaries = computed((): GiftPhotosTabSummaryRow[] => {
+  const tabs = giftPhotosDebugPayload.value?.tabInfos;
+  if (!Array.isArray(tabs)) return [];
+  return tabs.map((t: Record<string, unknown>, i: number) => {
+    const tab2List = Array.isArray(t.tab2List) ? t.tab2List : [];
+    let pgIdTotal = 0;
+    for (const x of tab2List) {
+      const pgIds =
+        x && typeof x === "object" && Array.isArray((x as { pgIds?: unknown }).pgIds)
+          ? (x as { pgIds: unknown[] }).pgIds
+          : [];
+      pgIdTotal += pgIds.length;
+    }
+    return {
+      key: `t_${i}_${String(t.tab1Id ?? i)}`,
+      tab1Name: String(t.tab1Name ?? ""),
+      tab2Count: tab2List.length,
+      pgIdTotal,
+    };
+  });
+});
+
+const giftPhotosDebugHint = computed(() => {
+  if (giftPhotosDebugLoading.value) return "";
+  const p = giftPhotosDebugPayload.value;
+  if (!p) return "giftPhotos_w 未加载或接口失败（可看服务端日志）";
+  const n = p.pgInfos.length;
+  const t = new Date(p.fetchedAt).toLocaleString("zh-CN");
+  return `共 ${n} 条写真 · 服务端缓存刷新 ${t}`;
+});
+
+/** 写真 price÷100（元）：与服务端合并礼单 `value`、礼物统计口径一致（与 v3 标价 raw 同源）。 */
+function giftPhotosPriceFish(price: unknown): string {
+  const n = Number(price);
+  if (!Number.isFinite(n)) return "—";
+  return giftFmtMoneyYuan(n / 100);
+}
+
+function openGiftPhotoPgJsonWindow(row: GiftPhotosWPgRow): void {
+  const pretty = giftCatalogDebugPrettyJson(giftDebugSortKeysDeep(row));
+  const title = `giftPhotos_w · pgId=${String(row.pgId ?? "")}`;
+  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>${giftDebugEscapeHtml(title)}</title><style>
+body{margin:0;padding:14px 16px 24px;background:#121212;color:#d4d4d4;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace}
+h1{margin:0 0 6px;font:600 14px system-ui;color:#f0f0f0}
+p{margin:0 0 12px;opacity:.72;font:12px system-ui}
+pre{margin:0;white-space:pre-wrap;word-break:break-word}
+</style></head><body>
+<h1>giftPhotos_w · pgInfos 条目</h1>
+<p>webconf 图鉴写真单条 JSON（键递归排序）；pgId 与礼单 gfid 不一定一致。</p>
+<pre>${giftDebugEscapeHtml(pretty)}</pre>
+</body></html>`;
+  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const w = window.open(url, "_blank", "noopener,noreferrer,width=840,height=920");
+  if (w) {
+    w.focus();
+    setTimeout(() => URL.revokeObjectURL(url), 120_000);
+  } else {
+    URL.revokeObjectURL(url);
+  }
+}
 
 async function loadGiftStats(rid: string, range: GiftStatsRange) {
   giftStatsLoading.value = true;
@@ -3842,11 +3954,17 @@ async function loadGiftStats(rid: string, range: GiftStatsRange) {
 const giftStatsByGiftSorted = computed(() => {
   if (!giftStats.value) return [];
   return Object.entries(giftStats.value.byGift)
-    .map(([gfid, v]) => {
-      const info = giftInfoMap.value[gfid];
+    .map(([bucketKey, v]) => {
+      const catalogId = giftStatsCatalogId(bucketKey);
+      const info = giftInfoMap.value[catalogId];
       return {
-        gfid, count: v.count, name: giftStatsRowName(gfid), icon: giftIcon(gfid),
-        cost: (info?.cost || 0), value: (info?.value || 0),
+        bucketKey,
+        catalogId,
+        count: v.count,
+        name: giftStatsRowName(bucketKey, v),
+        icon: giftIcon(catalogId),
+        cost: (info?.cost || 0),
+        value: (info?.value || 0),
         from: giftInfoFromNorm(info),
         isPaid: info?.isPaid ?? false,
       };
@@ -3890,8 +4008,8 @@ const giftStatsByUserSorted = computed(() => {
       // Calculate total revenue (value) and total cost for this user
       let totalValue = 0;
       let totalCost = 0;
-      for (const [gfid, cnt] of Object.entries(v.gifts)) {
-        const info = giftInfoMap.value[gfid];
+      for (const [giftKey, cnt] of Object.entries(v.gifts)) {
+        const info = giftInfoMap.value[giftStatsCatalogId(giftKey)];
         if (info?.isPaid) {
           totalValue += (info.value || 0) * cnt;
           totalCost += (info.cost || 0) * cnt;
@@ -3911,20 +4029,20 @@ const giftStatsByUserSorted = computed(() => {
 const giftStatsTotalCost = computed(() => {
   if (!giftStats.value) return 0;
   let total = 0;
-  for (const [gfid, v] of Object.entries(giftStats.value.byGift)) {
-    const inf = giftInfoMap.value[gfid];
+  for (const [bucketKey, v] of Object.entries(giftStats.value.byGift)) {
+    const inf = giftInfoMap.value[giftStatsCatalogId(bucketKey)];
     if (!inf?.isPaid) continue;
     const value = inf?.value || 0;
     total += value * v.count;
   }
   return total;
 });
-// 「总花费」合计(元)：仅 isPaid=true 的礼物 Σ(cost×件)
+// 「总花费」合计(元)：仅 isPaid=true 的礼物 Σ(cost×件)；战功 FMZ 礼单 cost 默认为 0
 const giftStatsTotalSpend = computed(() => {
   if (!giftStats.value) return 0;
   let total = 0;
-  for (const [gfid, v] of Object.entries(giftStats.value.byGift)) {
-    const inf = giftInfoMap.value[gfid];
+  for (const [bucketKey, v] of Object.entries(giftStats.value.byGift)) {
+    const inf = giftInfoMap.value[giftStatsCatalogId(bucketKey)];
     if (!inf?.isPaid) continue;
     const cost = inf?.cost || 0;
     total += cost * v.count;
@@ -3935,11 +4053,15 @@ const giftStatsTotalSpend = computed(() => {
 // Watch range change to reload stats
 watch(giftStatsRange, (r) => {
   const rid = backendSelectedRoom.value;
-  if (rid && giftSubTab.value === 'stats') loadGiftStats(rid, r);
+  if (!rid) return;
+  if (giftSubTab.value === 'stats') loadGiftStats(rid, r);
 });
 watch(giftSubTab, (tab) => {
+  if (tab === "debug") void loadGiftPhotosDebug(false);
   const rid = backendSelectedRoom.value;
-  if (rid && tab === 'stats') loadGiftStats(rid, giftStatsRange.value);
+  if (!rid) return;
+  if (tab === 'stats') loadGiftStats(rid, giftStatsRange.value);
+  if (tab === 'debug') void loadGiftArchiveDebug(rid);
 });
 
 async function loadGiftsForRoom(rid: string) {
@@ -3951,7 +4073,13 @@ async function loadGiftsForRoom(rid: string) {
 async function clearGiftsForRoom() {
   const rid = backendSelectedRoom.value;
   if (!rid) return;
-  try { await fetch(`${API}/gifts/${encodeURIComponent(rid)}/clear`, { method: "POST" }); giftList.value = []; } catch { /* */ }
+  try {
+    await fetch(`${API}/gifts/${encodeURIComponent(rid)}/clear`, { method: "POST" });
+    giftList.value = [];
+    giftArchiveDebugList.value = [];
+    giftArchiveDebugTotalCount.value = 0;
+    if (giftSubTab.value === "debug") await loadGiftArchiveDebug(rid);
+  } catch { /* */ }
 }
 
 /* ------------------------------------------------------------------ */
@@ -4599,7 +4727,7 @@ function hideUidTooltip() {
                           <nav class="dm-gift-tabs dm-gift-tabs--inline dm-gift-tabs--toolbar">
                             <button type="button" :class="{ active: giftSubTab === 'records' }" @click="giftSubTab = 'records'">记录</button>
                             <button type="button" :class="{ active: giftSubTab === 'stats' }" @click="giftSubTab = 'stats'">统计</button>
-<button v-if="isDev" type="button" class="dm-gift-tab-debug" :class="{ active: giftSubTab === 'debug' }" title="下行原始字段与计件明细（调试）" @click="giftSubTab = 'debug'">调试</button>
+<button v-if="isDev" type="button" class="dm-gift-tab-debug" :class="{ active: giftSubTab === 'debug' }" title="归档送礼条目 + 按来源分组的合并礼单（调试）" @click="giftSubTab = 'debug'">调试</button>
                           </nav>
                           <label class="dm-check dm-check--toolbar dm-check--toolbar-free-scroll" title="有新礼物时自动滚到底"><input v-model="giftAutoScroll" type="checkbox" /> 自动滚动</label>
                         </div>
@@ -4737,7 +4865,7 @@ function hideUidTooltip() {
                             <span class="dm-gift-stats-th dm-gift-stats-th--revenue">收入</span>
                             <span class="dm-gift-stats-th dm-gift-stats-th--cost">花费</span>
                           </div>
-                          <div v-for="item in giftStatsByGiftSorted" :key="item.gfid" class="dm-gift-stats-trow">
+                          <div v-for="item in giftStatsByGiftSorted" :key="item.bucketKey" class="dm-gift-stats-trow">
                             <span class="dm-gift-stats-td dm-gift-stats-td--icon">
                               <img v-if="item.icon" :src="item.icon" class="dm-gift-icon-sm" alt="" referrerpolicy="no-referrer" />
                               <span v-else class="dm-gift-icon-sm-placeholder">🎁</span>
@@ -4745,7 +4873,7 @@ function hideUidTooltip() {
                             <span class="dm-gift-stats-td dm-gift-stats-td--name">{{ item.name }}</span>
                             <span class="dm-gift-stats-td dm-gift-stats-td--cnt">×{{ item.count }}</span>
                             <span class="dm-gift-stats-td dm-gift-stats-td--revenue">{{ item.isPaid && item.value ? (item.value * item.count).toFixed(1) : '-' }}</span>
-                            <span class="dm-gift-stats-td dm-gift-stats-td--cost">{{ item.isPaid && item.cost ? (item.cost * item.count).toFixed(1) : '-' }}</span>
+                            <span class="dm-gift-stats-td dm-gift-stats-td--cost">{{ item.isPaid ? (item.cost * item.count).toFixed(1) : '-' }}</span>
                           </div>
                         </div>
                         <div v-if="giftStatsByGiftSorted.length === 0" class="dm-empty">暂无数据</div>
@@ -4778,180 +4906,160 @@ function hideUidTooltip() {
                     <div v-else class="dm-empty">点击刷新加载统计</div>
                   </div>
                   <div v-if="giftSubTab === 'debug'" class="dm-gift-feed dm-gift-debug-feed">
-                    <div v-if="giftList.length === 0" class="dm-empty">暂无礼物记录</div>
-                    <template v-else>
-                      <p class="dm-gift-debug-lead">
-                        「计入件」与服务器汇总一致：仅取下行的 <code class="dm-gift-debug-code">gfcnt</code>（当次礼物个数，向下取整）；缺失或非法时按 <code class="dm-gift-debug-code">1</code>，<strong>不乘</strong>
-                        hits、gs。下列为当前<strong>筛选</strong>结果，自上而下为<strong>新 → 旧</strong>。<strong>gfid</strong>＝斗鱼礼物 id；<strong>gfn</strong>＝本条下行名称；可与下方「查找表」中礼单名称对照。<strong>礼单价(值)</strong>按 gfid 查当前房间礼单缓存，列表头悬停见详解。下行<strong>完整 JSON</strong>仅在新窗口<strong>打开</strong>查看。
+                  <div v-if="!backendSelectedRoom" class="dm-empty">请先选择房间后查看 ① 归档与 ② 礼单（③ webconf 写真可不选房间）。</div>
+                  <template v-else>
+                    <section class="dm-gift-debug-section">
+                      <h3 class="dm-gift-debug-h3">① 送礼归档条目</h3>
+                      <p class="dm-gift-debug-lead dm-gift-debug-lead--tight">
+                        服务端归档（至多 {{ GIFT_ARCHIVE_DEBUG_LIMIT }} 条，按时间新→旧）。筛选与上方工具栏关键字／模式共用。
                       </p>
-                      <details class="dm-gift-debug-lookup">
-                        <summary class="dm-gift-debug-lookup-sum">礼物信息查找表（gfid → 开销(元)／价值(元)）</summary>
-                        <p class="dm-gift-debug-lookup-note" :title="GIFT_CATALOG_VALUE_HINT">
-                          等价于前端 <strong>giftInfoMap[gfid]</strong>：服务端 <code class="dm-gift-debug-code">GET /gift-list/:房间</code> 拉斗鱼 CDN 清单后写入的映射；<strong>from</strong> 列：<strong>1·直接</strong>／<strong>2·背包</strong>；表中
-                          <strong>开销(元)</strong>（giftInfo.cost，已换算为元）与<strong>价值(元)</strong>（giftInfo.value，已换算为元）及<strong>礼单价摘要</strong>同源（列表头悬停）。末列<strong>打开</strong>在新窗口查看该 gfid 的 CDN 本条 JSON（无 <code class="dm-gift-debug-code">raw</code> 时为映射快照）。
-                        </p>
-                        <div v-if="giftInfoLoading" class="dm-gift-debug-lookup-msg">礼单加载中…</div>
-                        <template v-else-if="giftCatalogLookupRows.length">
+                      <div v-if="giftArchiveDebugLoading" class="dm-empty">加载归档…</div>
+                      <template v-else>
+                        <p v-if="giftArchiveDebugHint" class="dm-gift-debug-inline-meta">{{ giftArchiveDebugHint }}</p>
+                        <div class="dm-gift-debug-table-scroll dm-gift-debug-stats-rows-scroll">
+                          <table class="dm-gift-debug-table dm-gift-debug-table--compact">
+                            <thead>
+                              <tr>
+                                <th>时间</th>
+                                <th>礼物名</th>
+                                <th>送礼用户</th>
+                                <th>gfid</th>
+                                <th title="pid / gid / giftId">pid</th>
+                                <th>uid</th>
+                                <th>rid</th>
+                                <th class="dm-gift-debug-th-json">原始 JSON</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr v-for="(g, ix) in giftDebugArchiveFilteredRows" :key="'gfa_' + ix + '_' + g.ts">
+                                <td class="dm-gift-debug-td-nowrap">{{ formatTime(g.ts) }}</td>
+                                <td class="dm-gift-debug-td-ell" :title="giftRowDisplayName(g)">{{ giftRowDisplayName(g) }}</td>
+                                <td class="dm-gift-debug-td-ell" :title="String(g.nn ?? '')">{{ g.nn ?? '—' }}</td>
+                                <td class="dm-gift-debug-td-num">{{ g.gfid ?? '—' }}</td>
+                                <td class="dm-gift-debug-td-num">{{ giftArchivePidDisplay(g) }}</td>
+                                <td class="dm-gift-debug-td-ell">{{ g.uid ?? '—' }}</td>
+                                <td class="dm-gift-debug-td-ell">{{ g.rid ?? '—' }}</td>
+                                <td class="dm-gift-debug-json-cell">
+                                  <button type="button" class="dm-gift-debug-json-hit" title="新窗口查看本条归档原生 JSON" @click.stop="openGiftDebugJsonWindow(g)">原始 JSON</button>
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      </template>
+                    </section>
+                    <section class="dm-gift-debug-section">
+                      <h3 class="dm-gift-debug-h3">② 礼单条目（按数据来源）</h3>
+                      <p class="dm-gift-debug-lead dm-gift-debug-lead--tight">
+                        与 <code class="dm-gift-debug-code">GET /gift-list/:房间</code> 同源；按服务端 <strong>source</strong> 分子列表。
+                      </p>
+                      <div v-if="giftInfoLoading" class="dm-empty">礼单加载中…</div>
+                      <template v-else>
+                        <details v-for="blk in giftDebugCatalogBlocks" :key="'gsrc_' + blk.sourceKey" class="dm-gift-debug-lookup dm-gift-debug-source-block" open>
+                          <summary class="dm-gift-debug-lookup-sum">{{ blk.title }} · {{ blk.rows.length }} 条</summary>
                           <div class="dm-gift-debug-catalog-scroll">
                             <table class="dm-gift-debug-catalog-table">
                               <thead>
                                 <tr>
                                   <th>gfid</th>
-                                  <th :title="GIFT_FROM_HINT">from</th>
-                                  <th>礼单名</th>
-<th title="giftInfo.cost：单次礼物开销(元)，已由服务器换算(price/100)">开销(元)</th>
-                                  <th title="giftInfo.value：单次礼物价值，人民币元">价值(元)</th>
-                                  <th>图标</th>
-                                  <th class="dm-gift-debug-catalog-th-open" title="在新窗口查看 gift/v3 本条 CDN 原生 JSON（无 raw 时为快照）">打开</th>
+                                  <th>名称</th>
+                                  <th>from</th>
+                                  <th>开销</th>
+                                  <th>价值</th>
+                                  <th>付费</th>
+                                  <th class="dm-gift-debug-catalog-th-open">原始 JSON</th>
                                 </tr>
                               </thead>
                               <tbody>
-                                <tr v-for="row in giftCatalogLookupRows" :key="'gcatdbg_' + row.gfid">
+                                <tr v-for="row in blk.rows" :key="'gsr_' + blk.sourceKey + '_' + row.gfid">
                                   <td class="dm-gift-debug-td-num">{{ row.gfid }}</td>
-                                  <td class="dm-gift-debug-td-num dm-gift-debug-td-nowrap" :title="GIFT_FROM_HINT">{{ row.fromLabel }}</td>
-                                  <td class="dm-gift-debug-td-ell" :title="row.name">{{ row.name }}</td>
-                                  <td class="dm-gift-debug-td-num">{{ row.cost }}</td>
-                                  <td class="dm-gift-debug-td-num">{{ row.value }}</td>
-                                  <td class="dm-gift-debug-catalog-img-cell">
-                                    <img v-if="row.icon" :src="row.icon" class="dm-gift-debug-catalog-icon" alt="" referrerpolicy="no-referrer" />
-                                    <span v-else class="dm-gift-debug-lookup-dash">—</span>
-                                  </td>
+                                  <td class="dm-gift-debug-td-ell" :title="row.info.name">{{ row.info.name }}</td>
+                                  <td class="dm-gift-debug-td-num">{{ giftInfoFromNorm(row.info) }}</td>
+                                  <td class="dm-gift-debug-td-num">{{ row.info.cost }}</td>
+                                  <td class="dm-gift-debug-td-num">{{ row.info.value }}</td>
+                                  <td class="dm-gift-debug-td-nowrap">{{ row.info.isPaid ? '是' : '否' }}</td>
                                   <td class="dm-gift-debug-catalog-open-cell">
-                                    <button
-                                      type="button"
-                                      class="dm-gift-debug-json-hit dm-gift-debug-catalog-json-hit"
-                                      title="新窗口格式化 JSON（与 dgb「打开」相同交互）"
-                                      @click.stop="openGiftCatalogRawWindow(row.gfid)"
-                                    >
-                                      打开
-                                    </button>
+                                    <button type="button" class="dm-gift-debug-json-hit dm-gift-debug-catalog-json-hit" title="新窗口查看该 gfid 合并礼单原生 JSON" @click.stop="openGiftCatalogRawWindow(row.gfid)">原始 JSON</button>
                                   </td>
                                 </tr>
                               </tbody>
                             </table>
                           </div>
-                        </template>
-                        <div v-else class="dm-gift-debug-lookup-msg">暂无礼单缓存（打开礼物分区或载入统计时会拉取）。</div>
-                      </details>
-                      <details class="dm-gift-debug-lookup">
-                        <summary class="dm-gift-debug-lookup-sum">背包／道具 prop_gift_config 对照（本房 CDN from=2）</summary>
-                        <p class="dm-gift-debug-lookup-note" :title="GIFT_PROP_TABLE_HINT">
-                          数据源 <code class="dm-gift-debug-code">webconf.douyucdn.cn · prop_gift_config.json</code>（JSONP）。以下为<strong>本房间 gift/v3</strong>中带 <strong>from=2</strong> 的 gfid；全站条目数见表下脚注。<strong>pc</strong>／<strong>devote</strong> 与覆写后的
-                          <code class="dm-gift-debug-code">giftInfo.cost</code>／<code class="dm-gift-debug-code">giftInfo.value</code>同源。<strong>打开</strong>为配置本条 JSON。
-                        </p>
-                        <div v-if="giftInfoLoading" class="dm-gift-debug-lookup-msg">礼单加载中…</div>
-                        <template v-else-if="giftPropCatalogRows.length">
-                          <div class="dm-gift-debug-catalog-scroll">
-                            <table class="dm-gift-debug-catalog-table">
-                              <thead>
-                                <tr>
-                                  <th>gfid</th>
-                                  <th title="配置文件 type（斗鱼分类）">type</th>
-                                  <th>配置名</th>
-                                  <th title="prop.pc → giftInfo.cost">pc</th>
-                                  <th title="prop.devote → giftInfo.value">devote</th>
-                                  <th title="是否在 prop 全表命中该行">命中</th>
-                                  <th>图标</th>
-                                  <th class="dm-gift-debug-catalog-th-open" title="新窗口本条 prop JSON">打开</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                <tr v-for="row in giftPropCatalogRows" :key="'gpropdbg_' + row.gfid">
-                                  <td class="dm-gift-debug-td-num">{{ row.gfid }}</td>
-                                  <td class="dm-gift-debug-td-num">{{ row.type ?? "—" }}</td>
-                                  <td class="dm-gift-debug-td-ell" :title="row.name">{{ row.name || "—" }}</td>
-                                  <td class="dm-gift-debug-td-num">{{ row.pc }}</td>
-                                  <td class="dm-gift-debug-td-num">{{ row.devote }}</td>
-                                  <td class="dm-gift-debug-td-nowrap" :title="GIFT_PROP_OVERLAY_HINT">
-                                    {{ row.overlaidFromProp ? "是" : "否" }}
-                                  </td>
-                                  <td class="dm-gift-debug-catalog-img-cell">
-                                    <img v-if="row.icon" :src="row.icon" class="dm-gift-debug-catalog-icon" alt="" referrerpolicy="no-referrer" />
-                                    <span v-else class="dm-gift-debug-lookup-dash">—</span>
-                                  </td>
-                                  <td class="dm-gift-debug-catalog-open-cell">
-                                    <button
-                                      type="button"
-                                      class="dm-gift-debug-json-hit dm-gift-debug-catalog-json-hit"
-                                      title="新窗口本条 prop JSON"
-                                      @click.stop="openGiftPropRawWindow(row.gfid)"
-                                    >
-                                      打开
-                                    </button>
-                                  </td>
-                                </tr>
-                              </tbody>
-                            </table>
-                          </div>
-                        </template>
-                        <div v-else class="dm-gift-debug-lookup-msg">{{ giftPropCatalogEmptyTip }}</div>
-                        <p
-                          v-if="!giftInfoLoading && giftBackpackCatalogStats.propConfigOk"
-                          class="dm-gift-debug-lookup-note dm-gift-debug-prop-meta"
-                        >
-                          prop 静态表合计约 <strong>{{ giftBackpackCatalogStats.totalPropKeys }}</strong> 个 gfid；本房间礼单中带
-                          <strong>from=2</strong>
-                          {{ giftBackpackCatalogStats.roomBackpackGiftIds }} 条；其中在全站 prop 命中并覆写刻度
-                          <strong>{{ giftBackpackCatalogStats.overlaidFromPropCount }}</strong> 条。
-                        </p>
-                      </details>
-                      <div class="dm-gift-debug-table-scroll">
-                        <table class="dm-gift-debug-table">
+                        </details>
+                      </template>
+                    </section>
+                  </template>
+                  <section class="dm-gift-debug-section">
+                    <h3 class="dm-gift-debug-h3">③ giftPhotos_w（webconf 图鉴写真）</h3>
+                    <p class="dm-gift-debug-lead dm-gift-debug-lead--tight">
+                      斗鱼 webconf <code class="dm-gift-debug-code">giftPhotos_w.json</code>（JSONP）；本机 <code class="dm-gift-debug-code">GET /gift-photos-w</code>，服务端缓存约 1 小时。
+                      <strong>pgId</strong> 与弹幕 gfid/pid 不一定同一命名空间；筛选与上方工具栏共用。
+                    </p>
+                    <p class="dm-gift-debug-inline-meta dm-gift-debug-lead--tight">
+                      <button type="button" class="dm-toolbar-soft-btn" @click="loadGiftPhotosDebug(true)">强制刷新写真</button>
+                    </p>
+                    <details class="dm-gift-debug-lookup dm-gift-debug-source-block">
+                      <summary class="dm-gift-debug-lookup-sum">Tab 分组摘要 · {{ giftPhotosTabSummaries.length }} 个一级 Tab</summary>
+                      <div class="dm-gift-debug-catalog-scroll">
+                        <table class="dm-gift-debug-catalog-table">
                           <thead>
                             <tr>
-                              <th>#</th>
-                              <th>时间</th>
-                              <th>ts(ms)</th>
-                              <th title="斗鱼礼物 ID；礼单计价与归档统计均以 gfid 为键">gfid</th>
-                              <th title="斗鱼下行本条礼物名；界面展示优先用它">gfn</th>
-                              <th title="本次 dgb 礼物个数（单笔，下行原始）">gfcnt</th>
-                              <th title="与服务端 giftPiecesFromStoredRecord 一致：仅 gfcnt，缺省时按 1">计入件</th>
-<th :title="GIFT_CATALOG_VALUE_HINT">礼单价(值)</th>
-                              <th>昵称</th>
-                              <th>uid</th>
-                              <th>bg</th>
-                              <th>rid</th>
-                              <th>lv</th>
-                              <th>牌名</th>
-                              <th>bl</th>
-                              <th>brid</th>
-                              <th class="dm-gift-debug-th-json" title="完整 JSON 仅在新窗口查看">打开</th>
+                              <th>一级 Tab</th>
+                              <th>二级分组数</th>
+                              <th>pgId 引用数</th>
                             </tr>
                           </thead>
                           <tbody>
-                            <tr v-for="(g, ix) in giftDebugRows" :key="'gdk_sp_' + ix + '_' + String(g.ts)">
-                              <td class="dm-gift-debug-td-num">{{ ix + 1 }}</td>
-                              <td class="dm-gift-debug-td-nowrap">{{ formatTime(g.ts) }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.ts }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.gfid ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-ell dm-gift-debug-td-gfn" :title="String(g.gfn ?? '')">{{ g.gfn != null && String(g.gfn).trim() !== '' ? g.gfn : '—' }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.gfcnt ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-num dm-gift-debug-td-strong">{{ giftPiecesAggregateCount(g) }}</td>
-                              <td class="dm-gift-debug-td-nowrap" :title="GIFT_CATALOG_VALUE_HINT">{{ giftCatalogUnitDisplay(String(g.gfid ?? "")) }}</td>
-                              <td class="dm-gift-debug-td-ell" :title="String(g.nn ?? '')">{{ g.nn ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-ell">{{ g.uid ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.bg ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-ell">{{ g.rid ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.level ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-ell">{{ g.bnn ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.bl ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-ell">{{ g.brid ?? "—" }}</td>
+                            <tr v-for="s in giftPhotosTabSummaries" :key="s.key">
+                              <td class="dm-gift-debug-td-ell">{{ s.tab1Name || '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ s.tab2Count }}</td>
+                              <td class="dm-gift-debug-td-num">{{ s.pgIdTotal }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </details>
+                    <div v-if="giftPhotosDebugLoading" class="dm-empty">加载 giftPhotos_w…</div>
+                    <template v-else>
+                      <p v-if="giftPhotosDebugHint" class="dm-gift-debug-inline-meta">{{ giftPhotosDebugHint }}</p>
+                      <div class="dm-gift-debug-table-scroll dm-gift-debug-stats-rows-scroll">
+                        <table class="dm-gift-debug-table dm-gift-debug-table--compact">
+                          <thead>
+                            <tr>
+                              <th class="dm-gift-debug-catalog-img-cell">图</th>
+                              <th>pgId</th>
+                              <th>名称</th>
+                              <th title="webconf 标价原始刻度">标价(raw)</th>
+                              <th title="合并礼单 value / 礼物统计：price÷100（元）">单价≈(元)</th>
+                              <th>亲密度</th>
+                              <th>lv</th>
+                              <th>tab1</th>
+                              <th class="dm-gift-debug-th-json">原始 JSON</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(row, ix) in giftPhotosDebugFilteredRows" :key="'gp_' + ix + '_' + row.pgId">
+                              <td class="dm-gift-debug-catalog-img-cell">
+                                <img v-if="row.pic" class="dm-gift-debug-catalog-icon" :src="row.pic" alt="" loading="lazy" />
+                                <span v-else class="dm-gift-debug-lookup-dash">—</span>
+                              </td>
+                              <td class="dm-gift-debug-td-num">{{ row.pgId ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-ell" :title="String(row.name ?? '')">{{ row.name ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ row.price ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ giftPhotosPriceFish(row.price) }}</td>
+                              <td class="dm-gift-debug-td-num">{{ row.intimacy ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ row.lv ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ row.tab1 ?? '—' }}</td>
                               <td class="dm-gift-debug-json-cell">
-                                <button
-                                  type="button"
-                                  class="dm-gift-debug-json-hit"
-                                  title="仅在新浏览器窗口打开本条完整格式化 JSON（可复制）"
-                                  @click.stop="openGiftDebugJsonWindow(g)"
-                                >
-                                  打开
-                                </button>
+                                <button type="button" class="dm-gift-debug-json-hit" title="新窗口查看本条 pgInfos JSON" @click.stop="openGiftPhotoPgJsonWindow(row)">原始 JSON</button>
                               </td>
                             </tr>
                           </tbody>
                         </table>
                       </div>
                     </template>
-                  </div>
+                  </section>
+</div>
                 </div>
               </div>
             </div>
@@ -5070,7 +5178,7 @@ function hideUidTooltip() {
                           <nav class="dm-gift-tabs dm-gift-tabs--inline dm-gift-tabs--toolbar">
                             <button type="button" :class="{ active: giftSubTab === 'records' }" @click="giftSubTab = 'records'">记录</button>
                             <button type="button" :class="{ active: giftSubTab === 'stats' }" @click="giftSubTab = 'stats'">统计</button>
-<button v-if="isDev" type="button" class="dm-gift-tab-debug" :class="{ active: giftSubTab === 'debug' }" title="下行原始字段与计件明细（调试）" @click="giftSubTab = 'debug'">调试</button>
+<button v-if="isDev" type="button" class="dm-gift-tab-debug" :class="{ active: giftSubTab === 'debug' }" title="归档送礼条目 + 按来源分组的合并礼单（调试）" @click="giftSubTab = 'debug'">调试</button>
                           </nav>
                           <label class="dm-check dm-check--toolbar dm-check--toolbar-free-scroll" title="有新礼物时自动滚到底"><input v-model="giftAutoScroll" type="checkbox" /> 自动滚动</label>
                         </div>
@@ -5169,191 +5277,171 @@ function hideUidTooltip() {
                       </div>
                       <div v-if="giftStatsByGiftSorted.length === 0" class="dm-empty">暂无数据</div>
                       <div class="dm-gift-stats-table dm-gift-stats-table--compact">
-                        <div v-for="item in giftStatsByGiftSorted" :key="'gfs_' + item.gfid" class="dm-gift-stats-trow">
+                        <div v-for="item in giftStatsByGiftSorted" :key="'gfs_' + item.bucketKey" class="dm-gift-stats-trow">
                           <span class="dm-gift-stats-td dm-gift-stats-td--name">{{ item.name }}</span>
                           <span class="dm-gift-stats-td dm-gift-stats-td--cnt">×{{ item.count }}</span>
                           <span class="dm-gift-stats-td dm-gift-stats-td--revenue">{{ item.isPaid && item.value ? (item.value * item.count).toFixed(1) : '-' }}</span>
-                          <span class="dm-gift-stats-td dm-gift-stats-td--cost">{{ item.isPaid && item.cost ? (item.cost * item.count).toFixed(1) : '-' }}</span>
+                          <span class="dm-gift-stats-td dm-gift-stats-td--cost">{{ item.isPaid ? (item.cost * item.count).toFixed(1) : '-' }}</span>
                         </div>
                       </div>
                     </template>
                     <div v-else class="dm-empty">点击刷新加载统计</div>
                   </div>
                   <div v-if="giftSubTab === 'debug'" class="dm-gift-feed dm-gift-debug-feed">
-                    <div v-if="giftList.length === 0" class="dm-empty">暂无礼物记录</div>
-                    <template v-else>
-                      <p class="dm-gift-debug-lead">
-                        「计入件」与服务器汇总一致：仅取下行的 <code class="dm-gift-debug-code">gfcnt</code>（当次礼物个数，向下取整）；缺失或非法时按 <code class="dm-gift-debug-code">1</code>，<strong>不乘</strong>
-                        hits、gs。下列为当前<strong>筛选</strong>结果，自上而下为<strong>新 → 旧</strong>。<strong>gfid</strong>＝斗鱼礼物 id；<strong>gfn</strong>＝本条下行名称；可与下方「查找表」中礼单名称对照。<strong>礼单价(值)</strong>按 gfid 查当前房间礼单缓存，列表头悬停见详解。下行<strong>完整 JSON</strong>仅在新窗口<strong>打开</strong>查看。
+                  <div v-if="!backendSelectedRoom" class="dm-empty">请先选择房间后查看 ① 归档与 ② 礼单（③ webconf 写真可不选房间）。</div>
+                  <template v-else>
+                    <section class="dm-gift-debug-section">
+                      <h3 class="dm-gift-debug-h3">① 送礼归档条目</h3>
+                      <p class="dm-gift-debug-lead dm-gift-debug-lead--tight">
+                        服务端归档（至多 {{ GIFT_ARCHIVE_DEBUG_LIMIT }} 条，按时间新→旧）。筛选与上方工具栏关键字／模式共用。
                       </p>
-                      <details class="dm-gift-debug-lookup">
-                        <summary class="dm-gift-debug-lookup-sum">礼物信息查找表（gfid → 开销(元)／价值(元)）</summary>
-                        <p class="dm-gift-debug-lookup-note" :title="GIFT_CATALOG_VALUE_HINT">
-                          等价于前端 <strong>giftInfoMap[gfid]</strong>：服务端 <code class="dm-gift-debug-code">GET /gift-list/:房间</code> 拉斗鱼 CDN 清单后写入的映射；<strong>from</strong> 列：<strong>1·直接</strong>／<strong>2·背包</strong>；表中
-                          <strong>开销(元)</strong>（giftInfo.cost，已换算为元）与<strong>价值(元)</strong>（giftInfo.value，已换算为元）及<strong>礼单价摘要</strong>同源（列表头悬停）。末列<strong>打开</strong>在新窗口查看该 gfid 的 CDN 本条 JSON（无 <code class="dm-gift-debug-code">raw</code> 时为映射快照）。
-                        </p>
-                        <div v-if="giftInfoLoading" class="dm-gift-debug-lookup-msg">礼单加载中…</div>
-                        <template v-else-if="giftCatalogLookupRows.length">
+                      <div v-if="giftArchiveDebugLoading" class="dm-empty">加载归档…</div>
+                      <template v-else>
+                        <p v-if="giftArchiveDebugHint" class="dm-gift-debug-inline-meta">{{ giftArchiveDebugHint }}</p>
+                        <div class="dm-gift-debug-table-scroll dm-gift-debug-stats-rows-scroll">
+                          <table class="dm-gift-debug-table dm-gift-debug-table--compact">
+                            <thead>
+                              <tr>
+                                <th>时间</th>
+                                <th>礼物名</th>
+                                <th>送礼用户</th>
+                                <th>gfid</th>
+                                <th title="pid / gid / giftId">pid</th>
+                                <th>uid</th>
+                                <th>rid</th>
+                                <th class="dm-gift-debug-th-json">原始 JSON</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr v-for="(g, ix) in giftDebugArchiveFilteredRows" :key="'gfa_' + ix + '_' + g.ts">
+                                <td class="dm-gift-debug-td-nowrap">{{ formatTime(g.ts) }}</td>
+                                <td class="dm-gift-debug-td-ell" :title="giftRowDisplayName(g)">{{ giftRowDisplayName(g) }}</td>
+                                <td class="dm-gift-debug-td-ell" :title="String(g.nn ?? '')">{{ g.nn ?? '—' }}</td>
+                                <td class="dm-gift-debug-td-num">{{ g.gfid ?? '—' }}</td>
+                                <td class="dm-gift-debug-td-num">{{ giftArchivePidDisplay(g) }}</td>
+                                <td class="dm-gift-debug-td-ell">{{ g.uid ?? '—' }}</td>
+                                <td class="dm-gift-debug-td-ell">{{ g.rid ?? '—' }}</td>
+                                <td class="dm-gift-debug-json-cell">
+                                  <button type="button" class="dm-gift-debug-json-hit" title="新窗口查看本条归档原生 JSON" @click.stop="openGiftDebugJsonWindow(g)">原始 JSON</button>
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      </template>
+                    </section>
+                    <section class="dm-gift-debug-section">
+                      <h3 class="dm-gift-debug-h3">② 礼单条目（按数据来源）</h3>
+                      <p class="dm-gift-debug-lead dm-gift-debug-lead--tight">
+                        与 <code class="dm-gift-debug-code">GET /gift-list/:房间</code> 同源；按服务端 <strong>source</strong> 分子列表。
+                      </p>
+                      <div v-if="giftInfoLoading" class="dm-empty">礼单加载中…</div>
+                      <template v-else>
+                        <details v-for="blk in giftDebugCatalogBlocks" :key="'gsrc_' + blk.sourceKey" class="dm-gift-debug-lookup dm-gift-debug-source-block" open>
+                          <summary class="dm-gift-debug-lookup-sum">{{ blk.title }} · {{ blk.rows.length }} 条</summary>
                           <div class="dm-gift-debug-catalog-scroll">
                             <table class="dm-gift-debug-catalog-table">
                               <thead>
                                 <tr>
                                   <th>gfid</th>
-                                  <th :title="GIFT_FROM_HINT">from</th>
-                                  <th>礼单名</th>
-<th title="giftInfo.cost：单次礼物开销(元)，已由服务器换算(price/100)">开销(元)</th>
-                                  <th title="giftInfo.value：单次礼物价值，人民币元">价值(元)</th>
-                                  <th>图标</th>
-                                  <th class="dm-gift-debug-catalog-th-open" title="在新窗口查看 gift/v3 本条 CDN 原生 JSON（无 raw 时为快照）">打开</th>
+                                  <th>名称</th>
+                                  <th>from</th>
+                                  <th>开销</th>
+                                  <th>价值</th>
+                                  <th>付费</th>
+                                  <th class="dm-gift-debug-catalog-th-open">原始 JSON</th>
                                 </tr>
                               </thead>
                               <tbody>
-                                <tr v-for="row in giftCatalogLookupRows" :key="'gcatdbg_' + row.gfid">
+                                <tr v-for="row in blk.rows" :key="'gsr_' + blk.sourceKey + '_' + row.gfid">
                                   <td class="dm-gift-debug-td-num">{{ row.gfid }}</td>
-                                  <td class="dm-gift-debug-td-num dm-gift-debug-td-nowrap" :title="GIFT_FROM_HINT">{{ row.fromLabel }}</td>
-                                  <td class="dm-gift-debug-td-ell" :title="row.name">{{ row.name }}</td>
-                                  <td class="dm-gift-debug-td-num">{{ row.cost }}</td>
-                                  <td class="dm-gift-debug-td-num">{{ row.value }}</td>
-                                  <td class="dm-gift-debug-catalog-img-cell">
-                                    <img v-if="row.icon" :src="row.icon" class="dm-gift-debug-catalog-icon" alt="" referrerpolicy="no-referrer" />
-                                    <span v-else class="dm-gift-debug-lookup-dash">—</span>
-                                  </td>
+                                  <td class="dm-gift-debug-td-ell" :title="row.info.name">{{ row.info.name }}</td>
+                                  <td class="dm-gift-debug-td-num">{{ giftInfoFromNorm(row.info) }}</td>
+                                  <td class="dm-gift-debug-td-num">{{ row.info.cost }}</td>
+                                  <td class="dm-gift-debug-td-num">{{ row.info.value }}</td>
+                                  <td class="dm-gift-debug-td-nowrap">{{ row.info.isPaid ? '是' : '否' }}</td>
                                   <td class="dm-gift-debug-catalog-open-cell">
-                                    <button
-                                      type="button"
-                                      class="dm-gift-debug-json-hit dm-gift-debug-catalog-json-hit"
-                                      title="新窗口格式化 JSON（与 dgb「打开」相同交互）"
-                                      @click.stop="openGiftCatalogRawWindow(row.gfid)"
-                                    >
-                                      打开
-                                    </button>
+                                    <button type="button" class="dm-gift-debug-json-hit dm-gift-debug-catalog-json-hit" title="新窗口查看该 gfid 合并礼单原生 JSON" @click.stop="openGiftCatalogRawWindow(row.gfid)">原始 JSON</button>
                                   </td>
                                 </tr>
                               </tbody>
                             </table>
                           </div>
-                        </template>
-                        <div v-else class="dm-gift-debug-lookup-msg">暂无礼单缓存（打开礼物分区或载入统计时会拉取）。</div>
-                      </details>
-                      <details class="dm-gift-debug-lookup">
-                        <summary class="dm-gift-debug-lookup-sum">背包／道具 prop_gift_config 对照（本房 CDN from=2）</summary>
-                        <p class="dm-gift-debug-lookup-note" :title="GIFT_PROP_TABLE_HINT">
-                          数据源 <code class="dm-gift-debug-code">webconf.douyucdn.cn · prop_gift_config.json</code>（JSONP）。以下为<strong>本房间 gift/v3</strong>中带 <strong>from=2</strong> 的 gfid；全站条目数见表下脚注。<strong>pc</strong>／<strong>devote</strong> 与覆写后的
-                          <code class="dm-gift-debug-code">giftInfo.cost</code>／<code class="dm-gift-debug-code">giftInfo.value</code>同源。<strong>打开</strong>为配置本条 JSON。
-                        </p>
-                        <div v-if="giftInfoLoading" class="dm-gift-debug-lookup-msg">礼单加载中…</div>
-                        <template v-else-if="giftPropCatalogRows.length">
-                          <div class="dm-gift-debug-catalog-scroll">
-                            <table class="dm-gift-debug-catalog-table">
-                              <thead>
-                                <tr>
-                                  <th>gfid</th>
-                                  <th title="配置文件 type（斗鱼分类）">type</th>
-                                  <th>配置名</th>
-                                  <th title="prop.pc → giftInfo.cost">pc</th>
-                                  <th title="prop.devote → giftInfo.value">devote</th>
-                                  <th title="是否在 prop 全表命中该行">命中</th>
-                                  <th>图标</th>
-                                  <th class="dm-gift-debug-catalog-th-open" title="新窗口本条 prop JSON">打开</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                <tr v-for="row in giftPropCatalogRows" :key="'gpropdbg_' + row.gfid">
-                                  <td class="dm-gift-debug-td-num">{{ row.gfid }}</td>
-                                  <td class="dm-gift-debug-td-num">{{ row.type ?? "—" }}</td>
-                                  <td class="dm-gift-debug-td-ell" :title="row.name">{{ row.name || "—" }}</td>
-                                  <td class="dm-gift-debug-td-num">{{ row.pc }}</td>
-                                  <td class="dm-gift-debug-td-num">{{ row.devote }}</td>
-                                  <td class="dm-gift-debug-td-nowrap" :title="GIFT_PROP_OVERLAY_HINT">
-                                    {{ row.overlaidFromProp ? "是" : "否" }}
-                                  </td>
-                                  <td class="dm-gift-debug-catalog-img-cell">
-                                    <img v-if="row.icon" :src="row.icon" class="dm-gift-debug-catalog-icon" alt="" referrerpolicy="no-referrer" />
-                                    <span v-else class="dm-gift-debug-lookup-dash">—</span>
-                                  </td>
-                                  <td class="dm-gift-debug-catalog-open-cell">
-                                    <button
-                                      type="button"
-                                      class="dm-gift-debug-json-hit dm-gift-debug-catalog-json-hit"
-                                      title="新窗口本条 prop JSON"
-                                      @click.stop="openGiftPropRawWindow(row.gfid)"
-                                    >
-                                      打开
-                                    </button>
-                                  </td>
-                                </tr>
-                              </tbody>
-                            </table>
-                          </div>
-                        </template>
-                        <div v-else class="dm-gift-debug-lookup-msg">{{ giftPropCatalogEmptyTip }}</div>
-                        <p
-                          v-if="!giftInfoLoading && giftBackpackCatalogStats.propConfigOk"
-                          class="dm-gift-debug-lookup-note dm-gift-debug-prop-meta"
-                        >
-                          prop 静态表合计约 <strong>{{ giftBackpackCatalogStats.totalPropKeys }}</strong> 个 gfid；本房间礼单中带
-                          <strong>from=2</strong>
-                          {{ giftBackpackCatalogStats.roomBackpackGiftIds }} 条；其中在全站 prop 命中并覆写刻度
-                          <strong>{{ giftBackpackCatalogStats.overlaidFromPropCount }}</strong> 条。
-                        </p>
-                      </details>
-                      <div class="dm-gift-debug-table-scroll">
-                        <table class="dm-gift-debug-table">
+                        </details>
+                      </template>
+                    </section>
+                  </template>
+                  <section class="dm-gift-debug-section">
+                    <h3 class="dm-gift-debug-h3">③ giftPhotos_w（webconf 图鉴写真）</h3>
+                    <p class="dm-gift-debug-lead dm-gift-debug-lead--tight">
+                      斗鱼 webconf <code class="dm-gift-debug-code">giftPhotos_w.json</code>（JSONP）；本机 <code class="dm-gift-debug-code">GET /gift-photos-w</code>，服务端缓存约 1 小时。
+                      <strong>pgId</strong> 与弹幕 gfid/pid 不一定同一命名空间；筛选与上方工具栏共用。
+                    </p>
+                    <p class="dm-gift-debug-inline-meta dm-gift-debug-lead--tight">
+                      <button type="button" class="dm-toolbar-soft-btn" @click="loadGiftPhotosDebug(true)">强制刷新写真</button>
+                    </p>
+                    <details class="dm-gift-debug-lookup dm-gift-debug-source-block">
+                      <summary class="dm-gift-debug-lookup-sum">Tab 分组摘要 · {{ giftPhotosTabSummaries.length }} 个一级 Tab</summary>
+                      <div class="dm-gift-debug-catalog-scroll">
+                        <table class="dm-gift-debug-catalog-table">
                           <thead>
                             <tr>
-                              <th>#</th>
-                              <th>时间</th>
-                              <th>ts(ms)</th>
-                              <th title="斗鱼礼物 ID；礼单计价与归档统计均以 gfid 为键">gfid</th>
-                              <th title="斗鱼下行本条礼物名；界面展示优先用它">gfn</th>
-                              <th title="本次 dgb 礼物个数（单笔，下行原始）">gfcnt</th>
-                              <th title="与服务端 giftPiecesFromStoredRecord 一致：仅 gfcnt，缺省时按 1">计入件</th>
-<th :title="GIFT_CATALOG_VALUE_HINT">礼单价(值)</th>
-                              <th>昵称</th>
-                              <th>uid</th>
-                              <th>bg</th>
-                              <th>rid</th>
-                              <th>lv</th>
-                              <th>牌名</th>
-                              <th>bl</th>
-                              <th>brid</th>
-                              <th class="dm-gift-debug-th-json" title="完整 JSON 仅在新窗口查看">打开</th>
+                              <th>一级 Tab</th>
+                              <th>二级分组数</th>
+                              <th>pgId 引用数</th>
                             </tr>
                           </thead>
                           <tbody>
-                            <tr v-for="(g, ix) in giftDebugRows" :key="'gdk_ff_' + ix + '_' + String(g.ts)">
-                              <td class="dm-gift-debug-td-num">{{ ix + 1 }}</td>
-                              <td class="dm-gift-debug-td-nowrap">{{ formatTime(g.ts) }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.ts }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.gfid ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-ell dm-gift-debug-td-gfn" :title="String(g.gfn ?? '')">{{ g.gfn != null && String(g.gfn).trim() !== '' ? g.gfn : '—' }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.gfcnt ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-num dm-gift-debug-td-strong">{{ giftPiecesAggregateCount(g) }}</td>
-                              <td class="dm-gift-debug-td-nowrap" :title="GIFT_CATALOG_VALUE_HINT">{{ giftCatalogUnitDisplay(String(g.gfid ?? "")) }}</td>
-                              <td class="dm-gift-debug-td-ell" :title="String(g.nn ?? '')">{{ g.nn ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-ell">{{ g.uid ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.bg ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-ell">{{ g.rid ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.level ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-ell">{{ g.bnn ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-num">{{ g.bl ?? "—" }}</td>
-                              <td class="dm-gift-debug-td-ell">{{ g.brid ?? "—" }}</td>
+                            <tr v-for="s in giftPhotosTabSummaries" :key="s.key">
+                              <td class="dm-gift-debug-td-ell">{{ s.tab1Name || '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ s.tab2Count }}</td>
+                              <td class="dm-gift-debug-td-num">{{ s.pgIdTotal }}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </details>
+                    <div v-if="giftPhotosDebugLoading" class="dm-empty">加载 giftPhotos_w…</div>
+                    <template v-else>
+                      <p v-if="giftPhotosDebugHint" class="dm-gift-debug-inline-meta">{{ giftPhotosDebugHint }}</p>
+                      <div class="dm-gift-debug-table-scroll dm-gift-debug-stats-rows-scroll">
+                        <table class="dm-gift-debug-table dm-gift-debug-table--compact">
+                          <thead>
+                            <tr>
+                              <th class="dm-gift-debug-catalog-img-cell">图</th>
+                              <th>pgId</th>
+                              <th>名称</th>
+                              <th title="webconf 标价原始刻度">标价(raw)</th>
+                              <th title="合并礼单 value / 礼物统计：price÷100（元）">单价≈(元)</th>
+                              <th>亲密度</th>
+                              <th>lv</th>
+                              <th>tab1</th>
+                              <th class="dm-gift-debug-th-json">原始 JSON</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(row, ix) in giftPhotosDebugFilteredRows" :key="'gp_' + ix + '_' + row.pgId">
+                              <td class="dm-gift-debug-catalog-img-cell">
+                                <img v-if="row.pic" class="dm-gift-debug-catalog-icon" :src="row.pic" alt="" loading="lazy" />
+                                <span v-else class="dm-gift-debug-lookup-dash">—</span>
+                              </td>
+                              <td class="dm-gift-debug-td-num">{{ row.pgId ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-ell" :title="String(row.name ?? '')">{{ row.name ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ row.price ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ giftPhotosPriceFish(row.price) }}</td>
+                              <td class="dm-gift-debug-td-num">{{ row.intimacy ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ row.lv ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ row.tab1 ?? '—' }}</td>
                               <td class="dm-gift-debug-json-cell">
-                                <button
-                                  type="button"
-                                  class="dm-gift-debug-json-hit"
-                                  title="仅在新浏览器窗口打开本条完整格式化 JSON（可复制）"
-                                  @click.stop="openGiftDebugJsonWindow(g)"
-                                >
-                                  打开
-                                </button>
+                                <button type="button" class="dm-gift-debug-json-hit" title="新窗口查看本条 pgInfos JSON" @click.stop="openGiftPhotoPgJsonWindow(row)">原始 JSON</button>
                               </td>
                             </tr>
                           </tbody>
                         </table>
                       </div>
                     </template>
-                  </div>
+                  </section>
+</div>
                 </div>
               </div>
             </div>
@@ -5533,7 +5621,7 @@ function hideUidTooltip() {
                         <nav class="dm-gift-tabs dm-gift-tabs--inline dm-gift-tabs--toolbar">
                           <button type="button" :class="{ active: giftSubTab === 'records' }" @click="giftSubTab = 'records'">记录</button>
                           <button type="button" :class="{ active: giftSubTab === 'stats' }" @click="giftSubTab = 'stats'">统计</button>
-<button v-if="isDev" type="button" class="dm-gift-tab-debug" :class="{ active: giftSubTab === 'debug' }" title="下行原始字段与计件明细（调试）" @click="giftSubTab = 'debug'">调试</button>
+<button v-if="isDev" type="button" class="dm-gift-tab-debug" :class="{ active: giftSubTab === 'debug' }" title="归档送礼条目 + 按来源分组的合并礼单（调试）" @click="giftSubTab = 'debug'">调试</button>
                           </nav>
                           <label class="dm-check dm-check--toolbar dm-check--toolbar-free-scroll" title="有新礼物时自动滚到底"><input v-model="giftAutoScroll" type="checkbox" /> 自动滚动</label>
                         </div>
@@ -5669,7 +5757,7 @@ function hideUidTooltip() {
                           <span class="dm-gift-stats-th dm-gift-stats-th--revenue">收入</span>
                           <span class="dm-gift-stats-th dm-gift-stats-th--cost">花费</span>
                         </div>
-                        <div v-for="item in giftStatsByGiftSorted" :key="'gift-pop-stats-g-' + item.gfid" class="dm-gift-stats-trow">
+                        <div v-for="item in giftStatsByGiftSorted" :key="'gift-pop-stats-g-' + item.bucketKey" class="dm-gift-stats-trow">
                           <span class="dm-gift-stats-td dm-gift-stats-td--icon">
                             <img v-if="item.icon" :src="item.icon" class="dm-gift-icon-sm" alt="" referrerpolicy="no-referrer" />
                             <span v-else class="dm-gift-icon-sm-placeholder">🎁</span>
@@ -5677,7 +5765,7 @@ function hideUidTooltip() {
                           <span class="dm-gift-stats-td dm-gift-stats-td--name">{{ item.name }}</span>
                           <span class="dm-gift-stats-td dm-gift-stats-td--cnt">×{{ item.count }}</span>
                           <span class="dm-gift-stats-td dm-gift-stats-td--revenue">{{ item.isPaid && item.value ? (item.value * item.count).toFixed(1) : '-' }}</span>
-                          <span class="dm-gift-stats-td dm-gift-stats-td--cost">{{ item.isPaid && item.cost ? (item.cost * item.count).toFixed(1) : '-' }}</span>
+                          <span class="dm-gift-stats-td dm-gift-stats-td--cost">{{ item.isPaid ? (item.cost * item.count).toFixed(1) : '-' }}</span>
                         </div>
                       </div>
                       <div v-if="giftStatsByGiftSorted.length === 0" class="dm-empty">暂无数据</div>
@@ -5710,178 +5798,160 @@ function hideUidTooltip() {
                   <div v-else class="dm-empty">点击刷新加载统计</div>
                 </div>
                 <div v-if="giftSubTab === 'debug'" class="dm-gift-feed dm-gift-debug-feed">
-                  <div v-if="giftList.length === 0" class="dm-empty">暂无礼物记录</div>
-                  <template v-else>
-                    <p class="dm-gift-debug-lead">
-                      「计入件」与服务器汇总一致：仅取下行的 <code class="dm-gift-debug-code">gfcnt</code>（当次礼物个数，向下取整）；缺失或非法时按 <code class="dm-gift-debug-code">1</code>，<strong>不乘</strong>
-                        hits、gs。下列为当前<strong>筛选</strong>结果，自上而下为<strong>新 → 旧</strong>。<strong>gfid</strong>＝斗鱼礼物 id；<strong>gfn</strong>＝本条下行名称；可与下方「查找表」中礼单名称对照。<strong>礼单价(值)</strong>按 gfid 查当前房间礼单缓存，列表头悬停见详解。下行<strong>完整 JSON</strong>仅在新窗口<strong>打开</strong>查看。
-                      </p>
-                    <details class="dm-gift-debug-lookup">
-                        <summary class="dm-gift-debug-lookup-sum">礼物信息查找表（gfid → 开销(元)／价值(元)）</summary>
-                      <p class="dm-gift-debug-lookup-note" :title="GIFT_CATALOG_VALUE_HINT">
-                          等价于前端 <strong>giftInfoMap[gfid]</strong>：服务端 <code class="dm-gift-debug-code">GET /gift-list/:房间</code> 拉斗鱼 CDN 清单后写入的映射；<strong>from</strong> 列：<strong>1·直接</strong>／<strong>2·背包</strong>；表中
-                          <strong>开销(元)</strong>（giftInfo.cost，已换算为元）与<strong>价值(元)</strong>（giftInfo.value，已换算为元）及<strong>礼单价摘要</strong>同源（列表头悬停）。末列<strong>打开</strong>在新窗口查看该 gfid 的 CDN 本条 JSON（无 <code class="dm-gift-debug-code">raw</code> 时为映射快照）。
-                      </p>
-                      <div v-if="giftInfoLoading" class="dm-gift-debug-lookup-msg">礼单加载中…</div>
-                      <template v-else-if="giftCatalogLookupRows.length">
+                <div v-if="!backendSelectedRoom" class="dm-empty">请先选择房间后查看 ① 归档与 ② 礼单（③ webconf 写真可不选房间）。</div>
+                <template v-else>
+                  <section class="dm-gift-debug-section">
+                    <h3 class="dm-gift-debug-h3">① 送礼归档条目</h3>
+                    <p class="dm-gift-debug-lead dm-gift-debug-lead--tight">
+                      服务端归档（至多 {{ GIFT_ARCHIVE_DEBUG_LIMIT }} 条，按时间新→旧）。筛选与上方工具栏关键字／模式共用。
+                    </p>
+                    <div v-if="giftArchiveDebugLoading" class="dm-empty">加载归档…</div>
+                    <template v-else>
+                      <p v-if="giftArchiveDebugHint" class="dm-gift-debug-inline-meta">{{ giftArchiveDebugHint }}</p>
+                      <div class="dm-gift-debug-table-scroll dm-gift-debug-stats-rows-scroll">
+                        <table class="dm-gift-debug-table dm-gift-debug-table--compact">
+                          <thead>
+                            <tr>
+                              <th>时间</th>
+                              <th>礼物名</th>
+                              <th>送礼用户</th>
+                              <th>gfid</th>
+                              <th title="pid / gid / giftId">pid</th>
+                              <th>uid</th>
+                              <th>rid</th>
+                              <th class="dm-gift-debug-th-json">原始 JSON</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(g, ix) in giftDebugArchiveFilteredRows" :key="'gfa_' + ix + '_' + g.ts">
+                              <td class="dm-gift-debug-td-nowrap">{{ formatTime(g.ts) }}</td>
+                              <td class="dm-gift-debug-td-ell" :title="giftRowDisplayName(g)">{{ giftRowDisplayName(g) }}</td>
+                              <td class="dm-gift-debug-td-ell" :title="String(g.nn ?? '')">{{ g.nn ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ g.gfid ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-num">{{ giftArchivePidDisplay(g) }}</td>
+                              <td class="dm-gift-debug-td-ell">{{ g.uid ?? '—' }}</td>
+                              <td class="dm-gift-debug-td-ell">{{ g.rid ?? '—' }}</td>
+                              <td class="dm-gift-debug-json-cell">
+                                <button type="button" class="dm-gift-debug-json-hit" title="新窗口查看本条归档原生 JSON" @click.stop="openGiftDebugJsonWindow(g)">原始 JSON</button>
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </template>
+                  </section>
+                  <section class="dm-gift-debug-section">
+                    <h3 class="dm-gift-debug-h3">② 礼单条目（按数据来源）</h3>
+                    <p class="dm-gift-debug-lead dm-gift-debug-lead--tight">
+                      与 <code class="dm-gift-debug-code">GET /gift-list/:房间</code> 同源；按服务端 <strong>source</strong> 分子列表。
+                    </p>
+                    <div v-if="giftInfoLoading" class="dm-empty">礼单加载中…</div>
+                    <template v-else>
+                      <details v-for="blk in giftDebugCatalogBlocks" :key="'gsrc_' + blk.sourceKey" class="dm-gift-debug-lookup dm-gift-debug-source-block" open>
+                        <summary class="dm-gift-debug-lookup-sum">{{ blk.title }} · {{ blk.rows.length }} 条</summary>
                         <div class="dm-gift-debug-catalog-scroll">
                           <table class="dm-gift-debug-catalog-table">
                             <thead>
                               <tr>
                                 <th>gfid</th>
-                                <th :title="GIFT_FROM_HINT">from</th>
-                                <th>礼单名</th>
-<th title="giftInfo.cost：单次礼物开销(元)，已由服务器换算(price/100)">开销(元)</th>
-                                <th title="giftInfo.value：单次礼物价值，人民币元">价值(元)</th>
-                                <th>图标</th>
-                                <th class="dm-gift-debug-catalog-th-open" title="在新窗口查看 gift/v3 本条 CDN 原生 JSON（无 raw 时为快照）">打开</th>
+                                <th>名称</th>
+                                <th>from</th>
+                                <th>开销</th>
+                                <th>价值</th>
+                                <th>付费</th>
+                                <th class="dm-gift-debug-catalog-th-open">原始 JSON</th>
                               </tr>
                             </thead>
                             <tbody>
-                              <tr v-for="row in giftCatalogLookupRows" :key="'gcatdbg_' + row.gfid">
+                              <tr v-for="row in blk.rows" :key="'gsr_' + blk.sourceKey + '_' + row.gfid">
                                 <td class="dm-gift-debug-td-num">{{ row.gfid }}</td>
-                                <td class="dm-gift-debug-td-num dm-gift-debug-td-nowrap" :title="GIFT_FROM_HINT">{{ row.fromLabel }}</td>
-                                <td class="dm-gift-debug-td-ell" :title="row.name">{{ row.name }}</td>
-                                <td class="dm-gift-debug-td-num">{{ row.cost }}</td>
-                                <td class="dm-gift-debug-td-num">{{ row.value }}</td>
-                                <td class="dm-gift-debug-catalog-img-cell">
-                                  <img v-if="row.icon" :src="row.icon" class="dm-gift-debug-catalog-icon" alt="" referrerpolicy="no-referrer" />
-                                  <span v-else class="dm-gift-debug-lookup-dash">—</span>
-                                </td>
+                                <td class="dm-gift-debug-td-ell" :title="row.info.name">{{ row.info.name }}</td>
+                                <td class="dm-gift-debug-td-num">{{ giftInfoFromNorm(row.info) }}</td>
+                                <td class="dm-gift-debug-td-num">{{ row.info.cost }}</td>
+                                <td class="dm-gift-debug-td-num">{{ row.info.value }}</td>
+                                <td class="dm-gift-debug-td-nowrap">{{ row.info.isPaid ? '是' : '否' }}</td>
                                 <td class="dm-gift-debug-catalog-open-cell">
-                                  <button
-                                    type="button"
-                                    class="dm-gift-debug-json-hit dm-gift-debug-catalog-json-hit"
-                                    title="新窗口格式化 JSON（与 dgb「打开」相同交互）"
-                                    @click.stop="openGiftCatalogRawWindow(row.gfid)"
-                                  >
-                                    打开
-                                  </button>
+                                  <button type="button" class="dm-gift-debug-json-hit dm-gift-debug-catalog-json-hit" title="新窗口查看该 gfid 合并礼单原生 JSON" @click.stop="openGiftCatalogRawWindow(row.gfid)">原始 JSON</button>
                                 </td>
                               </tr>
                             </tbody>
                           </table>
                         </div>
-                      </template>
-                      <div v-else class="dm-gift-debug-lookup-msg">暂无礼单缓存（打开礼物分区或载入统计时会拉取）。</div>
-                    </details>
-                    <details class="dm-gift-debug-lookup">
-                      <summary class="dm-gift-debug-lookup-sum">背包／道具 prop_gift_config 对照（本房 CDN from=2）</summary>
-                      <p class="dm-gift-debug-lookup-note" :title="GIFT_PROP_TABLE_HINT">
-                        数据源 <code class="dm-gift-debug-code">webconf.douyucdn.cn · prop_gift_config.json</code>（JSONP）。以下为<strong>本房间 gift/v3</strong>中带 <strong>from=2</strong> 的 gfid；全站条目数见表下脚注。<strong>pc</strong>／<strong>devote</strong> 与覆写后的
-                        <code class="dm-gift-debug-code">giftInfo.cost</code>／<code class="dm-gift-debug-code">giftInfo.value</code>同源。<strong>打开</strong>为配置本条 JSON。
-                      </p>
-                      <div v-if="giftInfoLoading" class="dm-gift-debug-lookup-msg">礼单加载中…</div>
-                      <template v-else-if="giftPropCatalogRows.length">
-                        <div class="dm-gift-debug-catalog-scroll">
-                          <table class="dm-gift-debug-catalog-table">
-                            <thead>
-                              <tr>
-                                <th>gfid</th>
-                                <th title="配置文件 type（斗鱼分类）">type</th>
-                                <th>配置名</th>
-                                <th title="prop.pc → giftInfo.cost">pc</th>
-                                <th title="prop.devote → giftInfo.value">devote</th>
-                                <th title="是否在 prop 全表命中该行">命中</th>
-                                <th>图标</th>
-                                <th class="dm-gift-debug-catalog-th-open" title="新窗口本条 prop JSON">打开</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              <tr v-for="row in giftPropCatalogRows" :key="'gpropdbg_bp_' + row.gfid">
-                                <td class="dm-gift-debug-td-num">{{ row.gfid }}</td>
-                                <td class="dm-gift-debug-td-num">{{ row.type ?? "—" }}</td>
-                                <td class="dm-gift-debug-td-ell" :title="row.name">{{ row.name || "—" }}</td>
-                                <td class="dm-gift-debug-td-num">{{ row.pc }}</td>
-                                <td class="dm-gift-debug-td-num">{{ row.devote }}</td>
-                                <td class="dm-gift-debug-td-nowrap" :title="GIFT_PROP_OVERLAY_HINT">{{ row.overlaidFromProp ? "是" : "否" }}</td>
-                                <td class="dm-gift-debug-catalog-img-cell">
-                                  <img v-if="row.icon" :src="row.icon" class="dm-gift-debug-catalog-icon" alt="" referrerpolicy="no-referrer" />
-                                  <span v-else class="dm-gift-debug-lookup-dash">—</span>
-                                </td>
-                                <td class="dm-gift-debug-catalog-open-cell">
-                                  <button
-                                    type="button"
-                                    class="dm-gift-debug-json-hit dm-gift-debug-catalog-json-hit"
-                                    title="新窗口本条 prop JSON"
-                                    @click.stop="openGiftPropRawWindow(row.gfid)"
-                                  >
-                                    打开
-                                  </button>
-                                </td>
-                              </tr>
-                            </tbody>
-                          </table>
-                        </div>
-                      </template>
-                      <div v-else class="dm-gift-debug-lookup-msg">{{ giftPropCatalogEmptyTip }}</div>
-                      <p
-                        v-if="!giftInfoLoading && giftBackpackCatalogStats.propConfigOk"
-                        class="dm-gift-debug-lookup-note dm-gift-debug-prop-meta"
-                      >
-                        prop 静态表合计约 <strong>{{ giftBackpackCatalogStats.totalPropKeys }}</strong> 个 gfid；本房间礼单中带
-                        <strong>from=2</strong>
-                        {{ giftBackpackCatalogStats.roomBackpackGiftIds }} 条；其中在全站 prop 命中并覆写刻度
-                        <strong>{{ giftBackpackCatalogStats.overlaidFromPropCount }}</strong> 条。
-                      </p>
-                    </details>
-                    <div class="dm-gift-debug-table-scroll">
-                      <table class="dm-gift-debug-table">
+                      </details>
+                    </template>
+                  </section>
+                </template>
+                <section class="dm-gift-debug-section">
+                  <h3 class="dm-gift-debug-h3">③ giftPhotos_w（webconf 图鉴写真）</h3>
+                  <p class="dm-gift-debug-lead dm-gift-debug-lead--tight">
+                    斗鱼 webconf <code class="dm-gift-debug-code">giftPhotos_w.json</code>（JSONP）；本机 <code class="dm-gift-debug-code">GET /gift-photos-w</code>，服务端缓存约 1 小时。
+                    <strong>pgId</strong> 与弹幕 gfid/pid 不一定同一命名空间；筛选与上方工具栏共用。
+                  </p>
+                  <p class="dm-gift-debug-inline-meta dm-gift-debug-lead--tight">
+                    <button type="button" class="dm-toolbar-soft-btn" @click="loadGiftPhotosDebug(true)">强制刷新写真</button>
+                  </p>
+                  <details class="dm-gift-debug-lookup dm-gift-debug-source-block">
+                    <summary class="dm-gift-debug-lookup-sum">Tab 分组摘要 · {{ giftPhotosTabSummaries.length }} 个一级 Tab</summary>
+                    <div class="dm-gift-debug-catalog-scroll">
+                      <table class="dm-gift-debug-catalog-table">
                         <thead>
                           <tr>
-                            <th>#</th>
-                            <th>时间</th>
-                            <th>ts(ms)</th>
-                            <th title="斗鱼礼物 ID；礼单计价与归档统计均以 gfid 为键">gfid</th>
-                            <th title="斗鱼下行本条礼物名；界面展示优先用它">gfn</th>
-                            <th title="本次 dgb 礼物个数（单笔，下行原始）">gfcnt</th>
-                            <th title="与服务端 giftPiecesFromStoredRecord 一致：仅 gfcnt，缺省时按 1">计入件</th>
-<th :title="GIFT_CATALOG_VALUE_HINT">礼单价(值)</th>
-                            <th>昵称</th>
-                            <th>uid</th>
-                            <th>bg</th>
-                            <th>rid</th>
-                            <th>lv</th>
-                            <th>牌名</th>
-                            <th>bl</th>
-                            <th>brid</th>
-                            <th class="dm-gift-debug-th-json" title="完整 JSON 仅在新窗口查看">打开</th>
+                            <th>一级 Tab</th>
+                            <th>二级分组数</th>
+                            <th>pgId 引用数</th>
                           </tr>
                         </thead>
                         <tbody>
-                          <tr v-for="(g, ix) in giftDebugRows" :key="'gdk_pp_' + ix + '_' + String(g.ts)">
-                            <td class="dm-gift-debug-td-num">{{ ix + 1 }}</td>
-                            <td class="dm-gift-debug-td-nowrap">{{ formatTime(g.ts) }}</td>
-                            <td class="dm-gift-debug-td-num">{{ g.ts }}</td>
-                            <td class="dm-gift-debug-td-num">{{ g.gfid ?? "—" }}</td>
-                            <td class="dm-gift-debug-td-ell dm-gift-debug-td-gfn" :title="String(g.gfn ?? '')">{{ g.gfn != null && String(g.gfn).trim() !== '' ? g.gfn : '—' }}</td>
-                            <td class="dm-gift-debug-td-num">{{ g.gfcnt ?? "—" }}</td>
-                            <td class="dm-gift-debug-td-num dm-gift-debug-td-strong">{{ giftPiecesAggregateCount(g) }}</td>
-                            <td class="dm-gift-debug-td-nowrap" :title="GIFT_CATALOG_VALUE_HINT">{{ giftCatalogUnitDisplay(String(g.gfid ?? "")) }}</td>
-                            <td class="dm-gift-debug-td-ell" :title="String(g.nn ?? '')">{{ g.nn ?? "—" }}</td>
-                            <td class="dm-gift-debug-td-ell">{{ g.uid ?? "—" }}</td>
-                            <td class="dm-gift-debug-td-num">{{ g.bg ?? "—" }}</td>
-                            <td class="dm-gift-debug-td-ell">{{ g.rid ?? "—" }}</td>
-                            <td class="dm-gift-debug-td-num">{{ g.level ?? "—" }}</td>
-                            <td class="dm-gift-debug-td-ell">{{ g.bnn ?? "—" }}</td>
-                            <td class="dm-gift-debug-td-num">{{ g.bl ?? "—" }}</td>
-                            <td class="dm-gift-debug-td-ell">{{ g.brid ?? "—" }}</td>
+                          <tr v-for="s in giftPhotosTabSummaries" :key="s.key">
+                            <td class="dm-gift-debug-td-ell">{{ s.tab1Name || '—' }}</td>
+                            <td class="dm-gift-debug-td-num">{{ s.tab2Count }}</td>
+                            <td class="dm-gift-debug-td-num">{{ s.pgIdTotal }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                  <div v-if="giftPhotosDebugLoading" class="dm-empty">加载 giftPhotos_w…</div>
+                  <template v-else>
+                    <p v-if="giftPhotosDebugHint" class="dm-gift-debug-inline-meta">{{ giftPhotosDebugHint }}</p>
+                    <div class="dm-gift-debug-table-scroll dm-gift-debug-stats-rows-scroll">
+                      <table class="dm-gift-debug-table dm-gift-debug-table--compact">
+                        <thead>
+                          <tr>
+                            <th class="dm-gift-debug-catalog-img-cell">图</th>
+                            <th>pgId</th>
+                            <th>名称</th>
+                            <th title="webconf 标价原始刻度">标价(raw)</th>
+                            <th title="合并礼单 value / 礼物统计：price÷100（元）">单价≈(元)</th>
+                            <th>亲密度</th>
+                            <th>lv</th>
+                            <th>tab1</th>
+                            <th class="dm-gift-debug-th-json">原始 JSON</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="(row, ix) in giftPhotosDebugFilteredRows" :key="'gp_' + ix + '_' + row.pgId">
+                            <td class="dm-gift-debug-catalog-img-cell">
+                              <img v-if="row.pic" class="dm-gift-debug-catalog-icon" :src="row.pic" alt="" loading="lazy" />
+                              <span v-else class="dm-gift-debug-lookup-dash">—</span>
+                            </td>
+                            <td class="dm-gift-debug-td-num">{{ row.pgId ?? '—' }}</td>
+                            <td class="dm-gift-debug-td-ell" :title="String(row.name ?? '')">{{ row.name ?? '—' }}</td>
+                            <td class="dm-gift-debug-td-num">{{ row.price ?? '—' }}</td>
+                            <td class="dm-gift-debug-td-num">{{ giftPhotosPriceFish(row.price) }}</td>
+                            <td class="dm-gift-debug-td-num">{{ row.intimacy ?? '—' }}</td>
+                            <td class="dm-gift-debug-td-num">{{ row.lv ?? '—' }}</td>
+                            <td class="dm-gift-debug-td-num">{{ row.tab1 ?? '—' }}</td>
                             <td class="dm-gift-debug-json-cell">
-                              <button
-                                type="button"
-                                class="dm-gift-debug-json-hit"
-                                title="仅在新浏览器窗口打开本条完整格式化 JSON（可复制）"
-                                @click.stop="openGiftDebugJsonWindow(g)"
-                              >
-                                打开
-                              </button>
+                              <button type="button" class="dm-gift-debug-json-hit" title="新窗口查看本条 pgInfos JSON" @click.stop="openGiftPhotoPgJsonWindow(row)">原始 JSON</button>
                             </td>
                           </tr>
                         </tbody>
                       </table>
                     </div>
                   </template>
-                </div>
+                </section>
+</div>
               </div>
             </div>
             <button
@@ -8058,6 +8128,41 @@ function hideUidTooltip() {
 .dm-gift-debug-lead strong {
   color: color-mix(in srgb, var(--muted) 40%, var(--text));
 }
+.dm-gift-debug-stats-bundle {
+  margin-bottom: 0.6rem;
+}
+.dm-gift-debug-stats-rows-scroll {
+  max-height: min(52vh, 26rem);
+  min-height: 10rem;
+}
+.dm-gift-debug-stats-meta {
+  font-size: clamp(0.45rem, 2.65cqw, 0.54rem);
+  color: var(--muted);
+  margin: 0.3rem 0 0.45rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.85rem;
+  line-height: 1.35;
+}
+.dm-gift-debug-stats-meta--muted {
+  opacity: 0.92;
+  margin-top: 0;
+}
+.dm-gift-debug-warn {
+  color: color-mix(in srgb, #c27803 72%, var(--text));
+}
+.dm-gift-debug-json-pre {
+  margin: 0.3rem 0 0;
+  padding: 0.42rem 0.5rem;
+  font-size: clamp(0.42rem, 2.45cqw, 0.5rem);
+  line-height: 1.38;
+  overflow: auto;
+  max-height: 240px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 82%, var(--border));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .dm-gift-debug-code {
   font-family: ui-monospace, Menlo, Consolas, monospace;
   font-size: 0.9em;
@@ -8088,11 +8193,6 @@ function hideUidTooltip() {
   font-size: clamp(0.45rem, 2.65cqw, 0.52rem);
   color: color-mix(in srgb, var(--muted) 88%, var(--text));
   padding: 0.2rem 0 0;
-}
-.dm-gift-debug-prop-meta {
-  margin-top: 0.42rem;
-  padding-top: 0.38rem;
-  border-top: 1px dashed color-mix(in srgb, var(--border) 50%, transparent);
 }
 .dm-gift-debug-lookup-dash { opacity: 0.62; font-size: 0.92em; }
 .dm-gift-debug-catalog-scroll {

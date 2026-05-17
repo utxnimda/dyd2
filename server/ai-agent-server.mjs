@@ -287,11 +287,11 @@ const OPENAI_VARIANTS = [
   { id: "gpt-3.5-turbo", label: "GPT-3.5 Turbo · OpenAI", model: "gpt-3.5-turbo" },
 ];
 
-/** 通义千问（DashScope 兼容 OpenAI）；降级顺序：Max → Plus → Long → Turbo */
+/** 通义千问（DashScope 兼容 OpenAI）；降级顺序：Long → Plus → Max → Turbo */
 const QWEN_VARIANTS = [
-  { id: "qwen-max", label: "通义千问 Max · DashScope", model: "qwen-max" },
-  { id: "qwen-plus", label: "通义千问 Plus · DashScope", model: "qwen-plus" },
   { id: "qwen-long", label: "通义千问 Long · DashScope", model: "qwen-long" },
+  { id: "qwen-plus", label: "通义千问 Plus · DashScope", model: "qwen-plus" },
+  { id: "qwen-max", label: "通义千问 Max · DashScope", model: "qwen-max" },
   { id: "qwen-turbo", label: "通义千问 Turbo · DashScope", model: "qwen-turbo" },
 ];
 
@@ -367,9 +367,9 @@ function geminiPreferenceRank(id) {
 
 function qwenPreferenceRank(id) {
   const s = String(id || "").toLowerCase();
-  if (s.includes("qwen-max")) return 0;
+  if (s.includes("qwen-long")) return 0;
   if (s.includes("qwen-plus")) return 1;
-  if (s.includes("qwen-long")) return 2;
+  if (s.includes("qwen-max")) return 2;
   if (s.includes("qwen-turbo")) return 3;
   return 50;
 }

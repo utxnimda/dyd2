@@ -18,6 +18,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { geminiEligibleForOpenAiCompatTextChat } from "./gemini-openai-compat-chat-filter.mjs";
+import { fmzStaticFileMtimeMs, readDouyuFallbackGiftMetricsFresh } from "./fmz-static.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8791;
@@ -74,7 +75,7 @@ function saveRoomsList() {
 const roomInfoCache = new Map(); // roomId -> { data, fetchedAt }
 const ROOM_INFO_TTL = 60_000; // 1 minute cache
 
-const giftListCache = new Map(); // roomId -> { data, fetchedAt, manualMtime }
+const giftListCache = new Map(); // roomId -> { data, fetchedAt, manualMtime, fmzStaticMtime }
 const GIFT_LIST_TTL = 300_000; // 5 minutes cache
 
 /** 斗鱼 webconf 静态 JSON：背包 / 道具礼（全局，与直播间无关）；JSONP:`DYConfigCallback({...})` */
@@ -130,6 +131,21 @@ function parseDouyuConfigJsonpPayload(text, callbackName = "DYConfigCallback") {
     }
   }
   return null;
+}
+
+/** giftPhotos_w.json 根对象为 `{ data, callback }`，整段 JSON.parse 比括号扫描更安全 */
+function parseGiftPhotosWJsonp(text) {
+  const trimmed = String(text || "").trim();
+  const re = /^DYConfigCallback\s*\(([\s\S]*)\)\s*;?\s*$/;
+  const m = trimmed.match(re);
+  if (m) {
+    try {
+      return JSON.parse(m[1]);
+    } catch {
+      /* fallthrough */
+    }
+  }
+  return parseDouyuConfigJsonpPayload(trimmed);
 }
 
 function pickPropGiftIcon(blob) {
@@ -209,6 +225,59 @@ async function getPropGiftConfigMapCached() {
   }
 }
 
+/** webconf 礼物图鉴写真 JSONP（全局，与房间无关）；供调试面板对照 pgId */
+const GIFT_PHOTOS_W_URL = "https://webconf.douyucdn.cn/resource/common/giftPhotos_w.json";
+const GIFT_PHOTOS_W_TTL = 3_600_000; // 1h
+const giftPhotosWState = {
+  /** @type {{ tabInfos: unknown[], pgInfos: unknown[], unlockStar: unknown, awardStar: unknown, skin: unknown, photoSwitch: unknown, allSwitch: unknown, auth: unknown } | null} */
+  payload: null,
+  fetchedAt: 0,
+  fetchOk: false,
+};
+
+async function fetchGiftPhotosWPayloadFresh() {
+  const resp = await fetch(GIFT_PHOTOS_W_URL);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const text = await resp.text();
+  const root = parseGiftPhotosWJsonp(text);
+  if (!root?.data || typeof root.data !== "object") throw new Error("unexpected giftPhotos_w payload");
+  const d = root.data;
+  giftPhotosWState.payload = {
+    tabInfos: Array.isArray(d.tabInfos) ? d.tabInfos : [],
+    pgInfos: Array.isArray(d.pgInfos) ? d.pgInfos : [],
+    unlockStar: d.unlockStar ?? null,
+    awardStar: d.awardStar ?? null,
+    skin: d.skin ?? null,
+    photoSwitch: d.photoSwitch ?? null,
+    allSwitch: d.allSwitch ?? null,
+    auth: d.auth ?? null,
+  };
+  giftPhotosWState.fetchedAt = Date.now();
+  giftPhotosWState.fetchOk = true;
+  return giftPhotosWState;
+}
+
+async function getGiftPhotosWPayloadCached() {
+  if (
+    giftPhotosWState.payload &&
+    giftPhotosWState.fetchOk &&
+    Date.now() - giftPhotosWState.fetchedAt < GIFT_PHOTOS_W_TTL
+  ) {
+    return giftPhotosWState;
+  }
+  try {
+    return await fetchGiftPhotosWPayloadFresh();
+  } catch (e) {
+    console.error(`[danmaku] Failed to fetch giftPhotos_w: ${e.message}`);
+    if (giftPhotosWState.payload) {
+      return giftPhotosWState;
+    }
+    giftPhotosWState.fetchOk = false;
+    giftPhotosWState.payload = null;
+    return giftPhotosWState;
+  }
+}
+
 /**
  * Merged gift info from two Douyu data sources:
  *
@@ -237,6 +306,10 @@ async function getPropGiftConfigMapCached() {
  *
  * **Manual overlay** (`server/data/douyu-manual-gift-metrics.json`): 与 CDN 条目**同名**则覆盖
  * `value`（收入元/件）与 `intimacyScore`（亲密度）；无同名则插入 `source=manual` 的稳定 gfid 条目，供名称反查与统计。
+ *
+ * **FMZ fallback** (`shared/fmz-static.json` → `douyuFallbackGiftMetrics`)：CDN/背包合并后、写真保底与手填**之前**。见 `applyFmzFallbackGiftMetricsToMap`：**无收益或标记有收益但 value≤0** 时写入 FMZ 单价；战功礼默认 **cost（观众花费）=0**、**value=revenueYuan（主播收益）**；可选 **viewerSpendYuan** 为非零观众开销；条目可选 **aliases** 参与 `resolveArchivedGiftGfid`；可选 **wireGiftIds** 镜像线路 ID。
+ *
+ * **giftPhotos_w**（`webconf …/giftPhotos_w.json` → `pgInfos`）：FMZ static **之后**、手填 **之前**，按 **pgId** 补缺条目（主播收入 **value = price÷100** 元，与 v3 `priceInfo.price` 同源刻度）；手填 **之后** 再补 icon，并对 **`source=gift-photos-w`** 强制重申 **price÷100**（防止手填同名覆盖）；对 **`giftPhotosIconFromName`** 行按写真 **price÷100** 写收入（仅针对本轮补图标的行，不误改已有图标的 v3/prop）。
  */
 
 /* ------------------------------------------------------------------ */
@@ -317,16 +390,288 @@ function applyManualGiftMetricsToMap(map) {
 }
 
 /**
+ * 「战功礼」等对 CDN contribution/标价缺失或矛盾（免费、或标记有收益却 value≤0）时的保底刻度。
+ * 数据来自仓库 `shared/fmz-static.json` 的 douyuFallbackGiftMetrics。
+ * — 先于 `applyManualGiftMetricsToMap` 调用；手填表仍优先生效覆盖。
+ */
+function shouldOverlayFmzFallbackCatalogEntry(info, revenueYuanN) {
+  if (!info || !(revenueYuanN > 0)) return false;
+  if (info.manualMetrics) return false;
+  const v = Number(info.value ?? 0);
+  if (!info.isPaid) return true;
+  if (!Number.isFinite(v) || v <= 0) return true;
+  return false;
+}
+
+/**
+ * 斗鱼 CDN/prop 礼单缺失、但弹幕 `pid`/回填 gfid 会出现的线路礼物 ID → 镜像一条与 canonical 行相同的合并礼单行，
+ * 便于 `/gift-list` 明细里可按数字 ID 查到（统计 resolve 已与展示名对齐）。
+ * @param {Record<string, object>} map
+ * @param {{ name?: string, wireGiftIds?: unknown }} entry fmz-static 单条
+ * @param {string} canonicalKey 镜像源：`hitId`（CDN 同名命中）或 `gfidFb`（仅占位兜底）
+ */
+function applyFmzFallbackWireGiftIds(map, entry, canonicalKey) {
+  const wires = Array.isArray(entry.wireGiftIds) ? entry.wireGiftIds : [];
+  if (!wires.length) return;
+  const canonical = map[canonicalKey];
+  if (!canonical || typeof canonical !== "object") return;
+  const primaryNameNorm = normalizeGiftNameForManual(entry.name);
+
+  for (const w of wires) {
+    const wid = String(w ?? "").trim();
+    if (!wid || wid === "0" || wid === canonicalKey) continue;
+    const existing = map[wid];
+    if (existing && typeof existing === "object") {
+      const en = normalizeGiftNameForManual(existing.name);
+      if (en && en !== primaryNameNorm) {
+        console.warn(`[danmaku] Fallback wireGiftIds id=${wid} already used by "${existing.name}", skip "${entry.name}"`);
+        continue;
+      }
+    }
+    map[wid] = { ...canonical };
+  }
+}
+
+/**
+ * 战功等活动礼：弹幕线路 ID（gfidFb）常与 CDN 「同名不同号」条目并存。
+ * 命中 hitId 时若仅 overlay CDN 行、`gfidFb` 不落盘，则归档里 pid→3393 无法在合并礼单中解析 → 统计缺失。
+ */
+function upsertFmzFallbackCanonicalPidRow(map, gfidFb, name, costN, revN, intimacyN) {
+  const kn = normalizeGiftNameForManual(name);
+  const existingByGfid = map[gfidFb];
+  if (existingByGfid?.manualMetrics) return;
+  if (existingByGfid) {
+    const en = normalizeGiftNameForManual(existingByGfid.name);
+    if (en !== kn && en !== "") {
+      console.warn(
+        `[danmaku] FMZ fallback canonical pid gfid=${gfidFb} already used by "${existingByGfid.name}", skip duplicate "${name}"`,
+      );
+      return;
+    }
+  }
+  map[gfidFb] = {
+    name,
+    icon: existingByGfid?.icon ?? "",
+    cost: costN,
+    value: revN,
+    intimacyScore: intimacyN > 0 ? intimacyN : (existingByGfid?.intimacyScore ?? 0),
+    from: existingByGfid?.from ?? 1,
+    source: "fmz-fallback",
+    isPaid: revN > 0,
+    priceType: "FMZ_FALLBACK",
+    raw: existingByGfid?.raw ?? null,
+    fallbackMetrics: true,
+  };
+}
+
+function applyFmzFallbackGiftMetricsToMap(map, fmzFallbackList = readDouyuFallbackGiftMetricsFresh()) {
+  if (!map || typeof map !== "object") return;
+  const list = fmzFallbackList;
+  if (!Array.isArray(list) || !list.length) return;
+
+  for (const entry of list) {
+    const name = String(entry.name ?? "").trim();
+    const gfidFb = String(entry.gfid ?? "").trim();
+    if (!name || !gfidFb) continue;
+
+    const rev = Number(entry.revenueYuan);
+    const contrib = Number(entry.contributionRaw);
+    const revN = Number.isFinite(rev) ? rev : 0;
+    const intimacyN = Number.isFinite(contrib) ? contrib : 0;
+    /** 战功礼：主播收益 value=revenueYuan；观众侧「花费」cost 默认 0（非鱼翅口径）。可选 viewerSpendYuan≥0 覆盖。 */
+    const vsRaw = Number(entry.viewerSpendYuan);
+    const costN =
+      Number.isFinite(vsRaw) && vsRaw >= 0 ? vsRaw : 0;
+
+    const kn = normalizeGiftNameForManual(name);
+    let hitId = null;
+    for (const [id, info] of Object.entries(map)) {
+      if (!info || typeof info !== "object") continue;
+      if (normalizeGiftNameForManual(info.name) === kn) {
+        hitId = id;
+        break;
+      }
+    }
+
+    if (hitId != null) {
+      const ex = map[hitId];
+      if (ex.manualMetrics) continue;
+      if (shouldOverlayFmzFallbackCatalogEntry(ex, revN)) {
+        ex.value = revN;
+        ex.cost = costN;
+        ex.isPaid = revN > 0;
+        if (intimacyN > 0) ex.intimacyScore = intimacyN;
+        else if (ex.intimacyScore == null) ex.intimacyScore = 0;
+        ex.fallbackMetrics = true;
+        if (!ex.priceType) ex.priceType = "FMZ_FALLBACK";
+      }
+      upsertFmzFallbackCanonicalPidRow(map, gfidFb, name, costN, revN, intimacyN);
+      applyFmzFallbackWireGiftIds(map, entry, gfidFb);
+      continue;
+    }
+
+    const existingByGfid = map[gfidFb];
+    if (existingByGfid) {
+      const en = normalizeGiftNameForManual(existingByGfid.name);
+      if (en !== kn && en !== "") {
+        console.warn(`[danmaku] Fallback gift gfid ${gfidFb} already used by "${existingByGfid.name}", skip "${name}"`);
+        continue;
+      }
+    }
+
+    map[gfidFb] = {
+      name,
+      icon: "",
+      cost: costN,
+      value: revN,
+      intimacyScore: intimacyN,
+      from: 1,
+      source: "fmz-fallback",
+      isPaid: revN > 0,
+      priceType: "FMZ_FALLBACK",
+      raw: null,
+      fallbackMetrics: true,
+    };
+    applyFmzFallbackWireGiftIds(map, entry, gfidFb);
+  }
+}
+
+/** @returns {number} 主播侧单价（元）；写真 webconf `price` 与 v3 **标价 raw** 同源刻度 → **÷100**。 */
+function giftPhotosStreamerYuanFromRow(row) {
+  const n = Number(row?.price);
+  return Number.isFinite(n) ? n / 100 : 0;
+}
+
+/**
+ * giftPhotos_w（pgInfos）：在 FMZ static 之后执行；仅当 map 尚无该 pgId 时补一条（pid-only / CDN·prop 均无号）。
+ * 主播收益 value = price÷100（元）；观众花费 cost = 0。手填 manual 在其后仍可覆盖同名条目。
+ * @returns {number} 新增条数
+ */
+function applyGiftPhotosWFallbackToMap(map, pgInfos) {
+  if (!map || typeof map !== "object" || !Array.isArray(pgInfos)) return 0;
+  let added = 0;
+  for (const row of pgInfos) {
+    const id = String(row?.pgId ?? "").trim();
+    if (!id || id === "0") continue;
+    if (map[id]) continue;
+    const valueYuan = giftPhotosStreamerYuanFromRow(row);
+    const intimacyRaw = Number(row?.intimacy);
+    const intimacyScore = Number.isFinite(intimacyRaw) ? intimacyRaw : 0;
+    const name = String(row?.name ?? "").trim();
+    map[id] = {
+      name: name || `写真#${id}`,
+      icon: typeof row.pic === "string" ? row.pic : "",
+      cost: 0,
+      value: valueYuan,
+      intimacyScore,
+      from: 1,
+      source: "gift-photos-w",
+      isPaid: valueYuan > 0,
+      priceType: "PHOTO_FALLBACK",
+      raw: cloneGiftListRawChunk(row),
+      giftPhotosFallback: true,
+    };
+    added++;
+  }
+  return added;
+}
+
+/**
+ * 写真目录：礼物名归一化 → 首张非空 `pic` + `price`（同名多条时先到先得）。
+ * @returns {Record<string, { pic: string, price: number }>} price 可为 NaN 表示该行无数
+ */
+function buildGiftPhotosNameOverlayIndex(pgInfos) {
+  /** @type {Record<string, { pic: string, price: number }>} */
+  const idx = {};
+  if (!Array.isArray(pgInfos)) return idx;
+  for (const row of pgInfos) {
+    const name = String(row?.name ?? "").trim();
+    if (!name) continue;
+    const kn = normalizeGiftNameForManual(name);
+    const pic = typeof row.pic === "string" ? row.pic.trim() : "";
+    const priceRaw = Number(row?.price);
+    const priceNum = Number.isFinite(priceRaw) ? priceRaw : Number.NaN;
+    if (!idx[kn]) {
+      idx[kn] = { pic, price: priceNum };
+      continue;
+    }
+    if (!idx[kn].pic && pic) idx[kn].pic = pic;
+    if (!Number.isFinite(idx[kn].price) && Number.isFinite(priceNum)) idx[kn].price = priceNum;
+  }
+  return idx;
+}
+
+/**
+ * 手填之后：① 尚无 icon 则按写真名补图；② `gift-photos-w`（pgId 键）强制 value=price÷100；
+ * ③ `giftPhotosIconFromName` 行按写真 price÷100 写收入（跳过 fmz-fallback / fallbackMetrics / manual）。
+ */
+function applyGiftPhotosPostManualOverlay(map, pgInfos, overlayIdx) {
+  let iconsFilled = 0;
+  let pgIdStreamerRepair = 0;
+  let valueFromPhotoName = 0;
+  if (!map || typeof map !== "object") {
+    return { iconsFilled, pgIdStreamerRepair, valueFromPhotoName };
+  }
+  const ov = overlayIdx && typeof overlayIdx === "object" ? overlayIdx : {};
+
+  for (const info of Object.values(map)) {
+    if (!info || typeof info !== "object") continue;
+    const ic = typeof info.icon === "string" ? info.icon.trim() : "";
+    if (ic) continue;
+    const name = String(info.name ?? "").trim();
+    if (!name) continue;
+    const slot = ov[normalizeGiftNameForManual(name)];
+    const pic = slot?.pic && String(slot.pic).trim();
+    if (!pic) continue;
+    info.icon = pic;
+    info.giftPhotosIconFromName = true;
+    iconsFilled++;
+  }
+
+  if (Array.isArray(pgInfos)) {
+    for (const row of pgInfos) {
+      const id = String(row?.pgId ?? "").trim();
+      if (!id || id === "0") continue;
+      const info = map[id];
+      if (!info || info.source !== "gift-photos-w") continue;
+      const yuan = giftPhotosStreamerYuanFromRow(row);
+      info.value = yuan;
+      info.isPaid = yuan > 0;
+      pgIdStreamerRepair++;
+    }
+  }
+
+  for (const info of Object.values(map)) {
+    if (!info || typeof info !== "object") continue;
+    if (!info.giftPhotosIconFromName) continue;
+    if (info.manualMetrics || info.source === "fmz-fallback" || info.fallbackMetrics) continue;
+    const name = String(info.name ?? "").trim();
+    if (!name) continue;
+    const slot = ov[normalizeGiftNameForManual(name)];
+    if (!slot || !Number.isFinite(slot.price)) continue;
+    const yuan = giftPhotosStreamerYuanFromRow({ price: slot.price });
+    info.value = yuan;
+    info.isPaid = yuan > 0;
+    info.giftPhotosValueFromName = true;
+    valueFromPhotoName++;
+  }
+
+  return { iconsFilled, pgIdStreamerRepair, valueFromPhotoName };
+}
+
+/**
  * Build merged gift map: v3 API (room-specific) + prop_gift_config (global legacy).
  * Returns { gifts, stats } or null on total failure.
  */
 async function fetchGiftListPayload(roomId) {
   const cached = giftListCache.get(roomId);
   const manualMtime = getManualGiftMetricsMtimeMs();
+  const fmzStaticMtime = fmzStaticFileMtimeMs();
   if (
     cached &&
     Date.now() - cached.fetchedAt < GIFT_LIST_TTL &&
-    cached.manualMtime === manualMtime
+    cached.manualMtime === manualMtime &&
+    cached.fmzStaticMtime === fmzStaticMtime
   ) {
     return cached.data;
   }
@@ -412,7 +757,43 @@ async function fetchGiftListPayload(roomId) {
       map["0"] = { name: "未知礼物", icon: "", cost: 0, value: 0, from: 1, source: "fallback", isPaid: false, raw: null };
     }
 
+    const fmzFallbackList = readDouyuFallbackGiftMetricsFresh();
+    applyFmzFallbackGiftMetricsToMap(map, fmzFallbackList);
+
+    let giftPhotosFallbackAdded = 0;
+    /** @type {Record<string, { pic: string, price: number }>|null} */
+    let giftPhotosNameOverlayIndex = null;
+    /** @type {unknown[]|null} */
+    let giftPhotosPgInfosRef = null;
+    try {
+      const photoSt = await getGiftPhotosWPayloadCached();
+      if (photoSt.payload?.pgInfos?.length) {
+        const pgInfos = photoSt.payload.pgInfos;
+        giftPhotosPgInfosRef = pgInfos;
+        giftPhotosFallbackAdded = applyGiftPhotosWFallbackToMap(map, pgInfos);
+        giftPhotosNameOverlayIndex = buildGiftPhotosNameOverlayIndex(pgInfos);
+      }
+    } catch (e) {
+      console.warn(`[danmaku] giftPhotos_w catalog fallback skipped: ${e.message}`);
+    }
+
     applyManualGiftMetricsToMap(map);
+
+    let giftPhotosIconsByName = 0;
+    let giftPhotosStreamerRepairPgId = 0;
+    let giftPhotosValueFromPhotoName = 0;
+    if (giftPhotosPgInfosRef?.length) {
+      const post = applyGiftPhotosPostManualOverlay(
+        map,
+        giftPhotosPgInfosRef,
+        giftPhotosNameOverlayIndex ?? {},
+      );
+      giftPhotosIconsByName = post.iconsFilled;
+      giftPhotosStreamerRepairPgId = post.pgIdStreamerRepair;
+      giftPhotosValueFromPhotoName = post.valueFromPhotoName;
+    }
+
+    const fmzFallbackRows = Object.values(map).filter((x) => x?.source === "fmz-fallback").length;
 
     // --- Build backpackCatalog: from=2 gifts that exist in prop_gift_config ---
     /** @type {Record<string, { name: string, pc: number, devote: number, type: number|null, icon: string, overlaidFromProp: boolean, raw?: object|null }>} */
@@ -440,6 +821,12 @@ async function fetchGiftListPayload(roomId) {
       propCount,
       totalCount: Object.keys(map).length,
       propConfigOk: Boolean(propMap),
+      fmzConfiguredEntries: fmzFallbackList.length,
+      fmzFallbackRows,
+      giftPhotosFallbackAdded,
+      giftPhotosIconsByName,
+      giftPhotosStreamerRepairPgId,
+      giftPhotosValueFromPhotoName,
     };
 
     const backpackCatalogStats = {
@@ -450,8 +837,10 @@ async function fetchGiftListPayload(roomId) {
     };
 
     const pack = { gifts: map, stats, backpackCatalog, backpackCatalogStats };
-    giftListCache.set(roomId, { data: pack, fetchedAt: Date.now(), manualMtime });
-    console.log(`[danmaku] Gift list for room ${roomId}: v3=${v3Count}, prop=${propCount}, backpack=${roomBackpackGiftIds}, total=${stats.totalCount}`);
+    giftListCache.set(roomId, { data: pack, fetchedAt: Date.now(), manualMtime, fmzStaticMtime });
+    console.log(
+      `[danmaku] Gift list for room ${roomId}: v3=${v3Count}, prop=${propCount}, backpack=${roomBackpackGiftIds}, photoFb=${giftPhotosFallbackAdded}, photoIcon=${giftPhotosIconsByName}, photoValPg=${giftPhotosStreamerRepairPgId}, photoValNm=${giftPhotosValueFromPhotoName}, total=${stats.totalCount}`,
+    );
     return pack;
   } catch (e) {
     console.error(`[danmaku] Failed to fetch gift list for ${roomId}:`, e.message);
@@ -999,6 +1388,26 @@ function giftPiecesFromStoredRecord(g) {
 }
 
 /**
+ * 斗鱼部分 `dgb` 下行带 gfid=0，真实礼物 id 在 pid/gid/giftId；新归档写入与 resolve/stats 共用。
+ */
+function coalesceDouyuArchivedGiftIds(msg) {
+  if (!msg || typeof msg !== "object") return msg;
+  const gf = String(msg.gfid ?? "").trim();
+  if (gf && gf !== "0") return msg;
+  for (const k of ["pid", "gid", "giftId"]) {
+    const v = String(msg[k] ?? "").trim();
+    if (v && v !== "0") return { ...msg, gfid: v };
+  }
+  return msg;
+}
+
+/** 归档行用于 gfid 解析的有效 id（不改磁盘对象）。 */
+function archivedGiftWireId(g) {
+  const m = coalesceDouyuArchivedGiftIds(g);
+  return String(m?.gfid ?? "").trim();
+}
+
+/**
  * 将斗鱼 STT 礼物相关报文统一成与历史 `dgb` 归档兼容的形态。
  *
  * - **dgb**：原始送礼（经典路径）。
@@ -1014,7 +1423,7 @@ function normalizeDouyuGiftSttToRecord(roomId, msg) {
   const rid = String(roomId ?? "").trim();
 
   if (t === "dgb") {
-    return { ...msg, _giftWire: "dgb" };
+    return coalesceDouyuArchivedGiftIds({ ...msg, _giftWire: "dgb" });
   }
 
   if (t === "gdp") {
@@ -1037,16 +1446,16 @@ function normalizeDouyuGiftSttToRecord(roomId, msg) {
     const nn = String(msg.sn ?? msg.nn ?? "").trim();
     const gfn = String(msg.gn ?? msg.gfn ?? "").trim();
     const gfcntRaw = msg.gc ?? msg.gfcnt ?? "1";
-    const gfid = String(msg.gfid ?? msg.gid ?? msg.giftId ?? "0").trim() || "0";
-    return {
+    const gfidRaw = String(msg.gfid ?? msg.gid ?? msg.giftId ?? "0").trim() || "0";
+    return coalesceDouyuArchivedGiftIds({
       ...msg,
       type: "dgb",
       _giftWire: "spbc",
       ...(nn !== "" ? { nn } : {}),
       ...(gfn !== "" ? { gfn } : {}),
       gfcnt: String(gfcntRaw),
-      gfid,
-    };
+      gfid: gfidRaw,
+    });
   }
 
   return null;
@@ -1568,8 +1977,42 @@ function mergeManualGiftAliasesIntoNameIndex(m, catalogMap) {
 }
 
 /**
+ * 「战功礼」保底表 douyuFallbackGiftMetrics 的别名 → gfid。
+ * canonical 已在礼单中则落到该真实 id；仅占位兜底则落到条目 gfid。b 已存在键不写（手填别名优先）。
+ */
+function mergeDouyuFallbackAliasesIntoNameIndex(m, catalogMap) {
+  const list = readDouyuFallbackGiftMetricsFresh();
+  if (!list.length) return;
+
+  for (const entry of list) {
+    const nm = String(entry.name ?? "").trim();
+    const gfidFb = String(entry.gfid ?? "").trim();
+    if (!nm || !gfidFb) continue;
+    const primary = normalizeGiftNameForManual(nm);
+    if (!primary) continue;
+
+    let targetGfid = m.has(primary) ? m.get(primary) : null;
+    if (targetGfid == null && catalogMap && catalogMap[gfidFb]) targetGfid = gfidFb;
+    if (targetGfid == null) continue;
+
+    const aliases = Array.isArray(entry.aliases) ? entry.aliases : [];
+    for (const al of aliases) {
+      const k = normalizeGiftNameForManual(al);
+      if (!k) continue;
+      if (!m.has(k)) m.set(k, targetGfid);
+    }
+
+    const nmNorm = normalizeGiftNameForManual(nm);
+    const slot = catalogMap?.[gfidFb];
+    if (slot && normalizeGiftNameForManual(String(slot.name ?? "").trim()) === nmNorm) {
+      m.set(nmNorm, gfidFb);
+    }
+  }
+}
+
+/**
  * 从房间礼单建「礼物展示名 → gfid」索引（小写、去首尾空）；同名多 id 时取先遍历到的。
- * 合并 `douyu-manual-gift-metrics.json` 中 entries[].aliases。
+ * 合并 `douyu-manual-gift-metrics.json` 中 entries[].aliases；合并 `douyuFallbackGiftMetrics` 中 aliases。
  * @param {Record<string, { name?: string }>|null|undefined} catalogMap
  * @returns {Map<string, string>}
  */
@@ -1585,6 +2028,7 @@ function buildGiftNameToGfidIndex(catalogMap) {
     }
   }
   mergeManualGiftAliasesIntoNameIndex(m, catalogMap);
+  mergeDouyuFallbackAliasesIntoNameIndex(m, catalogMap);
   return m;
 }
 
@@ -1598,7 +2042,7 @@ function buildGiftNameToGfidIndex(catalogMap) {
  * @param {Record<string, { name?: string }>|null|undefined} [catalogMap] 当前房间 merge 后礼单；传入时才可做「展示名 vs gfn」一致性校验
  */
 function resolveArchivedGiftGfid(g, nameToGfid, catalogMap = null) {
-  const raw = String(g.gfid ?? "").trim();
+  const raw = archivedGiftWireId(g);
   const gfn = String(g.gfn ?? "").trim();
   const gfnLower = gfn ? gfn.toLowerCase() : "";
   const fromName =
@@ -1624,11 +2068,32 @@ function resolveArchivedGiftGfid(g, nameToGfid, catalogMap = null) {
   return raw || "0";
 }
 
+/** 当前合并礼单能否解释该 gfid（占位 gfid=0 不算）。用于礼物统计分桶。 */
+function catalogGiftStatsLooksResolved(gfid, catalogMap) {
+  const gid = String(gfid ?? "").trim() || "0";
+  const meta = catalogMap?.[gid];
+  if (!meta || typeof meta !== "object") return false;
+  if (gid === "0") return false;
+  return String(meta.name ?? "").trim() !== "";
+}
+
+/**
+ * 统计聚合键：有礼单则用 gfid；否则若有归档展示名则按名拆开（避免全部并入 gfid=0「未知礼物」）。
+ */
+function giftStatsBucketKey(resolvedGfid, gfn, catalogMap) {
+  const gid = String(resolvedGfid ?? "").trim() || "0";
+  const fn = String(gfn ?? "").trim();
+  if (catalogGiftStatsLooksResolved(gid, catalogMap)) return gid;
+  if (fn) return `__gfn:${normalizeGiftNameForManual(fn)}`;
+  return gid;
+}
+
 /**
  * 统计时间窗内礼物：按 gfid / 用户聚合（与 collectGiftLinesInRange 同源数据）。
  * @param {Map<string, string>|null} [nameToGfid] 若有，则对缺 gfid/为0 或与礼单名不一致的记录按 gfn 反查礼单
  * @param {Record<string, { name?: string }>|null} [catalogMap] 与 fetchGiftListPayload().gifts 同源，供 resolveArchivedGiftGfid 校验
  * @returns {{ totalPieces: number, byGift: Record<string, { count: number, name: string }>, byUser: Record<string, { nn: string, count: number, gifts: Record<string, number> }> }}
+ *          byGift 键可为真实 gfid，或无名但有 gfn 时的 `__gfn:${normalize}`。
  */
 function aggregateGiftsInTimeRange(roomId, startTs, endTs, nameToGfid = null, catalogMap = null) {
   migrateOldGiftFile(roomId);
@@ -1643,21 +2108,118 @@ function aggregateGiftsInTimeRange(roomId, startTs, endTs, nameToGfid = null, ca
     for (const g of chunk) {
       const ts = archivedGiftEntryTsMs(g);
       if (!(ts > 0) || ts < startTs || ts > endTs) continue;
-      const gfid = resolveArchivedGiftGfid(g, nameToGfid, catalogMap);
+      const gfidResolved = resolveArchivedGiftGfid(g, nameToGfid, catalogMap);
       const amt = giftPiecesFromStoredRecord(g);
+      const gfnTrim = String(g.gfn ?? "").trim();
+      const bucket = giftStatsBucketKey(gfidResolved, gfnTrim, catalogMap);
       totalPieces += amt;
-      if (!byGift[gfid]) byGift[gfid] = { count: 0, name: "" };
-      byGift[gfid].count += amt;
-      const gfn = g.gfn || "";
-      if (gfn) byGift[gfid].name = gfn;
+      if (!byGift[bucket]) byGift[bucket] = { count: 0, name: "" };
+      byGift[bucket].count += amt;
+      if (gfnTrim) byGift[bucket].name = gfnTrim;
+      else if (!byGift[bucket].name && catalogMap?.[gfidResolved]?.name) {
+        byGift[bucket].name = String(catalogMap[gfidResolved].name);
+      }
       const uid = String(g.uid || "anon");
       if (!byUser[uid]) byUser[uid] = { nn: g.nn || "", count: 0, gifts: {} };
       if (g.nn) byUser[uid].nn = g.nn;
       byUser[uid].count += amt;
-      byUser[uid].gifts[gfid] = (byUser[uid].gifts[gfid] || 0) + amt;
+      byUser[uid].gifts[bucket] = (byUser[uid].gifts[bucket] || 0) + amt;
     }
   }
   return { totalPieces, byGift, byUser };
+}
+
+/**
+ * 与 GET /gifts/:rid/stats 同源聚合；可选收集归档行快照供前端调试面板对照。
+ * @param {string} rid
+ * @param {string} range
+ * @param {number} nowMs
+ * @param {{ collectDebugRows?: boolean, debugRowsMax?: number }} [opts]
+ */
+async function computeRoomGiftStatsPanelBundle(rid, range, nowMs, opts = {}) {
+  const collectDebugRows = Boolean(opts.collectDebugRows);
+  const debugRowsMax = Math.min(15_000, Math.max(1, Number(opts.debugRowsMax) || 8000));
+
+  const { startTs, endTs } = computeGiftStatsTimeWindow(range, nowMs);
+  migrateOldGiftFile(rid);
+  const index = loadGiftIndex(rid);
+  const giftPack = await fetchGiftListPayload(rid);
+  const nameIdx = buildGiftNameToGfidIndex(giftPack?.gifts);
+
+  const stats = { totalValue: 0, totalCount: 0, byGift: {}, byUser: {} };
+  let matchedGiftRows = 0;
+  /** @type {object[]} */
+  const debugRows = collectDebugRows ? [] : [];
+
+  for (let i = 0; i < index.fileCount; i++) {
+    const chunk = loadJsonFile(giftChunkPath(rid, i), []);
+    for (const g of chunk) {
+      const ts = archivedGiftEntryTsMs(g);
+      if (!(ts > 0) || ts < startTs) continue;
+      if (Number.isFinite(endTs) && ts >= endTs) continue;
+      matchedGiftRows++;
+      const gfidResolved = resolveArchivedGiftGfid(g, nameIdx, giftPack?.gifts);
+      const amount = giftPiecesFromStoredRecord(g);
+      const gfnTrim = String(g.gfn ?? "").trim();
+      const bucket = giftStatsBucketKey(gfidResolved, gfnTrim, giftPack?.gifts);
+
+      if (collectDebugRows && debugRows.length < debugRowsMax) {
+        const pidRaw = String(g.pid ?? g.gid ?? g.giftId ?? "").trim();
+        debugRows.push({
+          ts,
+          gfidStored: String(g.gfid ?? "").trim(),
+          pid: pidRaw || null,
+          gfidResolved,
+          bucket,
+          gfcnt: g.gfcnt,
+          pieces: amount,
+          gfn: gfnTrim || null,
+          uid: g.uid ?? null,
+          nn: g.nn ?? null,
+        });
+      }
+
+      if (!stats.byGift[bucket]) stats.byGift[bucket] = { count: 0, name: "" };
+      stats.byGift[bucket].count += amount;
+      if (gfnTrim) stats.byGift[bucket].name = gfnTrim;
+      else if (!stats.byGift[bucket].name && giftPack?.gifts?.[gfidResolved]?.name) {
+        stats.byGift[bucket].name = String(giftPack.gifts[gfidResolved].name);
+      }
+      const uid = g.uid || "anon";
+      if (!stats.byUser[uid])
+        stats.byUser[uid] = {
+          nn: g.nn || "",
+          level: g.level || "",
+          bnn: g.bnn || "",
+          bl: g.bl || "",
+          brid: g.brid || "",
+          count: 0,
+          gifts: {},
+        };
+      if (g.nn) stats.byUser[uid].nn = g.nn;
+      if (g.level) stats.byUser[uid].level = g.level;
+      if (g.bnn) stats.byUser[uid].bnn = g.bnn;
+      if (g.bl) stats.byUser[uid].bl = g.bl;
+      if (g.brid) stats.byUser[uid].brid = g.brid;
+      stats.byUser[uid].count += amount;
+      if (!stats.byUser[uid].gifts[bucket]) stats.byUser[uid].gifts[bucket] = 0;
+      stats.byUser[uid].gifts[bucket] += amount;
+      stats.totalCount += amount;
+    }
+  }
+
+  return {
+    stats,
+    matchedGiftRows,
+    giftChunkFiles: index.fileCount,
+    startTs,
+    endTs,
+    giftMergeStats: giftPack?.stats ?? null,
+    debugRows: collectDebugRows ? debugRows : [],
+    debugRowsTruncated: collectDebugRows && matchedGiftRows > debugRows.length,
+    debugRowsMaxRequested: collectDebugRows ? debugRowsMax : 0,
+    debugRowsReturned: collectDebugRows ? debugRows.length : 0,
+  };
 }
 
 /** 日报数据概览：礼物金额拆分（catalog 已在 fetchGiftListPayload 中换算为「元」）
@@ -1831,9 +2393,9 @@ const FALLBACK_AI_MODEL_IDS_WHEN_AGENT_LIST_EMPTY = [
   "gemini-flash-latest",
   "gemini-2.0-flash-lite",
   "gemini-2.0-flash",
-  "qwen-max",
-  "qwen-plus",
   "qwen-long",
+  "qwen-plus",
+  "qwen-max",
   "qwen-turbo",
 ];
 
@@ -1950,6 +2512,38 @@ function isRecoverableAiUpstreamModelError(msg) {
   return false;
 }
 
+/** 上游判定为「提示过长 / 上下文超限」等，应缩小分块与入模体积后重试，而不是仅换模型 */
+function isLikelyContextLengthExceededError(msg) {
+  const s = String(msg);
+  if (/\b413\b/.test(s) || /payload too large/i.test(s) || /request entity too large/i.test(s)) {
+    return true;
+  }
+  if (
+    /context[_\s-]*(length|window|overflow)/i.test(s)
+    || /maximum\s*context/i.test(s)
+    || /exceed(ed|s)?(\s+the)?\s+max(imum)?(\s+)?(context|input|prompt|token)/i.test(s)
+    || /too\s*(many|large)\s*tokens?/i.test(s)
+    || /token\s*(count|limit)/i.test(s)
+    || /prompt\s*is\s*too\s*long/i.test(s)
+    || /input\s*(is\s*)?too\s*long/i.test(s)
+    || /LENGTH_REQUIRED|CONTEXT_LENGTH|prompt_tokens/i.test(s)
+    || /context_window_exceeded/i.test(s)
+    || /reduce\s+the\s+length/i.test(s)
+    || /INVALID_ARGUMENT.*(length|size|token)/i.test(s)
+    || /输入.{0,6}过长|上下文.{0,6}[超满]|超出.{0,6}[长限]/i.test(s)
+  ) {
+    return true;
+  }
+  // 400/502 等但正文里带了长度相关 JSON（常见 OpenAI / 千问 / Gemini 错误体回传到 message）
+  if (
+    /AI agent HTTP 400\b/i.test(s)
+    && /context|token|length|too[_\s]?long|maximum|prompt/i.test(s)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /** 遇可恢复错误时在候选中依次尝试其它模型（如 Gemini 失败再试千问/OpenAI）；其它错误或非最后一个候选仍立即抛出 */
 async function chatAiAgentAccumulateFirstAvailable(modelIds, messages) {
   if (!modelIds.length) {
@@ -1986,7 +2580,7 @@ function humanizeAiReportFailure(msg) {
       : "生成过程中流被中断（报 terminated）：常见于服务重启、上游断连或代理超时；请稍后重试。";
   }
   if (isRecoverableAiUpstreamModelError(s) && /\b429\b|quota|RESOURCE_EXHAUSTED/i.test(s)) {
-    return "上游配额或限流（如 429）：请检查各平台额度；未设置 FMZ_TRIGGER_AI_MODEL 时会按 ai-agent 模型列表依次切换（例如 Gemini→OpenAI→千问）。也可手写：FMZ_TRIGGER_AI_MODEL=gemini-2.5-flash,qwen-plus,gpt-4o-mini";
+    return "上游配额或限流（如 429）：请检查各平台额度；未设置 FMZ_TRIGGER_AI_MODEL 时会按 ai-agent 模型列表依次切换（例如 Gemini→OpenAI→千问，千问内需 long 优先）。也可手写：FMZ_TRIGGER_AI_MODEL=gemini-2.5-flash,qwen-long,qwen-plus,gpt-4o-mini";
   }
   if (isAiAgentUnreachableMessage(s)) {
     return `${s.length > 280 ? `${s.slice(0, 280)}…` : s} — ${chatAiAgentInternalUrlHint()}`;
@@ -2007,18 +2601,22 @@ const AI_REPORT_DAILY_FORCE_CHUNK_TEXT_CHARS = Math.max(30_000, Number(process.e
 const AI_REPORT_DAILY_FORCE_MIN_PARTS = Math.max(2, Math.min(8, Number(process.env.FMZ_AI_REPORT_DAILY_FORCE_MIN_PARTS) || 3));
 /** 分段日报合成时，均匀抽样并入模的原文弹幕行数（供「最佳弹幕」等逐字引用） */
 const AI_REPORT_VERBATIM_DM_SAMPLE = Math.max(40, Number(process.env.FMZ_AI_REPORT_VERBATIM_DM_SAMPLE) || 160);
+/** 终稿/SSE 因上下文过长失败时，自动缩小分块并重试的次数上限（含首次） */
+const AI_REPORT_CONTEXT_RETRY_MAX = Math.max(1, Math.min(8, Number(process.env.FMZ_AI_REPORT_CONTEXT_RETRY_MAX) || 4));
 
 /**
  * @param {string[]} giftLines
  * @param {string} giftTextFallback
+ * @param {number} [maxGiftLines]
  */
-function limitGiftLinesForAiPrompt(giftLines, giftTextFallback) {
+function limitGiftLinesForAiPrompt(giftLines, giftTextFallback, maxGiftLines = AI_REPORT_MAX_GIFT_LINES_IN_PROMPT) {
+  const cap = Math.max(80, maxGiftLines);
   const lines = Array.isArray(giftLines) ? giftLines : [];
   if (!lines.length) return { text: giftTextFallback, truncated: false, included: 0 };
-  if (lines.length <= AI_REPORT_MAX_GIFT_LINES_IN_PROMPT) {
+  if (lines.length <= cap) {
     return { text: lines.join("\n"), truncated: false, included: lines.length };
   }
-  const sampled = sampleLinesEvenly(lines, AI_REPORT_MAX_GIFT_LINES_IN_PROMPT);
+  const sampled = sampleLinesEvenly(lines, cap);
   return { text: sampled.join("\n"), truncated: true, included: sampled.length };
 }
 
@@ -2027,39 +2625,45 @@ function limitGiftLinesForAiPrompt(giftLines, giftTextFallback) {
  * @param {string[]} dmLines
  * @param {string} joinedDm
  * @param {{ kind: string, giftTextLen: number }} ctx
+ * @param {{ chunkDmLines?: number, chunkForceChars?: number, dailyForceChunkTextChars?: number, dailyForceMinParts?: number }} [opts]
  * @returns {string[][]}
  */
-function computeDanmakuLineChunksMaybeForceDaily(dmLines, joinedDm, ctx) {
-  let chunks = computeDanmakuLineChunks(dmLines, joinedDm);
+function computeDanmakuLineChunksMaybeForceDaily(dmLines, joinedDm, ctx, opts = {}) {
+  const dailyForceChunkTextChars = opts.dailyForceChunkTextChars ?? AI_REPORT_DAILY_FORCE_CHUNK_TEXT_CHARS;
+  const dailyForceMinParts = opts.dailyForceMinParts ?? AI_REPORT_DAILY_FORCE_MIN_PARTS;
+  let chunks = computeDanmakuLineChunks(dmLines, joinedDm, opts);
   const n = dmLines.length;
   if (!n) return chunks;
   const textLen = String(joinedDm || "").length;
   const giftLen = ctx.giftTextLen || 0;
   if (ctx.kind !== "daily" || chunks.length > 1) return chunks;
-  const heavy = textLen >= AI_REPORT_DAILY_FORCE_CHUNK_TEXT_CHARS || giftLen >= 140_000;
+  const heavy = textLen >= dailyForceChunkTextChars || giftLen >= 140_000;
   if (!heavy) return chunks;
-  const parts = Math.min(AI_REPORT_DAILY_FORCE_MIN_PARTS, n);
+  const parts = Math.min(dailyForceMinParts, n);
   const forceSize = Math.max(250, Math.ceil(n / parts));
   chunks = [];
   for (let i = 0; i < n; i += forceSize) chunks.push(dmLines.slice(i, i + forceSize));
-  if (chunks.length < 2) return computeDanmakuLineChunks(dmLines, joinedDm);
+  if (chunks.length < 2) return computeDanmakuLineChunks(dmLines, joinedDm, opts);
   return chunks;
 }
 
 /**
  * @param {string[]} lines
  * @param {string} joinedText lines.join("\n")
+ * @param {{ chunkDmLines?: number, chunkForceChars?: number }} [opts]
  * @returns {string[][]}
  */
-function computeDanmakuLineChunks(lines, joinedText) {
+function computeDanmakuLineChunks(lines, joinedText, opts = {}) {
+  const chunkDmCap = opts.chunkDmLines ?? AI_REPORT_CHUNK_DM_LINES;
+  const chunkForceChars = opts.chunkForceChars ?? AI_REPORT_CHUNK_FORCE_CHARS;
   const n = lines.length;
   if (!n) return [];
-  let size = AI_REPORT_CHUNK_DM_LINES;
+  let size = chunkDmCap;
   const textLen = String(joinedText || "").length;
-  if (textLen > AI_REPORT_CHUNK_FORCE_CHARS) {
-    const needParts = Math.max(2, Math.ceil(textLen / AI_REPORT_CHUNK_FORCE_CHARS));
+  if (textLen > chunkForceChars) {
+    const needParts = Math.max(2, Math.ceil(textLen / chunkForceChars));
     size = Math.max(400, Math.ceil(n / needParts));
-    size = Math.min(size, AI_REPORT_CHUNK_DM_LINES);
+    size = Math.min(size, chunkDmCap);
   }
   /** @type {string[][]} */
   const chunks = [];
@@ -2381,57 +2985,19 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
   }
   const giftRankDigest = formatGiftRankDigestForAi(roomId, exp.startTs, exp.endTs, catalogMap);
 
-  const giftLimited = limitGiftLinesForAiPrompt(exp.giftLines || [], exp.giftText);
   const dmLines = exp.danmakuLines || [];
-  const lineChunks = computeDanmakuLineChunksMaybeForceDaily(dmLines, exp.danmakuText, {
-    kind,
-    giftTextLen: giftLimited.text.length,
-  });
-  const useMultiPass = lineChunks.length > 1;
   const modelCandidates = await resolveAiAgentTriggerModelCandidates();
 
-  /** 分段预摘要全文；终稿为空时用于兜底展示 */
-  let multipassChunkSummariesText = null;
+  /** 上下文/体积过大时递减并重试的入参（首次为与环境变量一致的默认） */
+  let reportEff = {
+    chunkDmLines: AI_REPORT_CHUNK_DM_LINES,
+    chunkForceChars: AI_REPORT_CHUNK_FORCE_CHARS,
+    dailyForceChunkTextChars: AI_REPORT_DAILY_FORCE_CHUNK_TEXT_CHARS,
+    dailyForceMinParts: AI_REPORT_DAILY_FORCE_MIN_PARTS,
+    maxGiftLines: AI_REPORT_MAX_GIFT_LINES_IN_PROMPT,
+    verbatimSample: AI_REPORT_VERBATIM_DM_SAMPLE,
+  };
 
-  /** @type {string} */
-  let danmakuExcerptBlock;
-  /** @type {string|null} */
-  let multiPassNote = null;
-  if (useMultiPass) {
-    console.log(
-      `[ai-report] 分段预摘要: ${lineChunks.length} 段, 弹幕 ${dmLines.length} 行, 礼物入模 ${giftLimited.included} 行`,
-    );
-    multipassChunkSummariesText = await summarizeDanmakuChunksForFinalReport(
-      modelCandidates,
-      roomDisplay,
-      exp.rangeLabel,
-      lineChunks,
-    );
-    const verbatim = sampleLinesEvenly(dmLines, AI_REPORT_VERBATIM_DM_SAMPLE).join("\n");
-    danmakuExcerptBlock =
-      `--- 弹幕：分段要点（模型预读 ${lineChunks.length} 段）---\n${multipassChunkSummariesText}`
-      + `\n\n--- 弹幕：原文均匀抽样（供引用，勿改行内正文）---\n${verbatim}`;
-    multiPassNote =
-      `弹幕成文｜体量较大，已分 ${lineChunks.length} 段预摘要，并均匀抽样 ${Math.min(dmLines.length, AI_REPORT_VERBATIM_DM_SAMPLE)} 条原文行供引用；评选「最佳弹幕」须逐字来自本消息内的原文抽样或分段要点中的「原文：」行，禁止编造。`;
-  } else {
-    danmakuExcerptBlock = `--- 弹幕摘录 ---\n${exp.danmakuText}`;
-  }
-
-  const giftPromptNote = giftLimited.truncated
-    ? `礼物摘录｜窗口内匹配 ${exp.giftMatched} 条，为控制上下文已均匀抽样 ${giftLimited.included} 条进入下文（排行摘要仍完整）。`
-    : null;
-
-  const dataInfoLines = [
-    "【数据信息】以下为导出窗口与抽样口径（仅供定性参考）。**客户端仪表盘顶部已展示结构化「数据概览」**；正文勿写「数据概览」小节或电报数字清单（勿列周期、房间、条数、付费笔数等）。下列数字行仅供理解样本规模，正文请从「概要信息」起笔。",
-    `周期｜${exp.rangeLabel}`,
-    `房间｜${roomDisplay}｜${roomId}`,
-    `弹幕归档｜窗口内录制 chatmsg 共匹配 ${exp.danmakuMatched} 条｜下文至多摘录 ${exp.danmakuIncluded} 条｜截断 ${exp.danmakuTruncated ? "是" : "否"}`,
-    multiPassNote,
-    giftPromptNote,
-    `礼物归档｜窗口内匹配 ${exp.giftMatched} 条｜下文至多摘录 ${exp.giftIncluded} 条｜截断 ${exp.giftTruncated ? "是" : "否"}`,
-    "另有「礼物排行与礼物类型摘要」须在后续小节引用解读；勿冒充外链实时榜。",
-  ].filter(Boolean);
-  const dataInfo = dataInfoLines.join("\n");
   const dailyIntro =
     "生成本直播间「日报」：数据统计范围为「上一个完整自然日」（服务器本地日历：当日 0:00 起至次日 0:00 止）内的弹幕与礼物摘录与心态侧写，写短写实。";
   const weeklyIntro =
@@ -2455,20 +3021,120 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
   const intro = kind === "daily" ? dailyIntro : weeklyIntro;
   const task = `${intro}\n\n${proseStyle}\n\n${bothInstr}\n\n${mentality}\n\n${statsFirst}\n\n${structure}\n\n${fmzMetaFence}`;
   const rankBlock = `--- 礼物排行与礼物类型摘要（本地归档 + catalog） ---\n${giftRankDigest}`;
-  const excerpts = `${danmakuExcerptBlock}\n\n--- 礼物摘录 ---\n${giftLimited.text}`;
-  const userBlock = `${dataInfo}\n\n${rankBlock}\n\n【分析任务】\n${task}\n\n${excerpts}`;
   const systemContent =
     kind === "daily"
       ? "你是斗鱼直播间数据分析师，写中文日报。篇幅紧凑；正文一律常规字重，禁止粗体（不要用 HTML b/strong）。仪表盘顶部已有「数据概览」；你从「概要信息」定性写起，勿自写数据概览或电报数字清单。禁止 Markdown。礼物解读引用消息内排行摘要。文末输出 <<<FMZ_REPORT_META ... >>>。"
       : "你是斗鱼直播间数据分析师，写中文周报。篇幅紧凑；正文一律常规字重，禁止粗体（不要用 HTML b/strong）。仪表盘顶部已有「数据概览」；你从「概要信息」定性写起，勿自写数据概览或电报数字清单。禁止 Markdown。礼物解读引用消息内排行摘要。文末输出 <<<FMZ_REPORT_META ... >>>。";
-  console.log(
-    `[ai-report] ${kind} room=${roomId} multipass=${useMultiPass} userBlock≈${userBlock.length} 字`,
-  );
-  const rawAiText = await chatAiAgentAccumulateFirstAvailable(modelCandidates, [
-    { role: "system", content: systemContent },
-    { role: "user", content: userBlock },
-  ]);
-  console.log(`[ai-report] rawOutLen=${String(rawAiText || "").length}`);
+
+  /** 分段预摘要全文；终稿为空时用于兜底展示 */
+  let finalMultipassChunkSummariesText = null;
+  let finalUseMultiPass = false;
+  let finalUserBlockLen = 0;
+  /** @type {string | null} */
+  let rawAiText = null;
+
+  for (let attempt = 0; attempt < AI_REPORT_CONTEXT_RETRY_MAX; attempt++) {
+    if (attempt > 0) {
+      console.warn(
+        `[ai-report] 因上下文/体积限制缩小参数并重试 ${attempt + 1}/${AI_REPORT_CONTEXT_RETRY_MAX}：`
+          + `chunkDm=${reportEff.chunkDmLines} chunkForceChars=${reportEff.chunkForceChars} dailyForceChars=${reportEff.dailyForceChunkTextChars} `
+          + `dailyMinParts=${reportEff.dailyForceMinParts} giftMax=${reportEff.maxGiftLines} verbatim=${reportEff.verbatimSample}`,
+      );
+    }
+
+    const chunkOpts = {
+      chunkDmLines: reportEff.chunkDmLines,
+      chunkForceChars: reportEff.chunkForceChars,
+      dailyForceChunkTextChars: reportEff.dailyForceChunkTextChars,
+      dailyForceMinParts: reportEff.dailyForceMinParts,
+    };
+    const giftLimited = limitGiftLinesForAiPrompt(exp.giftLines || [], exp.giftText, reportEff.maxGiftLines);
+    const lineChunks = computeDanmakuLineChunksMaybeForceDaily(dmLines, exp.danmakuText, {
+      kind,
+      giftTextLen: giftLimited.text.length,
+    }, chunkOpts);
+    const useMultiPass = lineChunks.length > 1;
+
+    /** @type {string|null} */
+    let multipassChunkSummariesText = null;
+
+    /** @type {string} */
+    let danmakuExcerptBlock;
+    /** @type {string|null} */
+    let multiPassNote = null;
+    if (useMultiPass) {
+      console.log(
+        `[ai-report] 分段预摘要: ${lineChunks.length} 段, 弹幕 ${dmLines.length} 行, 礼物入模 ${giftLimited.included} 行 （尝试 ${attempt + 1}/${AI_REPORT_CONTEXT_RETRY_MAX}）`,
+      );
+      multipassChunkSummariesText = await summarizeDanmakuChunksForFinalReport(
+        modelCandidates,
+        roomDisplay,
+        exp.rangeLabel,
+        lineChunks,
+      );
+      const verbatim = sampleLinesEvenly(dmLines, reportEff.verbatimSample).join("\n");
+      danmakuExcerptBlock =
+        `--- 弹幕：分段要点（模型预读 ${lineChunks.length} 段）---\n${multipassChunkSummariesText}`
+        + `\n\n--- 弹幕：原文均匀抽样（供引用，勿改行内正文）---\n${verbatim}`;
+      multiPassNote =
+        `弹幕成文｜体量较大，已分 ${lineChunks.length} 段预摘要，并均匀抽样 ${Math.min(dmLines.length, reportEff.verbatimSample)} 条原文行供引用；评选「最佳弹幕」须逐字来自本消息内的原文抽样或分段要点中的「原文：」行，禁止编造。`;
+    } else {
+      danmakuExcerptBlock = `--- 弹幕摘录 ---\n${exp.danmakuText}`;
+    }
+
+    const giftPromptNote = giftLimited.truncated
+      ? `礼物摘录｜窗口内匹配 ${exp.giftMatched} 条，为控制上下文已均匀抽样 ${giftLimited.included} 条进入下文（排行摘要仍完整）。`
+      : null;
+
+    const dataInfoLines = [
+      "【数据信息】以下为导出窗口与抽样口径（仅供定性参考）。**客户端仪表盘顶部已展示结构化「数据概览」**；正文勿写「数据概览」小节或电报数字清单（勿列周期、房间、条数、付费笔数等）。下列数字行仅供理解样本规模，正文请从「概要信息」起笔。",
+      `周期｜${exp.rangeLabel}`,
+      `房间｜${roomDisplay}｜${roomId}`,
+      `弹幕归档｜窗口内录制 chatmsg 共匹配 ${exp.danmakuMatched} 条｜下文至多摘录 ${exp.danmakuIncluded} 条｜截断 ${exp.danmakuTruncated ? "是" : "否"}`,
+      multiPassNote,
+      giftPromptNote,
+      `礼物归档｜窗口内匹配 ${exp.giftMatched} 条｜下文至多摘录 ${exp.giftIncluded} 条｜截断 ${exp.giftTruncated ? "是" : "否"}`,
+      "另有「礼物排行与礼物类型摘要」须在后续小节引用解读；勿冒充外链实时榜。",
+    ].filter(Boolean);
+    const dataInfo = dataInfoLines.join("\n");
+    const excerpts = `${danmakuExcerptBlock}\n\n--- 礼物摘录 ---\n${giftLimited.text}`;
+    const userBlock = `${dataInfo}\n\n${rankBlock}\n\n【分析任务】\n${task}\n\n${excerpts}`;
+
+    console.log(
+      `[ai-report] ${kind} room=${roomId} multipass=${useMultiPass} userBlock≈${userBlock.length} 字 attempt=${attempt + 1}/${AI_REPORT_CONTEXT_RETRY_MAX}`,
+    );
+
+    try {
+      rawAiText = await chatAiAgentAccumulateFirstAvailable(modelCandidates, [
+        { role: "system", content: systemContent },
+        { role: "user", content: userBlock },
+      ]);
+      finalUseMultiPass = useMultiPass;
+      finalMultipassChunkSummariesText = multipassChunkSummariesText;
+      finalUserBlockLen = userBlock.length;
+      console.log(
+        `[ai-report] rawOutLen=${String(rawAiText || "").length} attempt=${attempt + 1}`,
+      );
+      break;
+    } catch (e) {
+      const errMsg = e && e.message ? String(e.message) : String(e);
+      const canRetry = isLikelyContextLengthExceededError(errMsg) && attempt < AI_REPORT_CONTEXT_RETRY_MAX - 1;
+      if (!canRetry) throw e;
+      console.warn(`[ai-report] 判定为上下文/体积限制（将收窄分块后重试）: ${errMsg.slice(0, 360)}`);
+      reportEff.chunkDmLines = Math.max(200, Math.floor(reportEff.chunkDmLines / 2));
+      reportEff.chunkForceChars = Math.max(50_000, Math.floor(reportEff.chunkForceChars / 1.38));
+      reportEff.dailyForceChunkTextChars = Math.max(18_000, Math.floor(reportEff.dailyForceChunkTextChars / 1.38));
+      reportEff.dailyForceMinParts = Math.min(8, reportEff.dailyForceMinParts + 1);
+      reportEff.maxGiftLines = Math.max(80, Math.floor(reportEff.maxGiftLines / 2));
+      reportEff.verbatimSample = Math.max(40, Math.floor(reportEff.verbatimSample / 2));
+    }
+  }
+
+  if (rawAiText === null) {
+    throw new Error(
+      `AI 报告：已自动分块重试 ${AI_REPORT_CONTEXT_RETRY_MAX} 次仍失败；请手动调小 FMZ_AI_REPORT_CHUNK_DM_LINES / FMZ_AI_REPORT_MAX_GIFT_LINES，或调大 FMZ_AI_REPORT_CONTEXT_RETRY_MAX。`,
+    );
+  }
   const { content: bodyContent, metaRaw } = stripFmzReportMeta(rawAiText);
   const bodyPlain = sanitizeAiReportBodyPlain(bodyContent);
   const metaNorm = normalizeAiReportMeta(metaRaw);
@@ -2515,23 +3181,23 @@ async function runAiReportJob(roomId, kind, triggerId, triggeredBy) {
     const bodyAfterFenceLen = String(bodyContent ?? "").trim().length;
     const preview = rawStr.slice(0, 480).replace(/\s+/g, " ");
     const chunkFallback =
-      useMultiPass && multipassChunkSummariesText && multipassChunkSummariesText.trim();
+      finalUseMultiPass && finalMultipassChunkSummariesText && finalMultipassChunkSummariesText.trim();
     if (chunkFallback) {
       persistedContent = [
-        "【说明】终稿模型未返回可读正文（热门房间常见：user 消息过长导致上游截断或空输出）。下方为分段预摘要的自动拼接，未经终稿润色；可略减小 FMZ_AI_REPORT_CHUNK_DM_LINES / FMZ_AI_REPORT_MAX_GIFT_LINES 后重试日报。",
+        "【说明】终稿模型未返回可读正文（热门房间常见：user 消息过长导致上游截断或空输出）。下方为分段预摘要的自动拼接，未经终稿润色；可略减小 FMZ_AI_REPORT_CHUNK_DM_LINES / FMZ_AI_REPORT_MAX_GIFT_LINES / FMZ_AI_REPORT_VERBATIM_DM_SAMPLE，或依赖服务端自动收窄重试（FMZ_AI_REPORT_CONTEXT_RETRY_MAX）。",
         "",
-        multipassChunkSummariesText.trim(),
+        finalMultipassChunkSummariesText.trim(),
       ].join("\n");
       console.warn(
-        `[ai-report] empty final body; using chunk-summary fallback room=${roomId} ${kind} rawLen=${rawLen} bodyAfterFence=${bodyAfterFenceLen} userBlockLen=${userBlock.length} chunkChars=${multipassChunkSummariesText.length} preview=${preview}`,
+        `[ai-report] empty final body; using chunk-summary fallback room=${roomId} ${kind} rawLen=${rawLen} bodyAfterFence=${bodyAfterFenceLen} userBlockLen=${finalUserBlockLen} chunkChars=${finalMultipassChunkSummariesText.length} preview=${preview}`,
       );
     } else {
       persistedContent = [
         "【说明】本次未生成可读正文。常见原因：上游返回为空或仅含围栏、上下文过大被截断、或网络中断。",
-        "请稍后重试。若在热门直播间反复出现，可在服务器为 fmz-danmaku 调整环境变量：FMZ_AI_REPORT_MAX_GIFT_LINES（礼物入模行数上限）、FMZ_AI_REPORT_DAILY_FORCE_CHUNK_CHARS、FMZ_AI_REPORT_CHUNK_DM_LINES、FMZ_AI_REPORT_VERBATIM_DM_SAMPLE；并查看 fmz-ai-agent、fmz-danmaku 日志中的 [ai-report]。",
+        "请稍后重试。若在热门直播间反复出现，可在服务器为 fmz-danmaku 调整环境变量：FMZ_AI_REPORT_MAX_GIFT_LINES、FMZ_AI_REPORT_DAILY_FORCE_CHUNK_CHARS、FMZ_AI_REPORT_CHUNK_DM_LINES、FMZ_AI_REPORT_VERBATIM_DM_SAMPLE、FMZ_AI_REPORT_CONTEXT_RETRY_MAX；并查看 fmz-ai-agent、fmz-danmaku 日志中的 [ai-report]。",
       ].join("\n");
       console.warn(
-        `[ai-report] empty body after strip room=${roomId} ${kind} rawLen=${rawLen} bodyAfterFence=${bodyAfterFenceLen} userBlockLen=${userBlock.length} multipass=${useMultiPass} preview=${preview}`,
+        `[ai-report] empty body after strip room=${roomId} ${kind} rawLen=${rawLen} bodyAfterFence=${bodyAfterFenceLen} userBlockLen=${finalUserBlockLen} multipass=${finalUseMultiPass} preview=${preview}`,
       );
     }
   }
@@ -3448,6 +4114,31 @@ const server = http.createServer(async (req, res) => {
   }
 
   // --- Gifts ---
+  // GET /gift-photos-w — webconf giftPhotos_w.json（图鉴写真 JSONP，全局缓存 1h）
+  if (path === "/gift-photos-w" && req.method === "GET") {
+    const st = await getGiftPhotosWPayloadCached();
+    if (!st.payload) {
+      return jsonReply(res, { ok: false, error: "giftPhotos_w 拉取失败" }, 502);
+    }
+    const p = st.payload;
+    return jsonReply(
+      res,
+      {
+        ok: true,
+        fetchedAt: st.fetchedAt,
+        tabInfos: p.tabInfos,
+        pgInfos: p.pgInfos,
+        unlockStar: p.unlockStar,
+        awardStar: p.awardStar,
+        skin: p.skin,
+        photoSwitch: p.photoSwitch,
+        allSwitch: p.allSwitch,
+        auth: p.auth,
+      },
+      200,
+      { "Cache-Control": "no-store" },
+    );
+  }
   // GET /gift-list/:roomId — get gift name/icon mapping from Douyu API
   if (path.match(/^\/gift-list\/[^/]+$/) && req.method === "GET") {
     const rid = decodeURIComponent(path.split("/")[2]);
@@ -3471,7 +4162,7 @@ const server = http.createServer(async (req, res) => {
   // GET /gifts/:roomId — get gift records for a room
   if (path.match(/^\/gifts\/[^/]+$/) && req.method === "GET") {
     const rid = decodeURIComponent(path.split("/")[2]);
-    const limit = Math.min(2000, Math.max(1, Number(url.searchParams.get("limit")) || 200));
+    const limit = Math.min(25_000, Math.max(1, Number(url.searchParams.get("limit")) || 200));
     const gifts = loadGifts(rid, limit);
     const index = loadGiftIndex(rid);
     return jsonReply(res, { ok: true, gifts, totalCount: index.totalCount });
@@ -3491,71 +4182,44 @@ const server = http.createServer(async (req, res) => {
     if (rangeIn !== range) {
       console.warn(`[danmaku] GET /gifts/.../stats 未知 range=${JSON.stringify(rangeIn)}（原始 query=${JSON.stringify(rangeQueryRaw)}），已按 today 处理`);
     }
-    // ⑤ 时间窗：昨日等为 [startTs,endTs) 半开区间；今日/本周等往往只有 startTs，endTs 为 undefined
-    const { startTs, endTs } = computeGiftStatsTimeWindow(range, Date.now());
 
-    // ⑥ 读该房间礼物归档索引与分片 JSON，必要时把旧单文件迁移成分片格式
-    migrateOldGiftFile(rid);
-    const index = loadGiftIndex(rid); // 结果：fileCount=分片数、totalCount≈历史总条数（统计前）
-    // ⑦ 拉斗鱼礼单（含 gfid→name/value），用于 resolveArchivedGiftGfid 反查
-    const giftPack = await fetchGiftListPayload(rid);
-    const nameIdx = buildGiftNameToGfidIndex(giftPack?.gifts);
-    // ⑧ 聚合容器：面板上的总件数、按礼物、按用户
-    const stats = { totalValue: 0, totalCount: 0, byGift: {}, byUser: {} };
-    let matchedGiftRows = 0; // 落在时间窗内的归档行数（一条可能贡献多件）
-    for (let i = 0; i < index.fileCount; i++) {
-      const chunk = loadJsonFile(giftChunkPath(rid, i), []);
-      for (const g of chunk) {
-        const ts = archivedGiftEntryTsMs(g); // 归档写入时的 ts（优先礼物事件时间，见 recordGift）
-        // ⑨ 半开区间：ts ∈ [startTs, endTs) 才计入；无 endTs 则只要求 ts >= startTs
-        if (!(ts > 0) || ts < startTs) continue;
-        if (Number.isFinite(endTs) && ts >= endTs) continue;
-        matchedGiftRows++;
-        const gfid = resolveArchivedGiftGfid(g, nameIdx, giftPack?.gifts);
-        const amount = giftPiecesFromStoredRecord(g);
-        // byGift: { gfid: { count, name? } }；name 来自归档 gfn，供前端展示「本时间窗」礼物名，避免误用近期实时列表
-        if (!stats.byGift[gfid]) stats.byGift[gfid] = { count: 0 };
-        stats.byGift[gfid].count += amount;
-        const gfn = String(g.gfn ?? "").trim();
-        if (gfn) stats.byGift[gfid].name = gfn;
-        else if (!stats.byGift[gfid].name && giftPack?.gifts?.[gfid]?.name) {
-          stats.byGift[gfid].name = String(giftPack.gifts[gfid].name);
-        }
-        // byUser: { uid: { nn, level, bnn, bl, brid, count, gifts: { gfid: count } } }
-        const uid = g.uid || "anon";
-        if (!stats.byUser[uid]) stats.byUser[uid] = { nn: g.nn || "", level: g.level || "", bnn: g.bnn || "", bl: g.bl || "", brid: g.brid || "", count: 0, gifts: {} };
-        // Update user info from latest gift record (may have newer level/badge)
-        if (g.nn) stats.byUser[uid].nn = g.nn;
-        if (g.level) stats.byUser[uid].level = g.level;
-        if (g.bnn) stats.byUser[uid].bnn = g.bnn;
-        if (g.bl) stats.byUser[uid].bl = g.bl;
-        if (g.brid) stats.byUser[uid].brid = g.brid;
-        stats.byUser[uid].count += amount;
-        if (!stats.byUser[uid].gifts[gfid]) stats.byUser[uid].gifts[gfid] = 0;
-        stats.byUser[uid].gifts[gfid] += amount;
-        stats.totalCount += amount; // 面板「总件数」：所有礼物的份数之和
-      }
-    }
+    const debugMode = url.searchParams.get("debug") === "1";
+    const debugRowsMaxRaw = Number(url.searchParams.get("debugRowsMax"));
+    const debugRowsMaxParam = Number.isFinite(debugRowsMaxRaw) ? debugRowsMaxRaw : 8000;
+
+    const bundle = await computeRoomGiftStatsPanelBundle(rid, range, Date.now(), {
+      collectDebugRows: debugMode,
+      debugRowsMax: debugRowsMaxParam,
+    });
+
+    const { stats, matchedGiftRows, startTs, endTs, giftChunkFiles } = bundle;
+
     const endHint = Number.isFinite(endTs) ? "[start,end) 终点不含" : "仅下界，统计至当前";
     // ⑩ 同步落盘 + console，避免 fmz-dev 管道缓冲导致「日志文件只有启动分隔线」
     danmakuSyncLog(
-      `[danmaku] GET /gifts/stats rid=${rid} range=${range} ${endHint} window=[${giftLogFmtShanghai(startTs)} ~ ${Number.isFinite(endTs) ? giftLogFmtShanghai(endTs) : "∞"}] ms=[${startTs}, ${endTs ?? "—"}] matchedRows=${matchedGiftRows} totalPieces=${stats.totalCount} giftChunkFiles=${index.fileCount}`,
+      `[danmaku] GET /gifts/stats rid=${rid} range=${range} ${endHint} window=[${giftLogFmtShanghai(startTs)} ~ ${Number.isFinite(endTs) ? giftLogFmtShanghai(endTs) : "∞"}] ms=[${startTs}, ${endTs ?? "—"}] matchedRows=${matchedGiftRows} totalPieces=${stats.totalCount} giftChunkFiles=${giftChunkFiles}`,
     );
     // ⑪ 返回 JSON：前端 loadGiftStats 消费 stats、startTs、endTs、range*
-    return jsonReply(
-      res,
-      {
-        ok: true,
-        stats,
-        range,
-        rangeNormalized: rangeIn,
-        rangeQueryRaw: rangeQueryRaw || null,
-        startTs,
-        endTs: endTs ?? null,
-      },
-      200,
-      { "Cache-Control": "no-store" },
-    );
+    /** @type {Record<string, unknown>} */
+    const payload = {
+      ok: true,
+      stats,
+      range,
+      rangeNormalized: rangeIn,
+      rangeQueryRaw: rangeQueryRaw || null,
+      startTs,
+      endTs: endTs ?? null,
+    };
+    if (debugMode) {
+      payload.matchedArchiveRows = matchedGiftRows;
+      payload.giftChunkFiles = giftChunkFiles;
+      payload.debugRows = bundle.debugRows;
+      payload.debugRowsTruncated = bundle.debugRowsTruncated;
+      payload.debugRowsMaxRequested = bundle.debugRowsMaxRequested;
+      payload.debugRowsReturned = bundle.debugRowsReturned;
+      payload.giftMergeStats = bundle.giftMergeStats;
+    }
+    return jsonReply(res, payload, 200, { "Cache-Control": "no-store" });
   }
   // POST /gifts/:roomId/clear — clear gift records for a room
   if (path.match(/^\/gifts\/[^/]+\/clear$/) && req.method === "POST") {

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "_comment": "全仓静态数据：前端打进包；服务端 fmz-static.mjs 读取。douyuFallbackGiftMetrics：gfid 对齐弹幕 pid；CDN 缺战功礼时用 revenueYuan 写主播收益(value)；战功礼默认观众花费(cost)=0，如需按鱼翅标价可填 viewerSpendYuan。aliases/wireGiftIds 见服务端注释。",
+  "douyuFallbackGiftMetrics": [
+
+  ]
+}

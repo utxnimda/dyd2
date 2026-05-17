@@ -10,6 +10,9 @@ Restart=always
 RestartSec=5
 Environment=AI_AGENT_PORT=8792
 Environment=NODE_ENV=production
+# 可选：在服务器上创建 /etc/fmz-ai-agent.env（chmod 600），写入 GEMINI_API_KEY、HTTPS_PROXY 等；
+# 前缀「-」表示文件不存在时不报错（未配置代理的机器可不放该文件）。
+EnvironmentFile=-/etc/fmz-ai-agent.env
 
 [Install]
 WantedBy=multi-user.target
