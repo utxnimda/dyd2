@@ -189,8 +189,14 @@ const OPT_RELEASE_BUNDLES = [
   },
 ];
 
-/** SPA 与各 Node 进程共用的静态 JSON：`server/fmz-static.mjs` 会优先读本文件（与 runnable *.mjs 同目录） */
-const FMZ_STATIC_OPT_PAIR = ["shared/fmz-static.json", "fmz-static.json"];
+/**
+ * 与各 opt 目录并列：`douyu-danmaku-server.mjs` import `./fmz-static.mjs`；
+ * JSON 供该模块运行时读取（与 runnable *.mjs 同目录）。
+ */
+const FMZ_STATIC_OPT_EXTRA_COPIES = [
+  ["server/fmz-static.mjs", "fmz-static.mjs"],
+  ["shared/fmz-static.json", "fmz-static.json"],
+];
 
 /* ------------------------------------------------------------------ */
 /*  server/data/ → release/<label>/server/data/ (按发布模块)           */
@@ -288,7 +294,7 @@ if (!skipOpt) {
     const destDir = join(target, "opt", bundle.remoteName);
     mkdirSync(destDir, { recursive: true });
     let ok = true;
-    for (const [relFrom, baseName] of bundle.copies.concat([FMZ_STATIC_OPT_PAIR])) {
+    for (const [relFrom, baseName] of bundle.copies.concat(FMZ_STATIC_OPT_EXTRA_COPIES)) {
       const absFrom = join(root, relFrom);
       const absTo = join(destDir, baseName);
       if (!existsSync(absFrom)) {
