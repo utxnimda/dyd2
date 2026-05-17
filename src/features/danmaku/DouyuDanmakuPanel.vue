@@ -163,9 +163,12 @@ type SubTab = "danmaku" | "triggers" | "log";
 const activeSubTab = ref<SubTab>("danmaku");
 
 // Password
-const backendUnlocked = ref(!!localStorage.getItem("dm_backend_unlocked"));
+const backendUnlocked = ref(false);
 const passwordInput = ref("");
 const passwordError = ref("");
+const showBackendAuthModal = ref(false);
+const backendAuthReason = ref("");
+const backendAuthInputRef = ref<HTMLInputElement | null>(null);
 
 
 
@@ -2738,28 +2741,102 @@ const selectedAiReportBlocksAugmented = computed((): AiReportBodyBlock[] => {
 /* ------------------------------------------------------------------ */
 
 async function unlockBackend() {
+  const pw = String(passwordInput.value || "").trim();
+  if (!pw) {
+    passwordError.value = "请输入密码（lsyfp）";
+    return;
+  }
   passwordError.value = "";
   try {
-    const d = await (await fetch(`${API}/verify-password`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: passwordInput.value }) })).json();
-    if (d.ok) { backendUnlocked.value = true; localStorage.setItem("dm_backend_unlocked", "1"); localStorage.setItem("dm_backend_pw", passwordInput.value); passwordInput.value = ""; }
-    else passwordError.value = "密码错误";
+    const ok = await verifyBackendPassword(pw);
+    if (ok) {
+      backendUnlocked.value = true;
+      localStorage.setItem("dm_backend_unlocked", "1");
+      localStorage.setItem("dm_backend_pw", pw);
+      passwordInput.value = "";
+      passwordError.value = "";
+      showBackendAuthModal.value = false;
+      return;
+    }
+    backendUnlocked.value = false;
+    localStorage.removeItem("dm_backend_unlocked");
+    localStorage.removeItem("dm_backend_pw");
+    passwordError.value = "密码错误";
   } catch { passwordError.value = "验证失败"; }
 }
 
 function getBackendPw(): string { return localStorage.getItem("dm_backend_pw") || ""; }
 
-function requireBackendUnlock(reason: string): boolean {
-  if (backendUnlocked.value && getBackendPw().trim()) return true;
-  passwordError.value = `${reason}需要密码（lsydsb）`;
-  return false;
+async function verifyBackendPassword(password: string): Promise<boolean> {
+  const d = await (await fetch(`${API}/verify-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  })).json();
+  return !!d.ok;
 }
 
-function requestSubTab(next: SubTab): void {
+async function syncBackendUnlockFromLocal(): Promise<void> {
+  const pw = getBackendPw().trim();
+  if (!pw) {
+    backendUnlocked.value = false;
+    localStorage.removeItem("dm_backend_unlocked");
+    return;
+  }
+  try {
+    const ok = await verifyBackendPassword(pw);
+    backendUnlocked.value = ok;
+    if (ok) {
+      localStorage.setItem("dm_backend_unlocked", "1");
+    } else {
+      localStorage.removeItem("dm_backend_unlocked");
+      localStorage.removeItem("dm_backend_pw");
+    }
+  } catch {
+    backendUnlocked.value = false;
+    localStorage.removeItem("dm_backend_unlocked");
+  }
+}
+
+function promptPasswordRequired(reason: string): void {
+  backendAuthReason.value = reason;
+  passwordError.value = "";
+  showBackendAuthModal.value = true;
+  nextTick(() => backendAuthInputRef.value?.focus());
+}
+
+async function ensureBackendUnlocked(reason: string): Promise<boolean> {
+  const pw = getBackendPw().trim();
+  if (!pw) {
+    backendUnlocked.value = false;
+    promptPasswordRequired(reason);
+    return false;
+  }
+  try {
+    const ok = await verifyBackendPassword(pw);
+    backendUnlocked.value = ok;
+    if (!ok) {
+      localStorage.removeItem("dm_backend_unlocked");
+      localStorage.removeItem("dm_backend_pw");
+      promptPasswordRequired(reason);
+      return false;
+    }
+    localStorage.setItem("dm_backend_unlocked", "1");
+    passwordError.value = "";
+    return true;
+  } catch {
+    backendUnlocked.value = false;
+    promptPasswordRequired(reason);
+    return false;
+  }
+}
+
+async function requestSubTab(next: SubTab): Promise<void> {
   if (next === "danmaku") {
     activeSubTab.value = "danmaku";
     return;
   }
-  if (!requireBackendUnlock(next === "triggers" ? "触发器" : "日志")) return;
+  if (!await ensureBackendUnlocked(next === "triggers" ? "触发器" : "日志")) return;
   activeSubTab.value = next;
 }
 
@@ -3658,7 +3735,7 @@ function connectSSE() {
 }
 
 async function backendAddRoom() {
-  if (!requireBackendUnlock("添加直播间监听")) return;
+  if (!await ensureBackendUnlocked("添加直播间监听")) return;
   const rid = backendNewRoomId.value.trim(); if (!rid) return;
   backendError.value = "";
   try {
@@ -3675,7 +3752,7 @@ async function backendAddRoom() {
 }
 
 async function backendRemoveRoom(rid: string) {
-  if (!requireBackendUnlock("删除直播间监听")) return;
+  if (!await ensureBackendUnlocked("删除直播间监听")) return;
   try { await fetch(`${API}/rooms/${encodeURIComponent(rid)}`, { method: "DELETE", headers: { "X-Password": getBackendPw() } }); } catch { /* */ }
   // Immediately remove from local list and switch selection
   backendRooms.value = backendRooms.value.filter((r) => !sameDouyuRoomId(r.roomId, rid));
@@ -4196,6 +4273,7 @@ function onDmEscapeCloseFloatingPanels(e: KeyboardEvent): void {
 }
 
 onMounted(() => {
+  void syncBackendUnlockFromLocal();
   dmPanelHydratePrefs();
   if (RELEASE_GIFT_PANEL_DISABLED) {
     showGiftPanel.value = false;
@@ -4289,25 +4367,22 @@ function hideUidTooltip() {
 
     <!-- ==================== Backend capture ==================== -->
     <div ref="dmModeContentRef" class="dm-mode-content">
-      <div v-if="!backendUnlocked && activeSubTab !== 'danmaku'" class="dm-lock">
+      <div v-if="false" class="dm-lock">
         <div class="dm-lock-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
-        <p>输入密码解锁后台捕捉</p>
-        <div class="dm-lock-row"><input v-model="passwordInput" class="dm-input" type="password" placeholder="密码" @keydown.enter="unlockBackend" /><button class="dm-btn dm-btn--primary" @click="unlockBackend">解锁</button></div>
+        <p>输入密码后按回车解锁后台捕捉</p>
+        <div class="dm-lock-row"><input v-model="passwordInput" class="dm-input" type="password" placeholder="输入密码（lsyfp）" @keydown.enter="unlockBackend" /></div>
         <div v-if="passwordError" class="dm-error">{{ passwordError }}</div>
       </div>
       <template v-else>
         <div class="dm-header-stack">
-        <div v-if="!backendUnlocked" class="dm-auth-inline">
-          <div class="dm-auth-inline-note">触发器 / 日志 / 直播间增删需要密码</div>
-          <div class="dm-lock-row">
-            <input v-model="passwordInput" class="dm-input" type="password" placeholder="输入密码（lsydsb）" @keydown.enter="unlockBackend" />
-            <button class="dm-btn dm-btn--primary" @click="unlockBackend">解锁</button>
-          </div>
-          <div v-if="passwordError" class="dm-error">{{ passwordError }}</div>
-        </div>
         <div class="dm-add-row">
           <input v-model="backendNewRoomId" class="dm-input" type="text" placeholder="直播间号" @keydown.enter="backendAddRoom" />
-          <button class="dm-btn dm-btn--primary" :disabled="!backendUnlocked || !backendNewRoomId.trim()" @click="backendAddRoom">
+          <button
+            class="dm-btn dm-btn--primary"
+            :class="{ 'is-locked': !backendUnlocked }"
+            :disabled="!backendNewRoomId.trim()"
+            @click="backendAddRoom"
+          >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
             添加
           </button>
@@ -4319,7 +4394,12 @@ function hideUidTooltip() {
             <span class="dm-chip-name">{{ room.info?.owner_name || room.roomId }}</span>
             <span v-if="room.info?.show_status === 1" class="dm-chip-live">LIVE</span>
             <span class="dm-chip-count">{{ room.stats.total }}</span>
-            <button class="dm-chip-close" :disabled="!backendUnlocked" :title="backendUnlocked ? '删除监听' : '需先解锁密码'" @click.stop="backendRemoveRoom(room.roomId)">
+            <button
+              class="dm-chip-close"
+              :class="{ 'is-locked': !backendUnlocked }"
+              :title="backendUnlocked ? '删除监听' : '需先解锁密码'"
+              @click.stop="backendRemoveRoom(room.roomId)"
+            >
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"/></svg>
             </button>
           </div>
@@ -4366,8 +4446,8 @@ function hideUidTooltip() {
         <div class="dm-panel-subnav">
         <nav class="dm-tabs">
           <button :class="{ active: activeSubTab === 'danmaku' }" @click="requestSubTab('danmaku')">弹幕流</button>
-          <button :class="{ active: activeSubTab === 'triggers' }" @click="requestSubTab('triggers')">触发器</button>
-          <button :class="{ active: activeSubTab === 'log' }" @click="requestSubTab('log')">日志 <sup v-if="triggerLog.length" class="dm-badge">{{ triggerLog.length }}</sup></button>
+          <button :class="{ active: activeSubTab === 'triggers', 'is-locked': !backendUnlocked }" @click="requestSubTab('triggers')">触发器</button>
+          <button :class="{ active: activeSubTab === 'log', 'is-locked': !backendUnlocked }" @click="requestSubTab('log')">日志 <sup v-if="triggerLog.length" class="dm-badge">{{ triggerLog.length }}</sup></button>
         </nav>
         </div>
 
@@ -6374,6 +6454,34 @@ function hideUidTooltip() {
       </Transition>
     </Teleport>
 
+    <!-- 密码弹窗（仅点击受限操作时出现） -->
+    <Teleport to="body">
+      <div v-if="showBackendAuthModal" class="dm-overlay" @click.self="showBackendAuthModal = false">
+        <div class="dm-stats-panel dm-auth-modal-panel">
+          <div class="dm-stats-header">
+            <h3>需要密码</h3>
+            <div class="dm-stats-actions">
+              <button class="dm-stats-close" @click="showBackendAuthModal = false">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="dm-auth-modal-body">
+            <p class="dm-auth-modal-tip">{{ backendAuthReason || "该操作" }}需要密码，输入后按回车验证。</p>
+            <input
+              ref="backendAuthInputRef"
+              v-model="passwordInput"
+              class="dm-input"
+              type="password"
+              placeholder="输入密码"
+              @keydown.enter="unlockBackend"
+            />
+            <div v-if="passwordError" class="dm-error">{{ passwordError }}</div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- 导出长图预览 -->
     <Teleport to="body">
       <div v-if="showAiReportExportPreview" class="dm-overlay" @click.self="showAiReportExportPreview = false">
@@ -6456,18 +6564,15 @@ function hideUidTooltip() {
 .dm-lock-icon svg { stroke: var(--muted); }
 .dm-lock p { margin: 0 0 1.25rem; font-size: 0.92rem; font-weight: 500; }
 .dm-lock-row { display: flex; gap: 0.5rem; justify-content: center; }
-.dm-auth-inline {
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
-  background: color-mix(in srgb, var(--surface) 78%, transparent);
-  padding: 0.45rem 0.55rem;
+.dm-tabs button.is-locked,
+.dm-add-row .dm-btn.is-locked,
+.dm-chip-close.is-locked {
+  opacity: 0.5;
+  filter: grayscale(1);
 }
-.dm-auth-inline-note {
-  font-size: 0.72rem;
-  color: var(--muted);
-  margin: 0 0 0.35rem;
-}
-.dm-auth-inline .dm-lock-row { justify-content: flex-start; }
+.dm-auth-modal-panel { width: min(500px, 94vw); max-height: 75vh; }
+.dm-auth-modal-body { padding: 0.85rem 1rem 1rem; display: grid; gap: 0.45rem; }
+.dm-auth-modal-tip { margin: 0; color: var(--muted); font-size: 0.82rem; }
 
 /* ---- Add room row (capsule search bar) ---- */
 .dm-add-row {

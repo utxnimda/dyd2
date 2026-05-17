@@ -50,7 +50,7 @@ function buildChatmsgDanmaku(msg) {
 /*  Password configuration                                           */
 /* ------------------------------------------------------------------ */
 
-const BACKEND_PASSWORD = "lsyysl";
+const BACKEND_PASSWORD = "lsyfp";
 
 /* ------------------------------------------------------------------ */
 /*  Backend rooms persistence                                         */
