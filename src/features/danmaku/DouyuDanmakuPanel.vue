@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, shallowRef, computed, reactive, onMounted, onUnmounted, nextTick, watch } from "vue";
+import html2canvas from "html2canvas";
+import { toCanvas as htmlToImageToCanvas } from "html-to-image";
 import DmToolbarMenuSelect from "./DmToolbarMenuSelect.vue";
 
 /* ------------------------------------------------------------------ */
@@ -2028,6 +2030,14 @@ const aiReportPanelLoading = ref(false);
 const aiReportEntries = ref<AiReportEntry[]>([]);
 const aiReportSelectedId = ref<string | null>(null);
 const aiReportDeleteBusy = ref(false);
+const aiReportExportBusy = ref(false);
+const aiReportCaptureRootRef = ref<HTMLElement | null>(null);
+const showAiReportExportPreview = ref(false);
+const aiReportExportPreviewUrl = ref("");
+const aiReportExportPreviewWhiteBgUrl = ref("");
+const aiReportExportPreviewFilename = ref("");
+const aiReportExportPreviewLikelyBlack = ref(false);
+const aiReportExportUsedStableFallback = ref(false);
 const selectedAiReport = computed(() => aiReportEntries.value.find((e) => e.id === aiReportSelectedId.value) || null);
 
 /** 侧栏便签日期解析（与服务端 periodLabel 对齐） */
@@ -2293,6 +2303,16 @@ type AiReportBodyBlock =
       quote: string;
       reason: string;
     };
+
+interface AiReportRenderSnapshot {
+  entry: AiReportEntry;
+  kindLabel: string;
+  roomId: string;
+  streamerName: string;
+  generatedAt: string;
+  overviewRows: Array<{ label: string; hint: string; value: string }>;
+  blocks: AiReportBodyBlock[];
+}
 
 function isAiReportSectionHeading(line: string): boolean {
   const t = line.trim();
@@ -2728,6 +2748,21 @@ async function unlockBackend() {
 
 function getBackendPw(): string { return localStorage.getItem("dm_backend_pw") || ""; }
 
+function requireBackendUnlock(reason: string): boolean {
+  if (backendUnlocked.value && getBackendPw().trim()) return true;
+  passwordError.value = `${reason}需要密码（lsydsb）`;
+  return false;
+}
+
+function requestSubTab(next: SubTab): void {
+  if (next === "danmaku") {
+    activeSubTab.value = "danmaku";
+    return;
+  }
+  if (!requireBackendUnlock(next === "triggers" ? "触发器" : "日志")) return;
+  activeSubTab.value = next;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Room info & recent danmaku                                        */
 /* ------------------------------------------------------------------ */
@@ -2903,6 +2938,605 @@ function aiReportKindLabel(kind: string): string {
   return kind === "weekly" ? "周报" : "日报";
 }
 
+function sanitizeAiReportFilenamePart(raw: string): string {
+  return String(raw || "")
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+}
+
+function buildAiReportLongImageFilename(entries: AiReportEntry[]): string {
+  const first = entries[0];
+  const room = sanitizeAiReportFilenamePart(String(first?.roomId || aiReportPanelRoomId.value || "room"));
+  const kinds = new Set(entries.map((x) => x.kind));
+  const kind =
+    kinds.size >= 2
+      ? "日报周报"
+      : (first?.kind === "weekly" ? "周报" : "日报");
+  const period = sanitizeAiReportFilenamePart(String(first?.periodLabel || "").replace(/\s*[~～]\s*/g, "-"));
+  const stamp = new Date(first?.createdAt || Date.now()).toISOString().replace(/[:.]/g, "-");
+  const core = [room, kind, period].filter(Boolean).join("_");
+  return `${core || "ai-report"}_${stamp}.png`;
+}
+
+function likelyBlackCanvas(canvas: HTMLCanvasElement): boolean {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return false;
+  const w = canvas.width;
+  const h = canvas.height;
+  if (w <= 0 || h <= 0) return true;
+  const samples = 18;
+  let dark = 0;
+  let minLum = Number.POSITIVE_INFINITY;
+  let maxLum = Number.NEGATIVE_INFINITY;
+  for (let iy = 0; iy < samples; iy++) {
+    for (let ix = 0; ix < samples; ix++) {
+      const x = Math.min(w - 1, Math.floor(((ix + 0.5) / samples) * w));
+      const y = Math.min(h - 1, Math.floor(((iy + 0.5) / samples) * h));
+      const px = ctx.getImageData(x, y, 1, 1).data;
+      const lum = (px[0] * 0.299 + px[1] * 0.587 + px[2] * 0.114) * (px[3] / 255);
+      minLum = Math.min(minLum, lum);
+      maxLum = Math.max(maxLum, lum);
+      if (lum < 9) dark++;
+    }
+  }
+  const total = samples * samples;
+  return dark / total > 0.97 && maxLum < 12 && maxLum - minLum < 2;
+}
+
+function likelyWhiteCanvas(canvas: HTMLCanvasElement): boolean {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return false;
+  const w = canvas.width;
+  const h = canvas.height;
+  if (w <= 0 || h <= 0) return true;
+  const samples = 18;
+  let white = 0;
+  let minLum = Number.POSITIVE_INFINITY;
+  let maxLum = Number.NEGATIVE_INFINITY;
+  for (let iy = 0; iy < samples; iy++) {
+    for (let ix = 0; ix < samples; ix++) {
+      const x = Math.min(w - 1, Math.floor(((ix + 0.5) / samples) * w));
+      const y = Math.min(h - 1, Math.floor(((iy + 0.5) / samples) * h));
+      const px = ctx.getImageData(x, y, 1, 1).data;
+      const lum = (px[0] * 0.299 + px[1] * 0.587 + px[2] * 0.114) * (px[3] / 255);
+      minLum = Math.min(minLum, lum);
+      maxLum = Math.max(maxLum, lum);
+      if (lum > 246) white++;
+    }
+  }
+  const total = samples * samples;
+  return white / total > 0.98 && minLum > 240 && maxLum - minLum < 3;
+}
+
+function likelyBlankCanvas(canvas: HTMLCanvasElement): boolean {
+  return likelyBlackCanvas(canvas) || likelyWhiteCanvas(canvas);
+}
+
+/** 一致版常见坏图：只剩左侧窄条、右半黑屏。命中则视为无效截图。 */
+function likelyMalformedFidelityCanvas(canvas: HTMLCanvasElement): boolean {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return false;
+  const w = canvas.width;
+  const h = canvas.height;
+  if (w <= 0 || h <= 0) return true;
+
+  const sampleCols = 48;
+  const sampleRows = 32;
+  const colHasContent = new Array(sampleCols).fill(false);
+  const rowStep = Math.max(1, Math.floor(h / sampleRows));
+
+  for (let cx = 0; cx < sampleCols; cx++) {
+    const x = Math.min(w - 1, Math.floor(((cx + 0.5) / sampleCols) * w));
+    for (let y = 0; y < h; y += rowStep) {
+      const px = ctx.getImageData(x, y, 1, 1).data;
+      const lum = (px[0] * 0.299 + px[1] * 0.587 + px[2] * 0.114) * (px[3] / 255);
+      // 把“不是接近纯黑”的像素视作内容
+      if (lum > 18) {
+        colHasContent[cx] = true;
+        break;
+      }
+    }
+  }
+
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < sampleCols; i++) {
+    if (!colHasContent[i]) continue;
+    if (first < 0) first = i;
+    last = i;
+  }
+  if (first < 0 || last < 0) return true;
+  const spanRatio = (last - first + 1) / sampleCols;
+
+  // 右半区几乎全黑，也判坏图（用户反馈截图样式）
+  let rightDark = 0;
+  let rightTotal = 0;
+  for (let cx = Math.floor(sampleCols / 2); cx < sampleCols; cx++) {
+    const x = Math.min(w - 1, Math.floor(((cx + 0.5) / sampleCols) * w));
+    for (let y = 0; y < h; y += rowStep) {
+      const px = ctx.getImageData(x, y, 1, 1).data;
+      const lum = (px[0] * 0.299 + px[1] * 0.587 + px[2] * 0.114) * (px[3] / 255);
+      if (lum < 12) rightDark++;
+      rightTotal++;
+    }
+  }
+  const rightDarkRatio = rightTotal > 0 ? rightDark / rightTotal : 0;
+
+  return spanRatio < 0.72 || rightDarkRatio > 0.95;
+}
+
+function cloneAiReportBlock(block: AiReportBodyBlock): AiReportBodyBlock {
+  if (block.type === "list") return { type: "list", items: [...block.items] };
+  if (block.type === "section" || block.type === "paragraph") return { type: block.type, lines: [...block.lines] };
+  return {
+    type: "mentality-grade",
+    score: block.score,
+    rubric: block.rubric,
+    quote: block.quote,
+    reason: block.reason,
+  };
+}
+
+function wrapCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const src = String(text || "").trim();
+  if (!src) return [""];
+  const lines: string[] = [];
+  let buf = "";
+  for (const ch of src) {
+    const next = buf + ch;
+    if (ctx.measureText(next).width > maxWidth && buf) {
+      lines.push(buf);
+      buf = ch;
+    } else {
+      buf = next;
+    }
+  }
+  if (buf) lines.push(buf);
+  return lines.length ? lines : [src];
+}
+
+function estimateSnapshotHeight(ctx: CanvasRenderingContext2D, snapshot: AiReportRenderSnapshot, contentWidth: number): number {
+  let h = 250; // 黑板头区
+  h += 22; // overview 标题与留白
+  ctx.font = "500 22px 'Microsoft YaHei UI', sans-serif";
+  for (const row of snapshot.overviewRows) {
+    const lines = wrapCanvasText(ctx, `${row.label}：${row.value}`, contentWidth - 44);
+    h += lines.length * 34 + 4;
+  }
+  h += 26;
+  ctx.font = "500 20px 'Microsoft YaHei UI', sans-serif";
+  for (const blk of snapshot.blocks) {
+    if (blk.type === "section") {
+      const lines = wrapCanvasText(ctx, blk.lines.join(""), contentWidth - 34);
+      h += lines.length * 36 + 14;
+      continue;
+    }
+    if (blk.type === "list") {
+      ctx.font = "400 18px 'Microsoft YaHei UI', sans-serif";
+      for (const it of blk.items) {
+        const lines = wrapCanvasText(ctx, `• ${it}`, contentWidth - 34);
+        h += lines.length * 31 + 3;
+      }
+      h += 8;
+      continue;
+    }
+    if (blk.type === "mentality-grade") {
+      h += 130;
+      continue;
+    }
+    ctx.font = "400 19px 'Microsoft YaHei UI', sans-serif";
+    const lines = wrapCanvasText(ctx, blk.lines.join(""), contentWidth - 18);
+    h += lines.length * 33 + 8;
+  }
+  return h + 30;
+}
+
+function renderSnapshotsToCanvas(snapshots: AiReportRenderSnapshot[]): HTMLCanvasElement {
+  const width = 1120;
+  const side = 36;
+  const contentWidth = width - side * 2;
+  const measureCanvas = document.createElement("canvas");
+  const mctx = measureCanvas.getContext("2d");
+  if (!mctx) return measureCanvas;
+
+  const parts = snapshots.map((s) => estimateSnapshotHeight(mctx, s, contentWidth));
+  const gap = 26;
+  const height = parts.reduce((sum, x) => sum + x, 0) + gap * Math.max(0, parts.length - 1);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = Math.max(1, height);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+
+  ctx.fillStyle = "#f5f0e8";
+  ctx.fillRect(0, 0, width, canvas.height);
+
+  let y = 0;
+  for (let i = 0; i < snapshots.length; i++) {
+    const s = snapshots[i];
+    const partH = parts[i];
+    const top = y;
+
+    // 黑板头
+    ctx.fillStyle = "#1b4436";
+    ctx.fillRect(side, top + 8, contentWidth, 178);
+    ctx.strokeStyle = "#4a3428";
+    ctx.lineWidth = 8;
+    ctx.strokeRect(side, top + 8, contentWidth, 178);
+
+    ctx.fillStyle = "#e7f3e9";
+    ctx.font = "700 34px 'Microsoft YaHei UI', sans-serif";
+    ctx.fillText(`${s.kindLabel} · 房间 ${s.roomId}`, side + 26, top + 66);
+    ctx.font = "500 24px 'Microsoft YaHei UI', sans-serif";
+    ctx.fillText(s.streamerName || "主播", side + 26, top + 108);
+    ctx.font = "400 18px 'Microsoft YaHei UI', sans-serif";
+    ctx.fillText(`生成 ${s.generatedAt || "-"}`, side + 26, top + 140);
+
+    let cy = top + 212;
+
+    ctx.fillStyle = "#292522";
+    ctx.font = "700 24px 'Microsoft YaHei UI', sans-serif";
+    ctx.fillText("数据概览", side, cy);
+    cy += 24;
+
+    ctx.font = "500 22px 'Microsoft YaHei UI', sans-serif";
+    for (const row of s.overviewRows) {
+      const lines = wrapCanvasText(ctx, `${row.label}：${row.value}`, contentWidth - 44);
+      for (const ln of lines) {
+        ctx.fillStyle = "#332c27";
+        ctx.fillText(ln, side + 14, cy + 26);
+        cy += 34;
+      }
+      cy += 4;
+    }
+
+    cy += 12;
+    for (const blk of s.blocks) {
+      if (blk.type === "section") {
+        const lines = wrapCanvasText(ctx, blk.lines.join(""), contentWidth - 34);
+        ctx.fillStyle = "#3a2c6a";
+        ctx.fillRect(side, cy + 6, 5, Math.max(30, lines.length * 34));
+        ctx.fillStyle = "#2f2840";
+        ctx.font = "700 22px 'Microsoft YaHei UI', sans-serif";
+        for (const ln of lines) {
+          ctx.fillText(ln, side + 16, cy + 28);
+          cy += 36;
+        }
+        cy += 8;
+        continue;
+      }
+      if (blk.type === "list") {
+        ctx.font = "400 20px 'Microsoft YaHei UI', sans-serif";
+        ctx.fillStyle = "#2d2926";
+        for (const it of blk.items) {
+          const lines = wrapCanvasText(ctx, `• ${it}`, contentWidth - 28);
+          for (const ln of lines) {
+            ctx.fillText(ln, side + 10, cy + 26);
+            cy += 31;
+          }
+          cy += 3;
+        }
+        cy += 6;
+        continue;
+      }
+      if (blk.type === "mentality-grade") {
+        ctx.fillStyle = "#ece4d6";
+        ctx.fillRect(side + 6, cy + 6, contentWidth - 12, 112);
+        ctx.strokeStyle = "#c8b79e";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(side + 6, cy + 6, contentWidth - 12, 112);
+        ctx.fillStyle = "#7a1f1f";
+        ctx.font = "700 30px 'Microsoft YaHei UI', sans-serif";
+        ctx.fillText(`心态分：${blk.score}`, side + 24, cy + 54);
+        ctx.fillStyle = "#3b342d";
+        ctx.font = "400 18px 'Microsoft YaHei UI', sans-serif";
+        const reason = [blk.rubric, blk.reason].filter(Boolean).join("；");
+        const lines = wrapCanvasText(ctx, reason || "—", contentWidth - 40).slice(0, 2);
+        for (const ln of lines) {
+          ctx.fillText(ln, side + 24, cy + 84);
+          cy += 25;
+        }
+        cy += 54;
+        continue;
+      }
+      ctx.font = "400 21px 'Microsoft YaHei UI', sans-serif";
+      ctx.fillStyle = "#2a2520";
+      const lines = wrapCanvasText(ctx, blk.lines.join(""), contentWidth - 18);
+      for (const ln of lines) {
+        ctx.fillText(ln, side, cy + 28);
+        cy += 33;
+      }
+      cy += 7;
+    }
+
+    y = top + partH + gap;
+  }
+  return canvas;
+}
+
+function buildCanvasWithSolidBackground(source: HTMLCanvasElement, color = "#f5f0e8"): HTMLCanvasElement {
+  const out = document.createElement("canvas");
+  out.width = source.width;
+  out.height = source.height;
+  const ctx = out.getContext("2d");
+  if (!ctx) return source;
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(source, 0, 0);
+  return out;
+}
+
+function triggerPngDownload(dataUrl: string, filename: string): void {
+  const a = document.createElement("a");
+  a.download = filename;
+  a.href = dataUrl;
+  a.click();
+}
+
+function downloadAiReportPreview(which: "normal" | "white" = "normal"): void {
+  const url = which === "white" ? aiReportExportPreviewWhiteBgUrl.value : aiReportExportPreviewUrl.value;
+  if (!url) return;
+  const base = aiReportExportPreviewFilename.value || "ai-report-export.png";
+  const filename = which === "white" ? base.replace(/\.png$/i, "-stable.png") : base;
+  triggerPngDownload(url, filename);
+}
+
+async function captureAiReportLongCanvasFromSource(sourceEl: HTMLElement): Promise<HTMLCanvasElement> {
+  const styleSnapshot = new Map<HTMLElement, string | null>();
+  const imageSnapshot: Array<{
+    el: HTMLImageElement;
+    visibility: string;
+    crossOrigin: string | null;
+    referrerPolicy: string | null;
+  }> = [];
+  const rememberStyle = (el: HTMLElement): void => {
+    if (!styleSnapshot.has(el)) styleSnapshot.set(el, el.getAttribute("style"));
+  };
+  const setStyle = (el: HTMLElement | null, key: string, value: string): void => {
+    if (!el) return;
+    rememberStyle(el);
+    el.style.setProperty(key, value);
+  };
+  try {
+    const normalizeExportImages = (root: HTMLElement): void => {
+      const imgs = Array.from(root.querySelectorAll("img"));
+      for (const img of imgs) {
+        imageSnapshot.push({
+          el: img,
+          visibility: img.style.visibility,
+          crossOrigin: img.getAttribute("crossorigin"),
+          referrerPolicy: img.getAttribute("referrerpolicy"),
+        });
+        const rawSrc = String(img.getAttribute("src") || "").trim();
+        if (!rawSrc) continue;
+        // 保留头像等图片：优先尝试跨域匿名加载，避免导出时黑板头像丢失。
+        try {
+          const u = new URL(rawSrc, window.location.href);
+          if (u.origin !== window.location.origin && !rawSrc.startsWith("data:")) {
+            img.crossOrigin = "anonymous";
+            img.referrerPolicy = "no-referrer";
+            continue;
+          }
+        } catch {
+          // URL 解析异常时不隐藏，尽量保持可见；交由渲染器自行处理。
+          continue;
+        }
+        img.crossOrigin = "anonymous";
+        img.referrerPolicy = "no-referrer";
+      }
+    };
+    const renderSubpageNode = async (renderWidth: number, renderHeight: number, scale: number, backgroundColor: string | null): Promise<HTMLCanvasElement> =>
+      await html2canvas(sourceEl, {
+        foreignObjectRendering: true,
+        useCORS: true,
+        allowTaint: false,
+        backgroundColor,
+        logging: false,
+        scale,
+        imageTimeout: 15000,
+        width: renderWidth,
+        height: renderHeight,
+        windowWidth: renderWidth,
+        windowHeight: renderHeight,
+        scrollX: 0,
+        scrollY: 0,
+      });
+    const rect = sourceEl.getBoundingClientRect();
+    const renderWidth = Math.max(760, Math.ceil(rect.width || sourceEl.offsetWidth || 920));
+    const article = sourceEl.querySelector<HTMLElement>(".dm-ai-report-article");
+    const sheet = sourceEl.querySelector<HTMLElement>(".dm-ai-report-sheet");
+    const inner = sourceEl.querySelector<HTMLElement>(".dm-ai-report-sheet-inner");
+    const layout = sourceEl.closest<HTMLElement>(".dm-ai-report-layout");
+    const panel = sourceEl.closest<HTMLElement>(".dm-ai-report-panel");
+    const overlay = sourceEl.closest<HTMLElement>(".dm-overlay");
+
+    setStyle(sourceEl, "width", `${renderWidth}px`);
+    setStyle(sourceEl, "max-width", "none");
+    setStyle(sourceEl, "height", "auto");
+    setStyle(sourceEl, "min-height", "auto");
+    setStyle(sourceEl, "overflow", "visible");
+    setStyle(sourceEl, "flex", "none");
+
+    setStyle(article, "height", "auto");
+    setStyle(article, "min-height", "auto");
+    setStyle(article, "overflow", "visible");
+    setStyle(article, "flex", "none");
+
+    setStyle(sheet, "height", "auto");
+    setStyle(sheet, "min-height", "auto");
+    setStyle(sheet, "max-height", "none");
+    setStyle(sheet, "overflow", "visible");
+    setStyle(sheet, "flex", "none");
+    if (sheet) sheet.scrollTop = 0;
+
+    setStyle(inner, "max-width", "none");
+    setStyle(layout, "overflow", "visible");
+    setStyle(layout, "max-height", "none");
+    setStyle(panel, "max-height", "none");
+    setStyle(overlay, "overflow", "visible");
+
+    normalizeExportImages(sourceEl);
+    if (document.fonts?.ready) await document.fonts.ready;
+    await nextTick();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    const renderHeight = Math.max(
+      sourceEl.scrollHeight,
+      (sheet?.scrollHeight ?? 0) + (sourceEl.querySelector<HTMLElement>(".dm-ai-report-headline-board")?.scrollHeight ?? 0),
+      1,
+    );
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const maxArea = 110_000_000; // 控制像素面积，降低超长图导出崩溃概率
+    const idealScale = Math.min(2, dpr);
+    const safeScale = Math.min(idealScale, Math.sqrt(maxArea / (renderWidth * renderHeight)));
+    const finalScale = Number.isFinite(safeScale) ? Math.max(0.8, safeScale) : 1;
+
+    try {
+      const fidelity = await htmlToImageToCanvas(sourceEl, {
+        cacheBust: true,
+        backgroundColor: undefined,
+        pixelRatio: Math.max(1, Math.min(2, finalScale)),
+        width: renderWidth,
+        height: renderHeight,
+        canvasWidth: Math.round(renderWidth * Math.max(1, Math.min(2, finalScale))),
+        canvasHeight: Math.round(renderHeight * Math.max(1, Math.min(2, finalScale))),
+        style: {
+          width: `${renderWidth}px`,
+          height: `${renderHeight}px`,
+        },
+      });
+      if (!likelyBlankCanvas(fidelity) && !likelyMalformedFidelityCanvas(fidelity)) return fidelity;
+      if (import.meta.env.DEV) console.warn("[danmaku] html-to-image 一致版命中坏图检测，回退 html2canvas");
+    } catch (err) {
+      if (import.meta.env.DEV) console.warn("[danmaku] html-to-image 一致版失败，回退 html2canvas", err);
+    }
+
+    try {
+      const fallback = await renderSubpageNode(renderWidth, renderHeight, finalScale, null);
+      if (!likelyBlankCanvas(fallback) && !likelyMalformedFidelityCanvas(fallback)) return fallback;
+      if (import.meta.env.DEV) console.warn("[danmaku] html2canvas 一致版命中坏图检测，回退低倍率");
+    } catch (err) {
+      if (import.meta.env.DEV) console.warn("[danmaku] html2canvas 一致版失败，回退低倍率", err);
+    }
+
+    const lowScaleFallback = await renderSubpageNode(renderWidth, renderHeight, Math.max(0.7, Math.min(1, finalScale)), "#101814");
+    return lowScaleFallback;
+  } finally {
+    for (const snap of imageSnapshot) {
+      snap.el.style.visibility = snap.visibility;
+      if (snap.crossOrigin == null) snap.el.removeAttribute("crossorigin");
+      else snap.el.setAttribute("crossorigin", snap.crossOrigin);
+      if (snap.referrerPolicy == null) snap.el.removeAttribute("referrerpolicy");
+      else snap.el.setAttribute("referrerpolicy", snap.referrerPolicy);
+    }
+    for (const [el, rawStyle] of Array.from(styleSnapshot.entries()).reverse()) {
+      if (rawStyle == null) el.removeAttribute("style");
+      else el.setAttribute("style", rawStyle);
+    }
+  }
+}
+
+async function exportAiReportLongImage(): Promise<void> {
+  if (!selectedAiReport.value || aiReportExportBusy.value) return;
+  const sourceEl = aiReportCaptureRootRef.value;
+  if (!sourceEl) {
+    alert("未找到可导出的报告区域");
+    return;
+  }
+  aiReportExportBusy.value = true;
+  const prevSelectedId = aiReportSelectedId.value;
+  try {
+    const targetIds: string[] = [];
+    const selectedId = selectedAiReport.value?.id || prevSelectedId || null;
+    if (selectedId) targetIds.push(selectedId);
+
+    const captures: { entry: AiReportEntry; canvas: HTMLCanvasElement }[] = [];
+    const snapshots: AiReportRenderSnapshot[] = [];
+    for (const id of targetIds) {
+      aiReportSelectedId.value = id;
+      await nextTick();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const entry = aiReportEntries.value.find((x) => x.id === id);
+      if (!entry) continue;
+      snapshots.push({
+        entry,
+        kindLabel: aiReportKindLabel(entry.kind),
+        roomId: String(entry.roomId || aiReportPanelRoomId.value || ""),
+        streamerName: aiReportMastheadStreamerName.value,
+        generatedAt: aiReportMastheadGeneratedAt.value,
+        overviewRows: selectedAiReportOverviewRows.value.map((r) => ({ ...r })),
+        blocks: selectedAiReportBlocksAugmented.value.map(cloneAiReportBlock),
+      });
+      try {
+        const cap = await captureAiReportLongCanvasFromSource(sourceEl);
+        captures.push({ entry, canvas: cap });
+      } catch (err) {
+        if (import.meta.env.DEV) console.warn("[danmaku] 高保真截图失败，稍后使用稳定版兜底", err);
+      }
+    }
+    if (!snapshots.length) {
+      alert("没有可导出的日报或周报");
+      return;
+    }
+
+    const mergeCapturedCanvases = (items: { canvas: HTMLCanvasElement }[]): HTMLCanvasElement => {
+      if (items.length === 1) return items[0].canvas;
+      const gap = 22;
+      const width = items.reduce((m, c) => Math.max(m, c.canvas.width), 0);
+      const height = items.reduce((sum, c) => sum + c.canvas.height, 0) + gap * (items.length - 1);
+      const merged = document.createElement("canvas");
+      merged.width = width;
+      merged.height = height;
+      const ctx = merged.getContext("2d");
+      if (!ctx) return items[0].canvas;
+      let y = 0;
+      for (const { canvas: part } of items) {
+        ctx.drawImage(part, 0, y);
+        y += part.height + gap;
+      }
+      return merged;
+    };
+
+    const stableCanvas = renderSnapshotsToCanvas(snapshots);
+    const fidelityCanvas =
+      captures.length === snapshots.length && captures.length > 0
+        ? mergeCapturedCanvases(captures)
+        : null;
+
+    const useFidelity = !!(
+      fidelityCanvas
+      && !likelyBlankCanvas(fidelityCanvas)
+      && !likelyMalformedFidelityCanvas(fidelityCanvas)
+    );
+    const finalCanvas = useFidelity ? fidelityCanvas! : stableCanvas;
+    const secondaryCanvas = useFidelity ? stableCanvas : buildCanvasWithSolidBackground(stableCanvas, "#f5f0e8");
+
+    const filename = buildAiReportLongImageFilename(snapshots.map((x) => x.entry));
+    const finalNormalUrl = finalCanvas.toDataURL("image/png");
+    const finalWhiteBgUrl = secondaryCanvas.toDataURL("image/png");
+
+    aiReportExportPreviewFilename.value = filename;
+    aiReportExportPreviewUrl.value = finalNormalUrl;
+    aiReportExportPreviewWhiteBgUrl.value = finalWhiteBgUrl;
+    aiReportExportPreviewLikelyBlack.value = likelyBlackCanvas(finalCanvas);
+    aiReportExportUsedStableFallback.value = !useFidelity;
+    showAiReportExportPreview.value = true;
+
+    // 按用户偏好：仅展示预览，不自动下载。
+  } catch (err) {
+    if (import.meta.env.DEV) console.warn("[danmaku] 导出 AI 报告长图失败", err);
+    alert("导出失败，请重试");
+  } finally {
+    aiReportSelectedId.value = prevSelectedId;
+    aiReportExportBusy.value = false;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Backend capture                                                   */
 /* ------------------------------------------------------------------ */
@@ -3024,6 +3658,7 @@ function connectSSE() {
 }
 
 async function backendAddRoom() {
+  if (!requireBackendUnlock("添加直播间监听")) return;
   const rid = backendNewRoomId.value.trim(); if (!rid) return;
   backendError.value = "";
   try {
@@ -3040,6 +3675,7 @@ async function backendAddRoom() {
 }
 
 async function backendRemoveRoom(rid: string) {
+  if (!requireBackendUnlock("删除直播间监听")) return;
   try { await fetch(`${API}/rooms/${encodeURIComponent(rid)}`, { method: "DELETE", headers: { "X-Password": getBackendPw() } }); } catch { /* */ }
   // Immediately remove from local list and switch selection
   backendRooms.value = backendRooms.value.filter((r) => !sameDouyuRoomId(r.roomId, rid));
@@ -3653,7 +4289,7 @@ function hideUidTooltip() {
 
     <!-- ==================== Backend capture ==================== -->
     <div ref="dmModeContentRef" class="dm-mode-content">
-      <div v-if="!backendUnlocked" class="dm-lock">
+      <div v-if="!backendUnlocked && activeSubTab !== 'danmaku'" class="dm-lock">
         <div class="dm-lock-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
         <p>输入密码解锁后台捕捉</p>
         <div class="dm-lock-row"><input v-model="passwordInput" class="dm-input" type="password" placeholder="密码" @keydown.enter="unlockBackend" /><button class="dm-btn dm-btn--primary" @click="unlockBackend">解锁</button></div>
@@ -3661,9 +4297,17 @@ function hideUidTooltip() {
       </div>
       <template v-else>
         <div class="dm-header-stack">
+        <div v-if="!backendUnlocked" class="dm-auth-inline">
+          <div class="dm-auth-inline-note">触发器 / 日志 / 直播间增删需要密码</div>
+          <div class="dm-lock-row">
+            <input v-model="passwordInput" class="dm-input" type="password" placeholder="输入密码（lsydsb）" @keydown.enter="unlockBackend" />
+            <button class="dm-btn dm-btn--primary" @click="unlockBackend">解锁</button>
+          </div>
+          <div v-if="passwordError" class="dm-error">{{ passwordError }}</div>
+        </div>
         <div class="dm-add-row">
           <input v-model="backendNewRoomId" class="dm-input" type="text" placeholder="直播间号" @keydown.enter="backendAddRoom" />
-          <button class="dm-btn dm-btn--primary" :disabled="!backendNewRoomId.trim()" @click="backendAddRoom">
+          <button class="dm-btn dm-btn--primary" :disabled="!backendUnlocked || !backendNewRoomId.trim()" @click="backendAddRoom">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
             添加
           </button>
@@ -3675,7 +4319,7 @@ function hideUidTooltip() {
             <span class="dm-chip-name">{{ room.info?.owner_name || room.roomId }}</span>
             <span v-if="room.info?.show_status === 1" class="dm-chip-live">LIVE</span>
             <span class="dm-chip-count">{{ room.stats.total }}</span>
-            <button class="dm-chip-close" @click.stop="backendRemoveRoom(room.roomId)">
+            <button class="dm-chip-close" :disabled="!backendUnlocked" :title="backendUnlocked ? '删除监听' : '需先解锁密码'" @click.stop="backendRemoveRoom(room.roomId)">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"/></svg>
             </button>
           </div>
@@ -3721,9 +4365,9 @@ function hideUidTooltip() {
 
         <div class="dm-panel-subnav">
         <nav class="dm-tabs">
-          <button :class="{ active: activeSubTab === 'danmaku' }" @click="activeSubTab = 'danmaku'">弹幕流</button>
-          <button :class="{ active: activeSubTab === 'triggers' }" @click="activeSubTab = 'triggers'">触发器</button>
-          <button :class="{ active: activeSubTab === 'log' }" @click="activeSubTab = 'log'">日志 <sup v-if="triggerLog.length" class="dm-badge">{{ triggerLog.length }}</sup></button>
+          <button :class="{ active: activeSubTab === 'danmaku' }" @click="requestSubTab('danmaku')">弹幕流</button>
+          <button :class="{ active: activeSubTab === 'triggers' }" @click="requestSubTab('triggers')">触发器</button>
+          <button :class="{ active: activeSubTab === 'log' }" @click="requestSubTab('log')">日志 <sup v-if="triggerLog.length" class="dm-badge">{{ triggerLog.length }}</sup></button>
         </nav>
         </div>
 
@@ -5501,6 +6145,11 @@ function hideUidTooltip() {
             <div class="dm-stats-actions">
               <button
                 class="dm-btn dm-btn--ghost dm-btn--sm"
+                :disabled="!selectedAiReport || aiReportPanelLoading || aiReportExportBusy"
+                @click="exportAiReportLongImage"
+              >{{ aiReportExportBusy ? "导出中…" : "导出长图" }}</button>
+              <button
+                class="dm-btn dm-btn--ghost dm-btn--sm"
                 :disabled="!aiReportPanelRoomId"
                 @click="aiReportPanelRoomId && loadAiReports(aiReportPanelRoomId)"
               >刷新</button>
@@ -5524,6 +6173,7 @@ function hideUidTooltip() {
             <div v-if="aiReportEntries.length === 0" class="dm-empty">尚无已生成的日报或周报；可在「触发器」里配置日报/周报动作后触发。</div>
             <div v-else class="dm-ai-report-layout">
               <div
+                ref="aiReportCaptureRootRef"
                 class="dm-ai-report-detail"
                 role="tabpanel"
                 :class="selectedAiReport ? `dm-ai-report-detail--${selectedAiReport.kind}` : ''"
@@ -5723,6 +6373,42 @@ function hideUidTooltip() {
         >{{ uidTooltip.text }}</div>
       </Transition>
     </Teleport>
+
+    <!-- 导出长图预览 -->
+    <Teleport to="body">
+      <div v-if="showAiReportExportPreview" class="dm-overlay" @click.self="showAiReportExportPreview = false">
+        <div class="dm-stats-panel dm-ai-export-preview-panel">
+          <div class="dm-stats-header">
+            <h3>导出预览</h3>
+            <div class="dm-stats-actions">
+              <button class="dm-btn dm-btn--ghost dm-btn--sm" :disabled="!aiReportExportPreviewUrl" @click="downloadAiReportPreview('normal')">
+                下载一致版
+              </button>
+              <button class="dm-btn dm-btn--ghost dm-btn--sm" :disabled="!aiReportExportPreviewWhiteBgUrl" @click="downloadAiReportPreview('white')">
+                下载稳定版
+              </button>
+              <button class="dm-stats-close" @click="showAiReportExportPreview = false">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="dm-ai-export-preview-body">
+            <div class="dm-ai-export-preview-meta">
+              <span class="dm-ai-export-preview-name">{{ aiReportExportPreviewFilename }}</span>
+              <span v-if="aiReportExportUsedStableFallback" class="dm-ai-export-preview-warn">
+                当前为稳定版渲染（避免空白/黑图）。可用“下载稳定版”保存兜底稿。
+              </span>
+              <span v-else-if="aiReportExportPreviewLikelyBlack" class="dm-ai-export-preview-warn">
+                当前图像整体偏暗，可改用“下载稳定版”获取更清晰版本。
+              </span>
+            </div>
+            <div class="dm-ai-export-preview-canvas-wrap">
+              <img v-if="aiReportExportPreviewUrl" class="dm-ai-export-preview-img" :src="aiReportExportPreviewUrl" alt="导出长图预览" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </section>
 </template>
 
@@ -5770,6 +6456,18 @@ function hideUidTooltip() {
 .dm-lock-icon svg { stroke: var(--muted); }
 .dm-lock p { margin: 0 0 1.25rem; font-size: 0.92rem; font-weight: 500; }
 .dm-lock-row { display: flex; gap: 0.5rem; justify-content: center; }
+.dm-auth-inline {
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  padding: 0.45rem 0.55rem;
+}
+.dm-auth-inline-note {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin: 0 0 0.35rem;
+}
+.dm-auth-inline .dm-lock-row { justify-content: flex-start; }
 
 /* ---- Add room row (capsule search bar) ---- */
 .dm-add-row {
@@ -5859,6 +6557,7 @@ function hideUidTooltip() {
 .dm-chip-count { font-size: 0.65rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .dm-chip-close { border: none; background: transparent; color: var(--muted); cursor: pointer; padding: 0; line-height: 0; border-radius: 50%; transition: color 0.15s; }
 .dm-chip-close:hover { color: #ef4444; }
+.dm-chip-close:disabled { opacity: 0.38; cursor: not-allowed; }
 
 /* ---- Room info card (glassmorphism) ---- */
 .dm-room-card {
@@ -8561,6 +9260,44 @@ function hideUidTooltip() {
   color: var(--muted); transition: all 0.15s;
 }
 .dm-stats-close:hover { background: color-mix(in srgb, var(--text) 12%, transparent); color: var(--text); transform: scale(1.05); }
+
+.dm-ai-export-preview-panel {
+  width: min(1100px, 96vw);
+  max-height: 90vh;
+}
+.dm-ai-export-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  min-height: 0;
+}
+.dm-ai-export-preview-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.dm-ai-export-preview-name {
+  color: var(--text);
+  word-break: break-all;
+}
+.dm-ai-export-preview-warn {
+  color: #f59e0b;
+}
+.dm-ai-export-preview-canvas-wrap {
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 8px;
+  overflow: auto;
+  max-height: calc(90vh - 170px);
+  background: color-mix(in srgb, var(--surface) 85%, var(--bg));
+}
+.dm-ai-export-preview-img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
 
 .dm-ai-report-panel { width: min(980px, 96vw); max-height: 88vh; }
 .dm-ai-report-layout {

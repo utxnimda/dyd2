@@ -1,8 +1,8 @@
 {
   "name": "fmz-dashboard",
   "private": true,
-  "version": "1.1.41",
-  "fmzReleaseLabel": "v1.1.41",
+  "version": "1.1.44",
+  "fmzReleaseLabel": "v1.1.44",
   "fmzFeatures": {
     "sanguo": true,
     "sanguoUi": false,
@@ -45,6 +45,8 @@
   },
   "dependencies": {
     "axios": "^1.7.9",
+    "html-to-image": "^1.11.13",
+    "html2canvas": "^1.4.1",
     "md5": "^2.3.0",
     "phantomjs-prebuilt": "^2.1.16",
     "undici": "^8.3.0",
