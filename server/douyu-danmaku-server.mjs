@@ -945,6 +945,10 @@ async function fetchRoomInfo(roomId) {
 const RECORD_DIR = join(DATA_DIR, "records");
 if (!existsSync(RECORD_DIR)) mkdirSync(RECORD_DIR, { recursive: true });
 
+/** Raw message recording: captures ALL STT messages regardless of type for offline analysis */
+const RAW_RECORD_DIR = join(DATA_DIR, "raw-records");
+if (!existsSync(RAW_RECORD_DIR)) mkdirSync(RAW_RECORD_DIR, { recursive: true });
+
 /**
  * Per-room recording state is stored inside each RoomConnection object.
  */
@@ -958,16 +962,29 @@ function startRecordingForRoom(conn) {
   conn.recordedCount = 0;
   const header = { _type: "session_start", roomId: conn.roomId, startedAt: now.toISOString(), ts: Date.now() };
   appendFileSync(conn.recordFile, JSON.stringify(header) + "\n", "utf-8");
-  console.log(`[danmaku-record] Started recording room ${conn.roomId}`);
+  // Raw recording: all messages regardless of type
+  const rawRoomDir = join(RAW_RECORD_DIR, String(conn.roomId));
+  if (!existsSync(rawRoomDir)) mkdirSync(rawRoomDir, { recursive: true });
+  conn.rawRecordFile = join(rawRoomDir, `${dateStr}_${timeStr}.jsonl`);
+  conn.rawRecordedCount = 0;
+  appendFileSync(conn.rawRecordFile, JSON.stringify(header) + "\n", "utf-8");
+  console.log(`[danmaku-record] Started recording room ${conn.roomId} (raw: enabled)`);
 }
 
 function stopRecordingForRoom(conn) {
   if (!conn.recordFile) return;
   const footer = { _type: "session_end", roomId: conn.roomId, endedAt: new Date().toISOString(), recordedCount: conn.recordedCount, ts: Date.now() };
   try { appendFileSync(conn.recordFile, JSON.stringify(footer) + "\n", "utf-8"); } catch { /* ignore */ }
-  console.log(`[danmaku-record] Stopped recording room ${conn.roomId}. Total: ${conn.recordedCount}`);
+  // Stop raw recording
+  if (conn.rawRecordFile) {
+    const rawFooter = { _type: "session_end", roomId: conn.roomId, endedAt: new Date().toISOString(), rawRecordedCount: conn.rawRecordedCount, ts: Date.now() };
+    try { appendFileSync(conn.rawRecordFile, JSON.stringify(rawFooter) + "\n", "utf-8"); } catch { /* ignore */ }
+  }
+  console.log(`[danmaku-record] Stopped recording room ${conn.roomId}. Danmaku: ${conn.recordedCount}, Raw: ${conn.rawRecordedCount || 0}`);
   conn.recordFile = null;
   conn.recordedCount = 0;
+  conn.rawRecordFile = null;
+  conn.rawRecordedCount = 0;
 }
 
 function recordDanmakuForRoom(conn, danmaku) {
@@ -1413,6 +1430,10 @@ function archivedGiftWireId(g) {
  * - **dgb**：原始送礼（经典路径）。
  * - **gdp**：本房间礼物文案事件（常见为「某某 赠送了 某礼×N」）；钻粉/部分活动礼仅下发 gdp、不下发 dgb，此前会被完全忽略。
  * - **spbc**：广播类送礼；仅当 `drid` 与当前房间一致时记入，避免全站大礼物灌入本房间。
+ * - **comm_chatmsg**：系统通知消息（如「开通钻粉1个月」「续费贵族」）；付费行为通知记入礼物统计。
+ * - **anbc**：开通贵族通知（「XXX 在本房间开通了 XX贵族」）；付费行为。
+ * - **rnewbc** / **rn**：续费贵族通知；付费行为。
+ * - **ssd**：超级弹幕（付费弹幕）；有明确金额。
  *
  * 归一化后 `type` 固定为 `dgb` 便于前端/统计沿用；真实来源放在 `_giftWire`。
  * @returns {object|null}
@@ -1456,6 +1477,105 @@ function normalizeDouyuGiftSttToRecord(roomId, msg) {
       gfcnt: String(gfcntRaw),
       gfid: gfidRaw,
     });
+  }
+
+  // comm_chatmsg: system notification messages (e.g. "开通钻粉1个月", "续费贵族", "开通粉丝团")
+  // These represent paid actions that should be counted as gift/revenue events.
+  if (t === "comm_chatmsg") {
+    const txt = String(msg.txt ?? msg.content ?? "").trim();
+    if (!txt) return null;
+    // Only capture paid-action notifications (钻粉/贵族/粉丝团/守护 etc.)
+    const paidPatterns = ["钻粉", "贵族", "粉丝团", "守护", "续费", "开通"];
+    const isPaidAction = paidPatterns.some((p) => txt.includes(p));
+    if (!isPaidAction) return null;
+    const nn = String(msg.nn ?? msg.uname ?? "").trim();
+    const uid = String(msg.uid ?? "").trim();
+    // Use txt as gift name since comm_chatmsg doesn't have standard gfid/gfn
+    return {
+      ...msg,
+      type: "dgb",
+      _giftWire: "comm_chatmsg",
+      nn: nn || "系统通知",
+      uid,
+      gfn: txt,
+      gfid: "0",
+      gfcnt: "1",
+    };
+  }
+
+  // anbc: noble (贵族) activation notification
+  // Fields: uid, uname/nn, nl (noble level), drid (destination room), donk (noble name)
+  if (t === "anbc") {
+    const drid = String(msg.drid ?? msg.rid ?? "").trim();
+    // Only count if the noble was opened in this room
+    if (!drid || drid !== rid) return null;
+    const nn = String(msg.uname ?? msg.nn ?? "").trim();
+    const uid = String(msg.uid ?? "").trim();
+    const nobleName = String(msg.donk ?? msg.noble_name ?? "").trim();
+    const nobleLevel = String(msg.nl ?? msg.noble_level ?? "").trim();
+    const label = nobleName
+      ? `开通${nobleName}`
+      : nobleLevel
+        ? `开通贵族(Lv${nobleLevel})`
+        : "开通贵族";
+    return {
+      ...msg,
+      type: "dgb",
+      _giftWire: "anbc",
+      nn: nn || "系统通知",
+      uid,
+      gfn: label,
+      gfid: "0",
+      gfcnt: "1",
+    };
+  }
+
+  // rnewbc / rn: noble (贵族) renewal notification
+  // Fields similar to anbc; rnewbc is the newer format, rn is legacy
+  if (t === "rnewbc" || t === "rn") {
+    const drid = String(msg.drid ?? msg.rid ?? "").trim();
+    if (!drid || drid !== rid) return null;
+    const nn = String(msg.uname ?? msg.nn ?? "").trim();
+    const uid = String(msg.uid ?? "").trim();
+    const nobleName = String(msg.donk ?? msg.noble_name ?? "").trim();
+    const nobleLevel = String(msg.nl ?? msg.noble_level ?? "").trim();
+    const label = nobleName
+      ? `续费${nobleName}`
+      : nobleLevel
+        ? `续费贵族(Lv${nobleLevel})`
+        : "续费贵族";
+    return {
+      ...msg,
+      type: "dgb",
+      _giftWire: t,
+      nn: nn || "系统通知",
+      uid,
+      gfn: label,
+      gfid: "0",
+      gfcnt: "1",
+    };
+  }
+
+  // ssd: super danmaku (超级弹幕) — paid danmaku with visible text overlay
+  // Fields: uid, nn/uname, content/txt (the super danmaku text), sdid, trid (target room)
+  if (t === "ssd") {
+    const trid = String(msg.trid ?? msg.drid ?? msg.rid ?? "").trim();
+    // Only count if targeted at this room (ssd can be cross-room broadcast)
+    if (trid && trid !== rid) return null;
+    const nn = String(msg.nn ?? msg.uname ?? "").trim();
+    const uid = String(msg.uid ?? "").trim();
+    const content = String(msg.content ?? msg.txt ?? "").trim();
+    const label = content ? `超级弹幕: ${content.slice(0, 30)}` : "超级弹幕";
+    return {
+      ...msg,
+      type: "dgb",
+      _giftWire: "ssd",
+      nn: nn || "系统通知",
+      uid,
+      gfn: label,
+      gfid: "0",
+      gfcnt: "1",
+    };
   }
 
   return null;
@@ -3512,6 +3632,8 @@ function connectBackendRoom(roomId) {
     stats: { total: 0, triggered: 0, connected_at: null },
     recordFile: null,
     recordedCount: 0,
+    rawRecordFile: null,
+    rawRecordedCount: 0,
     wantConnected: true, // flag to control auto-reconnect
   };
   backendRooms.set(roomId, conn);
@@ -3521,6 +3643,14 @@ function connectBackendRoom(roomId) {
   function processMessage(payload) {
     const msg = decodeStt(payload);
     if (!msg.type) return;
+    // Raw recording: capture ALL messages for offline analysis
+    if (conn.rawRecordFile) {
+      try {
+        const rawEntry = { ...msg, _roomId: roomId, _ts: Date.now() };
+        appendFileSync(conn.rawRecordFile, JSON.stringify(rawEntry) + "\n", "utf-8");
+        conn.rawRecordedCount = (conn.rawRecordedCount || 0) + 1;
+      } catch { /* ignore */ }
+    }
     if (msg.type === "chatmsg") {
       const danmaku = buildChatmsgDanmaku(msg);
       conn.stats.total++;
