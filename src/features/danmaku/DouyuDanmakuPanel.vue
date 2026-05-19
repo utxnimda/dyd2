@@ -3957,16 +3957,19 @@ const giftStatsByGiftSorted = computed(() => {
     .map(([bucketKey, v]) => {
       const catalogId = giftStatsCatalogId(bucketKey);
       const info = giftInfoMap.value[catalogId];
+      const priceSumYuan = (v as any)._priceSumYuan || 0;
+      // dfobc/dfrbc records have _priceSumYuan — treat as isPaid with that amount
+      const hasDirect = priceSumYuan > 0;
       return {
         bucketKey,
         catalogId,
         count: v.count,
         name: giftStatsRowName(bucketKey, v),
         icon: giftIcon(catalogId),
-        cost: (info?.cost || 0),
-        value: (info?.value || 0),
+        cost: hasDirect ? priceSumYuan / v.count : (info?.cost || 0),
+        value: hasDirect ? priceSumYuan / v.count : (info?.value || 0),
         from: giftInfoFromNorm(info),
-        isPaid: info?.isPaid ?? false,
+        isPaid: hasDirect || (info?.isPaid ?? false),
       };
     })
     .sort((a, b) => {
@@ -4008,6 +4011,12 @@ const giftStatsByUserSorted = computed(() => {
       // Calculate total revenue (value) and total cost for this user
       let totalValue = 0;
       let totalCost = 0;
+      // Direct price from dfobc/dfrbc per user
+      const userPriceYuan = (v as any)._priceSumYuan || 0;
+      if (userPriceYuan > 0) {
+        totalValue += userPriceYuan;
+        totalCost += userPriceYuan;
+      }
       for (const [giftKey, cnt] of Object.entries(v.gifts)) {
         const info = giftInfoMap.value[giftStatsCatalogId(giftKey)];
         if (info?.isPaid) {
@@ -4030,6 +4039,8 @@ const giftStatsTotalCost = computed(() => {
   if (!giftStats.value) return 0;
   let total = 0;
   for (const [bucketKey, v] of Object.entries(giftStats.value.byGift)) {
+    // Direct price from dfobc/dfrbc (diamond fan open/renew)
+    if ((v as any)._priceSumYuan > 0) { total += (v as any)._priceSumYuan; continue; }
     const inf = giftInfoMap.value[giftStatsCatalogId(bucketKey)];
     if (!inf?.isPaid) continue;
     const value = inf?.value || 0;
@@ -4042,6 +4053,8 @@ const giftStatsTotalSpend = computed(() => {
   if (!giftStats.value) return 0;
   let total = 0;
   for (const [bucketKey, v] of Object.entries(giftStats.value.byGift)) {
+    // Direct price from dfobc/dfrbc (diamond fan open/renew)
+    if ((v as any)._priceSumYuan > 0) { total += (v as any)._priceSumYuan; continue; }
     const inf = giftInfoMap.value[giftStatsCatalogId(bucketKey)];
     if (!inf?.isPaid) continue;
     const cost = inf?.cost || 0;

@@ -1389,7 +1389,8 @@ function loadGifts(roomId, limit = 200) {
   const result = [];
   for (let i = index.fileCount - 1; i >= 0 && result.length < limit; i--) {
     const chunk = loadJsonFile(giftChunkPath(roomId, i), []);
-    result.unshift(...chunk);
+    // Filter out legacy spbc broadcast notifications
+    result.unshift(...chunk.filter(g => g._giftWire !== "spbc"));
   }
   return result.slice(-limit);
 }
@@ -1429,11 +1430,13 @@ function archivedGiftWireId(g) {
  *
  * - **dgb**：原始送礼（经典路径）。
  * - **gdp**：本房间礼物文案事件（常见为「某某 赠送了 某礼×N」）；钻粉/部分活动礼仅下发 gdp、不下发 dgb，此前会被完全忽略。
- * - **spbc**：广播类送礼；仅当 `drid` 与当前房间一致时记入，避免全站大礼物灌入本房间。
+ * - **spbc**：广播类送礼；不归为实际礼物统计（仅做记录，不计入收入）。
  * - **comm_chatmsg**：系统通知消息（如「开通钻粉1个月」「续费贵族」）；付费行为通知记入礼物统计。
  * - **anbc**：开通贵族通知（「XXX 在本房间开通了 XX贵族」）；付费行为。
  * - **rnewbc** / **rn**：续费贵族通知；付费行为。
  * - **ssd**：超级弹幕（付费弹幕）；有明确金额。
+ * - **dfobc**：首次开通钻粉通知；price 字段为花费金额（单位：鱼翅/100=元）。
+ * - **dfrbc**：续费钻粉通知；price 字段为花费金额（单位：鱼翅/100=元）。
  *
  * 归一化后 `type` 固定为 `dgb` 便于前端/统计沿用；真实来源放在 `_giftWire`。
  * @returns {object|null}
@@ -1461,22 +1464,9 @@ function normalizeDouyuGiftSttToRecord(roomId, msg) {
     };
   }
 
+  // spbc: broadcast gift — no longer counted as actual gift/revenue
   if (t === "spbc") {
-    const drid = String(msg.drid ?? msg.rid ?? "").trim();
-    if (!drid || drid !== rid) return null;
-    const nn = String(msg.sn ?? msg.nn ?? "").trim();
-    const gfn = String(msg.gn ?? msg.gfn ?? "").trim();
-    const gfcntRaw = msg.gc ?? msg.gfcnt ?? "1";
-    const gfidRaw = String(msg.gfid ?? msg.gid ?? msg.giftId ?? "0").trim() || "0";
-    return coalesceDouyuArchivedGiftIds({
-      ...msg,
-      type: "dgb",
-      _giftWire: "spbc",
-      ...(nn !== "" ? { nn } : {}),
-      ...(gfn !== "" ? { gfn } : {}),
-      gfcnt: String(gfcntRaw),
-      gfid: gfidRaw,
-    });
+    return null;
   }
 
   // comm_chatmsg: system notification messages (e.g. "开通钻粉1个月", "续费贵族", "开通粉丝团")
@@ -1575,6 +1565,54 @@ function normalizeDouyuGiftSttToRecord(roomId, msg) {
       gfn: label,
       gfid: "0",
       gfcnt: "1",
+    };
+  }
+
+  // dfobc: first-time diamond fan (钻粉) activation
+  // Fields: uid, nick, price (cost in fish-fin units, /100 = CNY), mn (months), bn (badge name), pg (level)
+  if (t === "dfobc") {
+    const nn = String(msg.nick ?? msg.nn ?? "").trim();
+    const uid = String(msg.uid ?? "").trim();
+    const months = String(msg.mn ?? "1").trim();
+    const badgeName = String(msg.bn ?? "").trim();
+    const price = String(msg.price ?? "0").trim();
+    const label = badgeName
+      ? `开通钻粉${months}个月(${badgeName})`
+      : `开通钻粉${months}个月`;
+    return {
+      ...msg,
+      type: "dgb",
+      _giftWire: "dfobc",
+      nn: nn || "系统通知",
+      uid,
+      gfn: label,
+      gfid: "0",
+      gfcnt: "1",
+      _price: price,
+    };
+  }
+
+  // dfrbc: diamond fan (钻粉) renewal
+  // Fields: uid, nick, price (cost in fish-fin units, /100 = CNY), mn (months), bn (badge name), pg (level)
+  if (t === "dfrbc") {
+    const nn = String(msg.nick ?? msg.nn ?? "").trim();
+    const uid = String(msg.uid ?? "").trim();
+    const months = String(msg.mn ?? "1").trim();
+    const badgeName = String(msg.bn ?? "").trim();
+    const price = String(msg.price ?? "0").trim();
+    const label = badgeName
+      ? `续费钻粉${months}个月(${badgeName})`
+      : `续费钻粉${months}个月`;
+    return {
+      ...msg,
+      type: "dgb",
+      _giftWire: "dfrbc",
+      nn: nn || "系统通知",
+      uid,
+      gfn: label,
+      gfid: "0",
+      gfcnt: "1",
+      _price: price,
     };
   }
 
@@ -2228,22 +2266,32 @@ function aggregateGiftsInTimeRange(roomId, startTs, endTs, nameToGfid = null, ca
     for (const g of chunk) {
       const ts = archivedGiftEntryTsMs(g);
       if (!(ts > 0) || ts < startTs || ts > endTs) continue;
+      // Skip legacy spbc broadcast notifications (not actual gifts)
+      if (g._giftWire === "spbc") continue;
       const gfidResolved = resolveArchivedGiftGfid(g, nameToGfid, catalogMap);
       const amt = giftPiecesFromStoredRecord(g);
       const gfnTrim = String(g.gfn ?? "").trim();
       const bucket = giftStatsBucketKey(gfidResolved, gfnTrim, catalogMap);
       totalPieces += amt;
-      if (!byGift[bucket]) byGift[bucket] = { count: 0, name: "" };
+      if (!byGift[bucket]) byGift[bucket] = { count: 0, name: "", _priceSumYuan: 0 };
       byGift[bucket].count += amt;
       if (gfnTrim) byGift[bucket].name = gfnTrim;
       else if (!byGift[bucket].name && catalogMap?.[gfidResolved]?.name) {
         byGift[bucket].name = String(catalogMap[gfidResolved].name);
       }
+      // Accumulate _price for dfobc/dfrbc records (price in fish-fin units, /100 = CNY)
+      const rawPrice = Number(g._price || g.price || 0);
+      if (rawPrice > 0 && (g._giftWire === "dfobc" || g._giftWire === "dfrbc")) {
+        byGift[bucket]._priceSumYuan += rawPrice / 100;
+      }
       const uid = String(g.uid || "anon");
-      if (!byUser[uid]) byUser[uid] = { nn: g.nn || "", count: 0, gifts: {} };
+      if (!byUser[uid]) byUser[uid] = { nn: g.nn || "", count: 0, gifts: {}, _priceSumYuan: 0 };
       if (g.nn) byUser[uid].nn = g.nn;
       byUser[uid].count += amt;
       byUser[uid].gifts[bucket] = (byUser[uid].gifts[bucket] || 0) + amt;
+      if (rawPrice > 0 && (g._giftWire === "dfobc" || g._giftWire === "dfrbc")) {
+        byUser[uid]._priceSumYuan += rawPrice / 100;
+      }
     }
   }
   return { totalPieces, byGift, byUser };
@@ -2277,6 +2325,8 @@ async function computeRoomGiftStatsPanelBundle(rid, range, nowMs, opts = {}) {
       const ts = archivedGiftEntryTsMs(g);
       if (!(ts > 0) || ts < startTs) continue;
       if (Number.isFinite(endTs) && ts >= endTs) continue;
+      // Skip legacy spbc broadcast notifications (not actual gifts)
+      if (g._giftWire === "spbc") continue;
       matchedGiftRows++;
       const gfidResolved = resolveArchivedGiftGfid(g, nameIdx, giftPack?.gifts);
       const amount = giftPiecesFromStoredRecord(g);
@@ -2299,11 +2349,16 @@ async function computeRoomGiftStatsPanelBundle(rid, range, nowMs, opts = {}) {
         });
       }
 
-      if (!stats.byGift[bucket]) stats.byGift[bucket] = { count: 0, name: "" };
+      if (!stats.byGift[bucket]) stats.byGift[bucket] = { count: 0, name: "", _priceSumYuan: 0 };
       stats.byGift[bucket].count += amount;
       if (gfnTrim) stats.byGift[bucket].name = gfnTrim;
       else if (!stats.byGift[bucket].name && giftPack?.gifts?.[gfidResolved]?.name) {
         stats.byGift[bucket].name = String(giftPack.gifts[gfidResolved].name);
+      }
+      // Accumulate _price for dfobc/dfrbc records
+      const rawPricePanel = Number(g._price || g.price || 0);
+      if (rawPricePanel > 0 && (g._giftWire === "dfobc" || g._giftWire === "dfrbc")) {
+        stats.byGift[bucket]._priceSumYuan += rawPricePanel / 100;
       }
       const uid = g.uid || "anon";
       if (!stats.byUser[uid])
@@ -2315,6 +2370,7 @@ async function computeRoomGiftStatsPanelBundle(rid, range, nowMs, opts = {}) {
           brid: g.brid || "",
           count: 0,
           gifts: {},
+          _priceSumYuan: 0,
         };
       if (g.nn) stats.byUser[uid].nn = g.nn;
       if (g.level) stats.byUser[uid].level = g.level;
@@ -2324,6 +2380,9 @@ async function computeRoomGiftStatsPanelBundle(rid, range, nowMs, opts = {}) {
       stats.byUser[uid].count += amount;
       if (!stats.byUser[uid].gifts[bucket]) stats.byUser[uid].gifts[bucket] = 0;
       stats.byUser[uid].gifts[bucket] += amount;
+      if (rawPricePanel > 0 && (g._giftWire === "dfobc" || g._giftWire === "dfrbc")) {
+        stats.byUser[uid]._priceSumYuan += rawPricePanel / 100;
+      }
       stats.totalCount += amount;
     }
   }
@@ -2353,6 +2412,12 @@ function computeGiftFinancialStats(roomId, startTs, endTs, catalogMap) {
   let streamerIncomeYuan = 0;
   let audiencePaidYuan = 0;
   for (const [gfid, v] of Object.entries(byGift)) {
+    // Direct price from dfobc/dfrbc (diamond fan open/renew) — always counts as paid
+    if (v._priceSumYuan > 0) {
+      streamerIncomeYuan += v._priceSumYuan;
+      audiencePaidYuan += v._priceSumYuan;
+      continue;
+    }
     const meta = catalogMap && catalogMap[gfid];
     if (!meta || meta.isPaid !== true) continue;
     const costPiece = Number(meta.cost) || 0;
@@ -2364,6 +2429,8 @@ function computeGiftFinancialStats(roomId, startTs, endTs, catalogMap) {
   let paidUserCount = 0;
   for (const u of Object.values(byUser)) {
     let uvSpend = 0;
+    // Direct price from dfobc/dfrbc per user
+    if (u._priceSumYuan > 0) uvSpend += u._priceSumYuan;
     for (const [gfid, c] of Object.entries(u.gifts)) {
       const meta = catalogMap && catalogMap[gfid];
       if (!meta || meta.isPaid !== true) continue;
