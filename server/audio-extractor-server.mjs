@@ -477,7 +477,9 @@ function loadMusicMetadata(musicDir) {
   const metaPath = path.join(musicDir, "metadata.json");
   if (!fs.existsSync(metaPath)) return {};
   try {
-    return JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+    let raw = fs.readFileSync(metaPath, "utf-8");
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); // strip BOM
+    return JSON.parse(raw);
   } catch { return {}; }
 }
 
@@ -799,7 +801,11 @@ function saveVideoInfo(dir, info) {
 function loadVideoInfo(dir) {
   const infoPath = path.join(dir, "video_info.json");
   if (!fs.existsSync(infoPath)) return null;
-  try { return JSON.parse(fs.readFileSync(infoPath, "utf-8")); } catch { return null; }
+  try {
+    let raw = fs.readFileSync(infoPath, "utf-8");
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); // strip BOM
+    return JSON.parse(raw);
+  } catch { return null; }
 }
 
 /* ------------------------------------------------------------------ */
