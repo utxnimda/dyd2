@@ -1333,6 +1333,7 @@ const server = http.createServer(async (req, res) => {
             page,
             url: info.url || `https://www.bilibili.com/video/${videoId}${page > 1 ? "?p=" + page : ""}`,
             extractedAt: info.extractedAt || fallbackTime,
+            title: info.title || "",
             songs,
           });
         }

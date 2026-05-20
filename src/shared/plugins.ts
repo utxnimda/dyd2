@@ -59,6 +59,19 @@ export const ALL_PLUGINS: PluginDescriptor[] = [
     enabled: __FEATURE_AI_AGENT__,
     panelMode: "side",
   },
+  {
+    id: "voice-train",
+    label: "声音训练",
+    icon: "🎤",
+    description: "选择音频训练专属声音模型，支持本地文件或歌曲库",
+    component:
+      __FEATURE_VOICE_CLONE__
+        ? defineAsyncComponent(
+            () => import("../features/voice-clone/VoiceTrainPlugin.vue"),
+          )
+        : null,
+    enabled: __FEATURE_VOICE_CLONE__,
+  },
 ];
 
 /** Only plugins whose feature flag is on */

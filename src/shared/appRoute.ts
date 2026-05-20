@@ -12,7 +12,8 @@ export type MainTab =
   | "songs"
   | "crimes"
   | "danmaku"
-  | "ruins";
+  | "ruins"
+  | "voice";
 
 export type PrePanelTab = "total" | "nogf" | "perround" | "gf" | "logging";
 
@@ -78,6 +79,8 @@ const TAB_ALIASES: Record<string, MainTab> = {
   crimes: "crimes",
   danmaku: "danmaku",
   "douyu-danmaku": "danmaku",
+  voice: "voice",
+  "voice-clone": "voice",
 };
 
 /** Parse location.hash — supports #/pre/gf, #captain-hud (fullscreen), #/battle, #/treasury, etc. */

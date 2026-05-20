@@ -120,6 +120,19 @@
         chunked_transfer_encoding on;
     }
 
+    location /__fmz_voice_clone/ {
+        proxy_pass http://127.0.0.1:8793/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+        client_max_body_size 500m;
+    }
+
     location /__douyu_api/ {
         proxy_pass https://v.douyu.com/;
         proxy_ssl_server_name on;

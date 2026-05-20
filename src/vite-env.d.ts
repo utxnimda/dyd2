@@ -21,6 +21,8 @@ declare const __FEATURE_DOUYU_DANMAKU__: boolean;
 /** AI Agent plugin — floating panel for AI-powered danmaku analysis */
 declare const __FEATURE_AI_AGENT__: boolean;
 declare const __FEATURE_RUINS_REBUILD__: boolean;
+/** Voice Clone — voice model training, TTS, and voice conversion */
+declare const __FEATURE_VOICE_CLONE__: boolean;
 
 declare module "*.jfif" {
   const src: string;

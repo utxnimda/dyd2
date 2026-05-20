@@ -82,6 +82,9 @@ const DouyuDanmakuPanel = __FEATURE_DOUYU_DANMAKU__
 const RuinsRebuildPanel = __FEATURE_RUINS_REBUILD__
   ? defineAsyncComponent(() => import("./features/ruins-rebuild/RuinsRebuildPanel.vue"))
   : null;
+const VoiceClonePanel = __FEATURE_VOICE_CLONE__
+  ? defineAsyncComponent(() => import("./features/voice-clone/VoiceClonePanel.vue"))
+  : null;
 
 // Feature flags exposed to template (Vite replaces these at build time)
 /** 夜观星象 Tab（可与后台采集分离：__FEATURE_SANGUO__ 仍为 true） */
@@ -96,6 +99,7 @@ const F_AUDIO = __FEATURE_AUDIO__;
 const F_CRIMES = __FEATURE_CRIMES__;
 const F_DOUYU_DANMAKU = __FEATURE_DOUYU_DANMAKU__;
 const F_RUINS_REBUILD = __FEATURE_RUINS_REBUILD__;
+const F_VOICE_CLONE = __FEATURE_VOICE_CLONE__;
 
 // Battle show route — tree-shaken when __FEATURE_BATTLE__ is false
 const formatBattleShowPath = __FEATURE_BATTLE__ ? _fmtBSP : (_?: any) => "";
@@ -141,6 +145,7 @@ const NAV_TAB_ORDER: MainTab[] = [
   "crimes",
   "danmaku",
   "ruins",
+  "voice",
 ];
 
 function isTabAvailable(t: MainTab): boolean {
@@ -169,6 +174,8 @@ function isTabAvailable(t: MainTab): boolean {
       return __FEATURE_DOUYU_DANMAKU__;
     case "ruins":
       return __FEATURE_RUINS_REBUILD__;
+    case "voice":
+      return __FEATURE_VOICE_CLONE__;
     default:
       return false;
   }
@@ -210,6 +217,7 @@ function applyHashToState() {
     let nextTab = parsed.tab;
     if (!F_SANGUO_UI && nextTab === "sanguo") nextTab = firstAvailableMainTab();
     if (!F_RUINS_REBUILD && nextTab === "ruins") nextTab = firstAvailableMainTab();
+    if (!F_VOICE_CLONE && nextTab === "voice") nextTab = firstAvailableMainTab();
     tab.value = nextTab;
     prePanelTab.value = parsed.prePanel;
     ruinsPanelTab.value = parsed.ruinsPanel;
@@ -482,6 +490,7 @@ watch(showBaobao, (visible) => {
     <button v-if="F_CRIMES" :class="{ on: tab === 'crimes' }" type="button" @click="selectTab('crimes')">细数宝罪</button>
     <button v-if="F_DOUYU_DANMAKU" :class="{ on: tab === 'danmaku' }" type="button" @click="selectTab('danmaku')">窃听宝语</button>
     <button v-if="F_RUINS_REBUILD" :class="{ on: tab === 'ruins' }" type="button" @click="selectTab('ruins')">废墟重建 · 调试</button>
+    <button v-if="F_VOICE_CLONE" :class="{ on: tab === 'voice' }" type="button" @click="selectTab('voice')">幻化宝音</button>
   </nav>
   <main :class="{ 'main--danmaku-fill': tab === 'danmaku' && F_DOUYU_DANMAKU }">
     <PreliminaryPanel
@@ -540,6 +549,9 @@ watch(showBaobao, (visible) => {
     <RuinsRebuildPanel
       v-if="F_RUINS_REBUILD && RuinsRebuildPanel && tab === 'ruins'"
       v-model:panel-tab="ruinsPanelTab"
+    />
+    <VoiceClonePanel
+      v-if="F_VOICE_CLONE && VoiceClonePanel && tab === 'voice'"
     />
   </main>
   <!-- Global floating audio player (always available when audio feature is on) -->

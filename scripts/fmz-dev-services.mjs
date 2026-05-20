@@ -19,6 +19,7 @@ export const FEATURE_SERVICES = {
   crimes: { name: "crimes", script: "crimes-server", color: "red" },
   douyuDanmaku: { name: "danmaku", script: "danmaku-server", color: "white" },
   aiAgent: { name: "ai-agent", script: "ai-agent-server", color: "gray" },
+  voiceClone: { name: "voice-clone", script: "voice-clone-server", color: "magentaBright" },
   battle: { name: "reactions", script: "reactions-server", color: "cyan" },
   treasury: { name: "reactions", script: "reactions-server", color: "cyan" },
   users: { name: "reactions", script: "reactions-server", color: "cyan" },
@@ -33,6 +34,7 @@ export const SERVICE_FILE_WATCH = {
   crimes: [/^server\/crimes-server\.mjs$/],
   danmaku: [/^server\/douyu-danmaku-server\.mjs$/],
   "ai-agent": [/^server\/ai-agent-server\.mjs$/, /^server\/gemini-openai-compat-chat-filter\.mjs$/],
+  "voice-clone": [/^server\/voice-clone-server\.mjs$/],
   quota: [/^server\/quota-server\.cjs$/],
   vite: [/^vite\.config\./, /^src\//, /^public\//, /^index\.html$/],
 };

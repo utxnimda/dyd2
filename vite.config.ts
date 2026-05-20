@@ -115,6 +115,11 @@ if (features.aiAgent) {
   addSimpleProxy("/__fmz_ai_agent", "http://127.0.0.1:8792");
 }
 
+// Voice Clone server (needed by voiceClone)
+if (features.voiceClone) {
+  addSimpleProxy("/__fmz_voice_clone", "http://127.0.0.1:8793");
+}
+
 // Bilibili API proxy (needed by baobao)
 if (features.baobao) {
   apiProxy["/__bili_api"] = {
@@ -201,6 +206,7 @@ export default defineConfig({
     __FEATURE_DOUYU_DANMAKU__: JSON.stringify(!!features.douyuDanmaku),
     __FEATURE_AI_AGENT__: JSON.stringify(!!features.aiAgent),
     __FEATURE_RUINS_REBUILD__: JSON.stringify(!!features.ruinsRebuild),
+    __FEATURE_VOICE_CLONE__: JSON.stringify(!!features.voiceClone),
   },
   server: {
     /** 显式0.0.0.0：本机局域网请用 http://内网IP:5173，不要用公网 IP（多数路由器不支持回环） */

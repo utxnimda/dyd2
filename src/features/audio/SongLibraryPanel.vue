@@ -28,6 +28,7 @@ interface VideoEntry {
   page: number;
   url: string;
   extractedAt: string | null;
+  title?: string;
   songs: SongItem[];
 }
 
@@ -37,6 +38,7 @@ interface FlatSong {
   page: number;
   url: string;
   extractedAt: string | null;
+  title?: string;
   song: SongItem;
 }
 
@@ -104,7 +106,7 @@ const flatSongs = computed<FlatSong[]>(() => {
   const list: FlatSong[] = [];
   for (const v of videos.value) {
     for (const song of v.songs) {
-      list.push({ bvid: v.bvid, page: v.page, url: v.url, extractedAt: v.extractedAt, song });
+      list.push({ bvid: v.bvid, page: v.page, url: v.url, extractedAt: v.extractedAt, title: v.title, song });
     }
   }
   return list;
@@ -368,9 +370,12 @@ defineExpose({ reload: loadLibrary });
             :class="{ 'is-folded': isBvCollapsed(group.bvid) }"
             aria-hidden="true"
           />
-          <a class="sl-bv-title" :href="group.items[0]?.url" target="_blank" rel="noopener" @click.stop>{{
-            group.bvid
+          <a v-if="group.items[0]?.url" class="sl-bv-title" :href="group.items[0]?.url" target="_blank" rel="noopener" @click.stop>{{
+            group.items[0]?.title || group.bvid
           }}</a>
+          <span v-else class="sl-bv-title">{{
+            group.items[0]?.title || group.bvid
+          }}</span>
           <span class="sl-bv-badge">{{ group.count }} 首</span>
         </div>
         <div v-show="!isBvCollapsed(group.bvid)" class="sl-bv-body">
