@@ -10,6 +10,7 @@ server/local-ai-agent.env
 # 本机 deploy 用 SSH/Web 路径（从 deploy.local.env.example 复制）
 deploy/deploy.local.env
 .fmz-dev/
+downloads/
 __pycache__/
 *.log
 _dgb_*
