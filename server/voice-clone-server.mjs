@@ -35,6 +35,28 @@ for (const d of [DATA_DIR, MODELS_DIR, UPLOADS_DIR, OUTPUT_DIR]) {
   if (!existsSync(d)) mkdirSync(d, { recursive: true });
 }
 
+// ─── Keys file (same pattern as ai-agent-keys.json) ─────────────────────────
+const KEYS_FILE = join(__dirname, "data", "voice-clone-keys.json");
+let fileKeys = {};
+try {
+  if (existsSync(KEYS_FILE)) {
+    const raw = readFileSync(KEYS_FILE, "utf-8").replace(/^\uFEFF/, "");
+    fileKeys = JSON.parse(raw);
+    console.log(`[voice-clone] Loaded API keys from ${KEYS_FILE}`);
+  }
+} catch (err) {
+  console.warn(`[voice-clone] Failed to read ${KEYS_FILE}:`, err.message);
+}
+
+/** Resolve Fish Audio API key: env var > keys file > config.json */
+function resolveFishAudioKey(configValue) {
+  const fromEnv = (process.env.FISH_AUDIO_API_KEY || "").trim();
+  if (fromEnv) return fromEnv;
+  const fromFile = typeof fileKeys.fishAudio === "string" ? fileKeys.fishAudio.trim() : "";
+  if (fromFile) return fromFile;
+  return configValue || "";
+}
+
 // ─── Config ─────────────────────────────────────────────────────────────────
 const CONFIG_PATH = join(DATA_DIR, "config.json");
 
@@ -43,7 +65,7 @@ function loadConfig() {
     return {
       backend: "rvc", // "fish-audio" | "gpt-sovits" | "rvc"
       fishAudio: {
-        apiKey: "",
+        apiKey: resolveFishAudioKey(""),
         baseUrl: "https://api.fish.audio",
       },
       gptSovits: {
@@ -70,6 +92,10 @@ function loadConfig() {
       rmsMixRate: 0.25,
       protect: 0.33,
     };
+  }
+  // Resolve fishAudio apiKey from env / keys file / config (priority order)
+  if (cfg.fishAudio) {
+    cfg.fishAudio.apiKey = resolveFishAudioKey(cfg.fishAudio.apiKey);
   }
   return cfg;
 }

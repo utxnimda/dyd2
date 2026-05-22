@@ -4,6 +4,7 @@ node_modules/
 test-results/
 .env*
 server/data/ai-agent-keys.json
+server/data/voice-clone-keys.json
 server/data/audio/
 server/local-ai-agent.env
 # 本机 deploy 用 SSH/Web 路径（从 deploy.local.env.example 复制）
