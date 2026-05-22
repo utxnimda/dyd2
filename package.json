@@ -1,8 +1,8 @@
 {
   "name": "fmz-dashboard",
   "private": true,
-  "version": "1.1.51",
-  "fmzReleaseLabel": "v1.1.51",
+  "version": "1.1.54",
+  "fmzReleaseLabel": "v1.1.54",
   "fmzFeatures": {
     "sanguo": true,
     "sanguoUi": false,
@@ -15,9 +15,10 @@
     "users": false,
     "quota": false,
     "crimes": true,
-    "douyuDanmaku": true,
-    "aiAgent": true,
-    "voiceClone": true,
+    "douyuDanmaku": false,
+    "dreamBus": true,
+    "aiAgent": false,
+    "voiceClone": false,
     "ruinsRebuild": false
   },
   "type": "module",

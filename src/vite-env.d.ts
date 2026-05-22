@@ -18,6 +18,8 @@ declare const __FEATURE_USERS__: boolean;
 declare const __FEATURE_QUOTA__: boolean;
 declare const __FEATURE_CRIMES__: boolean;
 declare const __FEATURE_DOUYU_DANMAKU__: boolean;
+/** 宝宝巴士 Tab / API（可与窃听宝语分离；后端仍走 fmz-danmaku） */
+declare const __FEATURE_DREAM_BUS__: boolean;
 /** AI Agent plugin — floating panel for AI-powered danmaku analysis */
 declare const __FEATURE_AI_AGENT__: boolean;
 declare const __FEATURE_RUINS_REBUILD__: boolean;

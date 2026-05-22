@@ -67,6 +67,17 @@ const OPT_NEEDS_NPM = new Set([
   "fmz-reactions-server",
   "fmz-defense-server",
 ]);
+
+/** 按 package.json fmzFeatures 判定应停用的 systemd 单元（与 OPT_TO_SYSTEMD 值一致） */
+function backendUnitsToStop(features) {
+  const stop = [];
+  if (features.aiAgent !== true) stop.push("fmz-ai-agent");
+  if (features.voiceClone !== true) stop.push("fmz-voice-clone");
+  if (features.douyuDanmaku !== true && features.dreamBus !== true) {
+    stop.push("fmz-danmaku");
+  }
+  return stop;
+}
 if (!existsSync(SSH_KEY)) {
   console.error(`❌ SSH 私钥不存在: ${SSH_KEY}`);
   console.error(
@@ -246,6 +257,15 @@ if (!SKIP_BACKEND && existsSync(optLocalRoot)) {
       run(`${SSH_CMD} "${restartCmd}"`);
       console.log("   ✅ 后端服务已重启\n");
     }
+    const danmakuEnvLocal = join(releaseDir, "config", "danmaku.env");
+    if (optDirs.includes("fmz-danmaku-server") && existsSync(danmakuEnvLocal)) {
+      console.log("📝 同步 danmaku.env（dream-bus-only）→ /opt/fmz-danmaku-server/ …");
+      const uploadEnv = `${SCP_CMD} "${danmakuEnvLocal}" ${REMOTE_USER}@${REMOTE_HOST}:/opt/fmz-danmaku-server/danmaku.env`;
+      console.log(`   $ ${uploadEnv}`);
+      run(uploadEnv);
+      run(`${SSH_CMD} "systemctl restart fmz-danmaku"`);
+      console.log("   ✅ danmaku.env 已更新并重启 fmz-danmaku\n");
+    }
   } else {
     console.log("\n   [opt] release/opt 为空，跳过后端同步。\n");
   }
@@ -253,6 +273,22 @@ if (!SKIP_BACKEND && existsSync(optLocalRoot)) {
   console.log("\n   [opt] 已设置 FMZ_DEPLOY_SKIP_BACKEND，跳过后端同步。\n");
 } else {
   console.log("\n   [opt] 本 release 无 opt/ 目录（旧版打包或未包含后端镜像），仅更新了静态资源。\n");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Step 3a: 停用已在 fmzFeatures 中关闭的后端服务                       */
+/* ------------------------------------------------------------------ */
+if (!SKIP_BACKEND) {
+  const pkgFeatures =
+    JSON.parse(readFileSync(join(root, "package.json"), "utf-8")).fmzFeatures || {};
+  const stopUnits = backendUnitsToStop(pkgFeatures);
+  if (stopUnits.length > 0) {
+    console.log("⏹️  停用已关闭特性的远端后端: " + stopUnits.join(", "));
+    run(`${SSH_CMD} "systemctl stop ${stopUnits.join(" ")} 2>/dev/null || true"`, {
+      ignoreError: true,
+    });
+    console.log("   ✅ 已发送 stop（未安装的单元会被忽略）\n");
+  }
 }
 
 /* ------------------------------------------------------------------ */

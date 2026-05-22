@@ -12,6 +12,7 @@ export type MainTab =
   | "songs"
   | "crimes"
   | "danmaku"
+  | "dreamBus"
   | "ruins"
   | "voice";
 
@@ -26,6 +27,7 @@ const RUINS_SUBS = new Set<string>(["hub", "playlist", "treasures", "awards", "a
 
 export type ParsedAppHash =
   | { kind: "captain-hud" }
+  | { kind: "dream-bus-only" }
   | {
       kind: "main";
       tab: MainTab;
@@ -35,6 +37,15 @@ export type ParsedAppHash =
       /** Only for tab===ruins: 子页面（#/ruins/playlist） */
       ruinsPanel: RuinsPanelTab;
     };
+
+export type AppStandaloneMode = "captain-hud" | "dream-bus-only";
+
+const STANDALONE_HASH_HEADS = new Set<string>([
+  "captain-hud",
+  "dreamBusOnly",
+  "dream-bus-only",
+  "dreambusonly",
+]);
 
 /** Shorthand for the common "main" result with default prePanel & no battleShowPath. */
 function mainResult(tab: MainTab): ParsedAppHash {
@@ -47,8 +58,9 @@ function mainResult(tab: MainTab): ParsedAppHash {
  */
 export function isEmptyAppHash(hash: string): boolean {
   let h = (hash || "").replace(/^#/, "").trim();
-  if (h === "captain-hud" || h === "/captain-hud") return false;
   h = h.replace(/^\/*/, "");
+  const head = h.split("/").filter(Boolean)[0] ?? "";
+  if (STANDALONE_HASH_HEADS.has(head) || STANDALONE_HASH_HEADS.has(h)) return false;
   return h.split("/").filter(Boolean).length === 0;
 }
 
@@ -79,17 +91,38 @@ const TAB_ALIASES: Record<string, MainTab> = {
   crimes: "crimes",
   danmaku: "danmaku",
   "douyu-danmaku": "danmaku",
+  dreamBus: "dreamBus",
+  "dream-bus": "dreamBus",
+  dreambus: "dreamBus",
+  bus: "dreamBus",
   voice: "voice",
   "voice-clone": "voice",
 };
 
-/** Parse location.hash — supports #/pre/gf, #captain-hud (fullscreen), #/battle, #/treasury, etc. */
+/** Parse location.hash — supports #/pre/gf, #captain-hud, #/dreamBusOnly, #/battle, etc. */
 export function parseAppHash(hash: string): ParsedAppHash {
   let h = (hash || "").replace(/^#/, "").trim();
   if (h === "captain-hud" || h === "/captain-hud") return { kind: "captain-hud" };
+  if (
+    h === "dreamBusOnly" ||
+    h === "/dreamBusOnly" ||
+    h === "dream-bus-only" ||
+    h === "/dream-bus-only" ||
+    h === "dreambusonly" ||
+    h === "/dreambusonly"
+  ) {
+    return { kind: "dream-bus-only" };
+  }
   h = h.replace(/^\/*/, "");
   const parts = h.split("/").filter(Boolean);
   if (parts[0] === "captain-hud") return { kind: "captain-hud" };
+  if (
+    parts[0] === "dreamBusOnly" ||
+    parts[0] === "dream-bus-only" ||
+    parts[0] === "dreambusonly"
+  ) {
+    return { kind: "dream-bus-only" };
+  }
   if (parts.length === 0) return mainResult("sanguo");
 
   const head = parts[0];
@@ -123,13 +156,14 @@ export function parseAppHash(hash: string): ParsedAppHash {
 
 /** Generate a hash string (with # prefix) consistent with parseAppHash. */
 export function formatAppHash(
-  captainHudOnly: boolean,
+  standalone: AppStandaloneMode | null,
   tab: MainTab,
   prePanel: PrePanelTab,
   battleShowPath?: string | null,
   ruinsPanel?: RuinsPanelTab,
 ): string {
-  if (captainHudOnly) return "#/captain-hud";
+  if (standalone === "captain-hud") return "#/captain-hud";
+  if (standalone === "dream-bus-only") return "#/dreamBusOnly";
 
   // Battle has an optional sub-path
   if (tab === "battle") {

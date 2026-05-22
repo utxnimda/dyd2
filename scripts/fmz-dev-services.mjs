@@ -18,6 +18,7 @@ export const FEATURE_SERVICES = {
   quota: { name: "quota", script: "quota-server", color: "green" },
   crimes: { name: "crimes", script: "crimes-server", color: "red" },
   douyuDanmaku: { name: "danmaku", script: "danmaku-server", color: "white" },
+  dreamBus: { name: "danmaku", script: "danmaku-server", color: "white" },
   aiAgent: { name: "ai-agent", script: "ai-agent-server", color: "gray" },
   voiceClone: { name: "voice-clone", script: "voice-clone-server", color: "magentaBright" },
   battle: { name: "reactions", script: "reactions-server", color: "cyan" },

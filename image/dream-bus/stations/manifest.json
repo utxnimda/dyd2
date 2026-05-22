@@ -1,0 +1,150 @@
+{
+  "source": "https://shark2.douyucdn.cn/front-publish/vibe-lab-dream-bus-master/index.html",
+  "cdnBase": "https://shark2.douyucdn.cn/front-publish/vibe-lab-master/dream-bus/assets/",
+  "stations": [
+    {
+      "stationId": 1,
+      "stationName": "小镇",
+      "intro": "image/dream-bus/stations/station-01-intro.png",
+      "map": "image/dream-bus/stations/station-01-map.png",
+      "label": "image/dream-bus/stations/station-01-label.png",
+      "remote": {
+        "intro": "station1-DxY_ntUU.png",
+        "map": "station1-tLb-mG_t.png",
+        "label": "stationlabel1-B_wsCNi0.png"
+      }
+    },
+    {
+      "stationId": 2,
+      "stationName": "山丘",
+      "intro": "image/dream-bus/stations/station-02-intro.png",
+      "map": "image/dream-bus/stations/station-02-map.png",
+      "label": "image/dream-bus/stations/station-02-label.png",
+      "remote": {
+        "intro": "station2-iC4aLaoJ.png",
+        "map": "station2-C7DD2j58.png",
+        "label": "stationlabel2-DedTvLNo.png"
+      }
+    },
+    {
+      "stationId": 3,
+      "stationName": "湖泊",
+      "intro": "image/dream-bus/stations/station-03-intro.png",
+      "map": "image/dream-bus/stations/station-03-map.png",
+      "label": "image/dream-bus/stations/station-03-label.png",
+      "remote": {
+        "intro": "station3-C88mYIxO.png",
+        "map": "station3-CUrCNrVF.png",
+        "label": "stationlabel3-mIfy-bKB.png"
+      }
+    },
+    {
+      "stationId": 4,
+      "stationName": "草原",
+      "intro": "image/dream-bus/stations/station-04-intro.png",
+      "map": "image/dream-bus/stations/station-04-map.png",
+      "label": "image/dream-bus/stations/station-04-label.png",
+      "remote": {
+        "intro": "station4-BTbrnjG7.png",
+        "map": "station4-CKIvmIdA.png",
+        "label": "stationlabel4-CQbfsUZn.png"
+      }
+    },
+    {
+      "stationId": 5,
+      "stationName": "沙漠",
+      "intro": "image/dream-bus/stations/station-05-intro.png",
+      "map": "image/dream-bus/stations/station-05-map.png",
+      "label": "image/dream-bus/stations/station-05-label.png",
+      "remote": {
+        "intro": "station5-B0-b655-.png",
+        "map": "station5-DDzoZ9n0.png",
+        "label": "stationlabel5-BKenYhKJ.png"
+      }
+    },
+    {
+      "stationId": 6,
+      "stationName": "森林",
+      "intro": "image/dream-bus/stations/station-06-intro.png",
+      "map": "image/dream-bus/stations/station-06-map.png",
+      "label": "image/dream-bus/stations/station-06-label.png",
+      "remote": {
+        "intro": "station6-Dbe_iBd5.png",
+        "map": "station6-DtO3QfUr.png",
+        "label": "stationlabel6-B9RKjRbX.png"
+      }
+    },
+    {
+      "stationId": 7,
+      "stationName": "沙滩",
+      "intro": "image/dream-bus/stations/station-07-intro.png",
+      "map": "image/dream-bus/stations/station-07-map.png",
+      "label": "image/dream-bus/stations/station-07-label.png",
+      "remote": {
+        "intro": "station7-DD0Ga9sZ.png",
+        "map": "station7-DqsuSdqr.png",
+        "label": "stationlabel7-DQH3lCyb.png"
+      }
+    },
+    {
+      "stationId": 8,
+      "stationName": "冰河",
+      "intro": "image/dream-bus/stations/station-08-intro.png",
+      "map": "image/dream-bus/stations/station-08-map.png",
+      "label": "image/dream-bus/stations/station-08-label.png",
+      "remote": {
+        "intro": "station8-BKftOPXL.png",
+        "map": "station8-CPhqOgrK.png",
+        "label": "stationlabel8-BKXJzIX1.png"
+      }
+    },
+    {
+      "stationId": 9,
+      "stationName": "雪山",
+      "intro": "image/dream-bus/stations/station-09-intro.png",
+      "map": "image/dream-bus/stations/station-09-map.png",
+      "label": "image/dream-bus/stations/station-09-label.png",
+      "remote": {
+        "intro": "station9-CN0FiagN.png",
+        "map": "station9-BjbsPR0e.png",
+        "label": "stationlabel9-B944d4zf.png"
+      }
+    },
+    {
+      "stationId": 10,
+      "stationName": "海岛",
+      "intro": "image/dream-bus/stations/station-10-intro.png",
+      "map": "image/dream-bus/stations/station-10-map.png",
+      "label": "image/dream-bus/stations/station-10-label.png",
+      "remote": {
+        "intro": "station10-CTZB2XUD.png",
+        "map": "station10-BvzsNx0Z.png",
+        "label": "stationlabel10-Dw3oNtXy.png"
+      }
+    },
+    {
+      "stationId": 11,
+      "stationName": "天空",
+      "intro": "image/dream-bus/stations/station-11-intro.png",
+      "map": "image/dream-bus/stations/station-11-map.png",
+      "label": "image/dream-bus/stations/station-11-label.png",
+      "remote": {
+        "intro": "station11-o9BFnDPu.png",
+        "map": "station11-Cnzj9-wv.png",
+        "label": "stationlabel11-Dc1SM0wS.png"
+      }
+    },
+    {
+      "stationId": 12,
+      "stationName": "银河",
+      "intro": "image/dream-bus/stations/station-12-intro.png",
+      "map": "image/dream-bus/stations/station-12-map.png",
+      "label": "image/dream-bus/stations/station-12-label.png",
+      "remote": {
+        "intro": "station12-DmReeN61.png",
+        "map": "station12-DDiJ7Bh-.png",
+        "label": "stationlabel12-BV4pvzHr.png"
+      }
+    }
+  ]
+}

@@ -4,7 +4,7 @@
  *
  * ★ 强制确认机制：打包前会列出所有模块的发布状态，
  *   用户必须手动输入 "yes" 确认后才会执行归档。
- *   可通过 --yes 或 -y 跳过确认（仅限 CI 场景）。
+ *   非交互环境（无 TTY / CI）或 --yes / -y 时自动跳过确认。
  *
  * 数据归档：按「发布」的模块，将 server/data/ 中对应子路径复制到
  *   release/<label>/server/data/，便于与静态资源一并备份或上传节点。
@@ -45,7 +45,9 @@ const FEATURE_LABELS = {
   quota:       "用量看板",
   crimes:      "🎵 细数宝罪",
   douyuDanmaku: "🎯 弹幕捕捉",
+  dreamBus:     "🚌 宝宝巴士",
   aiAgent:      "🤖 AI 分析与对话（前端面板 + ai-agent-server）",
+  voiceClone:   "🎤 幻化宝音",
   ruinsRebuild: "废墟重建 · 调试（仅 local，发布关闭）",
 };
 
@@ -53,7 +55,12 @@ const FEATURE_LABELS = {
 /*  Display release module summary                                    */
 /* ------------------------------------------------------------------ */
 const features = pkg.fmzFeatures || {};
-const skipConfirm = process.argv.includes("--yes") || process.argv.includes("-y");
+const skipConfirm =
+  process.argv.includes("--yes") ||
+  process.argv.includes("-y") ||
+  !process.stdin.isTTY ||
+  process.env.CI === "true" ||
+  process.env.CI === "1";
 
 console.log("");
 console.log("╔══════════════════════════════════════════════════════════╗");
@@ -112,7 +119,11 @@ console.log("");
 
 async function askConfirmation() {
   if (skipConfirm) {
-    console.log("(--yes 已指定，跳过手动确认)");
+    if (process.argv.includes("--yes") || process.argv.includes("-y")) {
+      console.log("(--yes 已指定，跳过手动确认)");
+    } else {
+      console.log("(非交互环境，跳过模块确认)");
+    }
     return true;
   }
 
@@ -145,7 +156,7 @@ const skipConfig = process.argv.includes("--skip-config");
 const OPT_RELEASE_BUNDLES = [
   {
     remoteName: "fmz-danmaku-server",
-    include: (f) => f.douyuDanmaku === true,
+    include: (f) => f.douyuDanmaku === true || f.dreamBus === true,
     copies: [
       ["server/douyu-danmaku-server.mjs", "douyu-danmaku-server.mjs"],
       ["server/gemini-openai-compat-chat-filter.mjs", "gemini-openai-compat-chat-filter.mjs"],
@@ -347,6 +358,23 @@ if (!skipConfig) {
   if (any) {
     archivedConfigDirs = true;
     console.log(`  [config] 已复制 → release/${label}/config/{nginx,systemd}/`);
+  }
+  if (features.dreamBus === true && features.douyuDanmaku !== true) {
+    const roomId = String(process.env.FMZ_DREAM_BUS_ROOM_ID || "9046690").trim();
+    const danmakuEnvPath = join(target, "config", "danmaku.env");
+    mkdirSync(dirname(danmakuEnvPath), { recursive: true });
+    writeFileSync(
+      danmakuEnvPath,
+      [
+        "# 由 pack-release 生成：窃听宝语关闭，fmz-danmaku 仅宝宝巴士",
+        "FMZ_DANMAKU_MODE=dream-bus-only",
+        `FMZ_DREAM_BUS_ROOM_ID=${roomId || "9046690"}`,
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+    archivedConfigDirs = true;
+    console.log(`  [config] 已生成 → release/${label}/config/danmaku.env（dream-bus-only）`);
   }
 } else {
   console.log("\n  [config] 已使用 --skip-config，跳过 config/ 镜像（Nginx、systemd 样例）。");

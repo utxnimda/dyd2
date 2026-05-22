@@ -105,8 +105,8 @@ if (features.crimes) {
   addSimpleProxy("/__fmz_crimes", "http://127.0.0.1:8790");
 }
 
-// Douyu danmaku server (needed by douyuDanmaku)
-if (features.douyuDanmaku) {
+// Douyu danmaku server (窃听宝语 + 宝宝巴士 API)
+if (features.douyuDanmaku || features.dreamBus) {
   addSimpleProxy("/__fmz_danmaku", "http://127.0.0.1:8791");
 }
 
@@ -204,6 +204,7 @@ export default defineConfig({
     __FEATURE_QUOTA__: JSON.stringify(!!features.quota),
     __FEATURE_CRIMES__: JSON.stringify(!!features.crimes),
     __FEATURE_DOUYU_DANMAKU__: JSON.stringify(!!features.douyuDanmaku),
+    __FEATURE_DREAM_BUS__: JSON.stringify(!!features.dreamBus),
     __FEATURE_AI_AGENT__: JSON.stringify(!!features.aiAgent),
     __FEATURE_RUINS_REBUILD__: JSON.stringify(!!features.ruinsRebuild),
     __FEATURE_VOICE_CLONE__: JSON.stringify(!!features.voiceClone),

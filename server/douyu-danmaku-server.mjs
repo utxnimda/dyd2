@@ -19,9 +19,23 @@ import { fileURLToPath } from "node:url";
 
 import { geminiEligibleForOpenAiCompatTextChat } from "./gemini-openai-compat-chat-filter.mjs";
 import { fmzStaticFileMtimeMs, readDouyuFallbackGiftMetricsFresh } from "./fmz-static.mjs";
+import {
+  getDreamBusConfigCached,
+  getDreamBusLiveState,
+  getDreamBusRecords,
+  ingestDreamBusSession,
+  loadDreamBusRecordsFromDisk,
+  bootstrapDreamBusRecordsFromHttp,
+} from "./dream-bus-store.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 8791;
+/** 窃听宝语关闭时：仅连房间收 dream_bus_session + 提供 /dream-bus/* API（见 FMZ_DANMAKU_MODE） */
+const DANMAKU_MODE = String(process.env.FMZ_DANMAKU_MODE || "").trim().toLowerCase();
+const DREAM_BUS_ONLY =
+  DANMAKU_MODE === "dream-bus-only" ||
+  /^1|true|yes$/i.test(String(process.env.FMZ_DANMAKU_DREAM_BUS_ONLY || ""));
+const DREAM_BUS_ROOM_ID = String(process.env.FMZ_DREAM_BUS_ROOM_ID || "9046690").trim();
 /** 仓库根（本文件在 server/ 下），不依赖 process.cwd */
 const REPO_ROOT = join(__dirname, "..");
 const DATA_DIR = join(__dirname, "data", "danmaku");
@@ -3501,6 +3515,21 @@ function broadcastToSSE(event, data) {
   }
 }
 
+function handleDreamBusSessionMessage(roomId, msg) {
+  if (!msg || msg.type !== "dream_bus_session") return;
+  try {
+    const result = ingestDreamBusSession(roomId, msg);
+    broadcastToSSE("dream-bus", {
+      live: result.live,
+      record: result.record,
+      roomId: String(roomId ?? "").trim(),
+      ts: Date.now(),
+    });
+  } catch (e) {
+    console.warn(`[danmaku] dream_bus_session ingest failed: ${e.message}`);
+  }
+}
+
 function buildRoomsStatusPayload() {
   const rooms = [];
   for (const [rid, conn] of backendRooms) {
@@ -3710,6 +3739,10 @@ function connectBackendRoom(roomId) {
   function processMessage(payload) {
     const msg = decodeStt(payload);
     if (!msg.type) return;
+    if (DREAM_BUS_ONLY) {
+      if (msg.type === "dream_bus_session") handleDreamBusSessionMessage(roomId, msg);
+      return;
+    }
     // Raw recording: capture ALL messages for offline analysis
     if (conn.rawRecordFile) {
       try {
@@ -3731,6 +3764,7 @@ function connectBackendRoom(roomId) {
       broadcastToSSE("gift", giftEntry);
     }
     if (msg.type === "uenter") broadcastToSSE("enter", { type: "uenter", uid: msg.uid || "", nn: msg.nn || "", roomId, ts: Date.now() });
+    if (msg.type === "dream_bus_session") handleDreamBusSessionMessage(roomId, msg);
   }
 
   function onData(chunk) {
@@ -3860,6 +3894,7 @@ function createWebCaptureConnection(roomId, sseRes) {
       const giftEntry = recordGift(ctx.roomId, giftNorm);
       sendSSE("gift", giftEntry);
     }
+    if (msg.type === "dream_bus_session") handleDreamBusSessionMessage(ctx.roomId, msg);
   }
 
   function onData(chunk) {
@@ -4133,6 +4168,12 @@ function headerPassword(req) {
   return "";
 }
 
+function dreamBusOnlyAllowsRequest(path, method) {
+  if (path === "/events" && method === "GET") return true;
+  if (path.startsWith("/dream-bus/")) return true;
+  return false;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const path = url.pathname;
@@ -4141,6 +4182,10 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, X-Password" });
     res.end();
     return;
+  }
+
+  if (DREAM_BUS_ONLY && !dreamBusOnlyAllowsRequest(path, req.method)) {
+    return jsonReply(res, { ok: false, error: "窃听宝语已关闭，仅提供宝宝巴士 API" }, 404);
   }
 
   // SSE endpoint — backend mode (multi-room)
@@ -4486,6 +4531,23 @@ const server = http.createServer(async (req, res) => {
     return jsonReply(res, { ok: true });
   }
 
+  // --- Dream Bus（梦幻巴士到站）---
+  if (path === "/dream-bus/config" && req.method === "GET") {
+    try {
+      const st = await getDreamBusConfigCached();
+      return jsonReply(res, { ok: true, config: st.data, fetchedAt: st.fetchedAt });
+    } catch (e) {
+      return jsonReply(res, { ok: false, error: e.message }, 502);
+    }
+  }
+  if (path === "/dream-bus/live" && req.method === "GET") {
+    return jsonReply(res, { ok: true, live: getDreamBusLiveState() });
+  }
+  if (path === "/dream-bus/records" && req.method === "GET") {
+    const limit = Math.min(5000, Math.max(1, Number(url.searchParams.get("limit")) || 1440));
+    return jsonReply(res, { ok: true, records: getDreamBusRecords(limit), total: getDreamBusRecords(5000).length });
+  }
+
   // GET /ai-reports/:roomId — 已生成的日报/周报列表（按房间；不含 hidden）
   if (path.startsWith("/ai-reports/") && req.method === "GET") {
     const rid = decodeURIComponent(path.substring("/ai-reports/".length));
@@ -4500,21 +4562,34 @@ const server = http.createServer(async (req, res) => {
   jsonReply(res, { error: "Not found" }, 404);
 });
 
+loadDreamBusRecordsFromDisk();
+void bootstrapDreamBusRecordsFromHttp("9046690").then((n) => {
+  if (n > 0) console.log(`[danmaku] dream-bus bootstrap: ${n} records from stationRecord`);
+});
+
 server.listen(PORT, () => {
-  console.log(`[douyu-danmaku] Server listening on http://127.0.0.1:${PORT}`);
-  console.log(`[douyu-danmaku] AI report triggers → ai-agent-server ${AI_AGENT_INTERNAL_URL}`);
+  if (DREAM_BUS_ONLY) {
+    console.log(`[douyu-danmaku] dream-bus-only 模式：仅宝宝巴士（room=${DREAM_BUS_ROOM_ID}）`);
+  } else {
+    console.log(`[douyu-danmaku] Server listening on http://127.0.0.1:${PORT}`);
+    console.log(`[douyu-danmaku] AI report triggers → ai-agent-server ${AI_AGENT_INTERNAL_URL}`);
+  }
   danmakuSyncLog(
-    `[danmaku] 服务就绪 PORT=${PORT} cwd=${process.cwd()} 同步日志: server/data/danmaku/danmaku-trace.log 与 .fmz-dev/logs/danmaku-trace.log`,
+    `[danmaku] 服务就绪 PORT=${PORT} mode=${DREAM_BUS_ONLY ? "dream-bus-only" : "full"} cwd=${process.cwd()} 同步日志: server/data/danmaku/danmaku-trace.log 与 .fmz-dev/logs/danmaku-trace.log`,
   );
 
-  // Auto-reconnect saved backend rooms on startup
-  const savedRooms = loadSavedRooms();
-  if (savedRooms.length > 0) {
-    console.log(`[danmaku] Restoring ${savedRooms.length} saved room(s): ${savedRooms.join(", ")}`);
-    for (const rid of savedRooms) {
-      connectBackendRoom(rid);
+  if (DREAM_BUS_ONLY) {
+    if (DREAM_BUS_ROOM_ID) connectBackendRoom(DREAM_BUS_ROOM_ID);
+    else console.warn("[danmaku] dream-bus-only 但未设置 FMZ_DREAM_BUS_ROOM_ID");
+  } else {
+    // Auto-reconnect saved backend rooms on startup
+    const savedRooms = loadSavedRooms();
+    if (savedRooms.length > 0) {
+      console.log(`[danmaku] Restoring ${savedRooms.length} saved room(s): ${savedRooms.join(", ")}`);
+      for (const rid of savedRooms) {
+        connectBackendRoom(rid);
+      }
     }
+    setInterval(tickScheduledTriggers, 15_000);
   }
-
-  setInterval(tickScheduledTriggers, 15_000);
 });

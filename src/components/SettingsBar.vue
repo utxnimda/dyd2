@@ -5,7 +5,11 @@ import { defaultSettings, saveSettings } from "../shared/settings";
 import { FMZ_RELEASE_LABEL } from "../shared/buildInfo";
 import { THEME_PRESETS, type ThemePresetId } from "../shared/themePresets";
 
-const props = defineProps<{ modelValue: StoredSettings }>();
+const props = defineProps<{
+  modelValue: StoredSettings;
+  /** 顶栏品牌标题（默认「机器猫的百宝箱」） */
+  brandTitle?: string;
+}>();
 const emit = defineEmits<{
   "update:modelValue": [v: StoredSettings];
   apply: [];
@@ -112,7 +116,7 @@ function toggleBaobaoMode() {
   <header class="bar">
     <div class="brand-row">
       <div class="brand">
-机器猫的百宝箱
+        {{ brandTitle ?? "机器猫的百宝箱" }}
         <span v-if="FMZ_RELEASE_LABEL" class="release" :title="`构建 ${FMZ_RELEASE_LABEL}`">{{
           FMZ_RELEASE_LABEL
         }}</span>

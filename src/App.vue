@@ -29,6 +29,7 @@ import {
   isEmptyAppHash,
   parseAppHash,
   replaceAppHash,
+  type AppStandaloneMode,
   type MainTab,
   type PrePanelTab,
   type RuinsPanelTab,
@@ -79,6 +80,9 @@ const CrimesPanel = __FEATURE_CRIMES__
 const DouyuDanmakuPanel = __FEATURE_DOUYU_DANMAKU__
   ? defineAsyncComponent(() => import("./features/danmaku/DouyuDanmakuPanel.vue"))
   : null;
+const DreamBusPanel = __FEATURE_DREAM_BUS__
+  ? defineAsyncComponent(() => import("./features/dream-bus/DreamBusPanel.vue"))
+  : null;
 const RuinsRebuildPanel = __FEATURE_RUINS_REBUILD__
   ? defineAsyncComponent(() => import("./features/ruins-rebuild/RuinsRebuildPanel.vue"))
   : null;
@@ -98,6 +102,7 @@ const F_QUOTA = __FEATURE_QUOTA__;
 const F_AUDIO = __FEATURE_AUDIO__;
 const F_CRIMES = __FEATURE_CRIMES__;
 const F_DOUYU_DANMAKU = __FEATURE_DOUYU_DANMAKU__;
+const F_DREAM_BUS = __FEATURE_DREAM_BUS__;
 const F_RUINS_REBUILD = __FEATURE_RUINS_REBUILD__;
 const F_VOICE_CLONE = __FEATURE_VOICE_CLONE__;
 
@@ -144,6 +149,7 @@ const NAV_TAB_ORDER: MainTab[] = [
   "songs",
   "crimes",
   "danmaku",
+  "dreamBus",
   "ruins",
   "voice",
 ];
@@ -171,7 +177,9 @@ function isTabAvailable(t: MainTab): boolean {
     case "crimes":
       return __FEATURE_CRIMES__;
     case "danmaku":
-      return __FEATURE_DOUYU_DANMAKU__;
+      return F_DOUYU_DANMAKU;
+    case "dreamBus":
+      return F_DREAM_BUS;
     case "ruins":
       return __FEATURE_RUINS_REBUILD__;
     case "voice":
@@ -195,25 +203,32 @@ const ruinsPanelTab = ref<RuinsPanelTab>("hub");
 /** 战斗爽展示筛选路径段（#/battle/<此段>），刷新后由 hash 或 localStorage 恢复 */
 const battleShowPath = ref(formatBattleShowPath(loadBattleShowFromStorage()));
 
-const captainHudOnly = ref(false);
+const standaloneMode = ref<AppStandaloneMode | null>(null);
+const captainHudOnly = computed(() => standaloneMode.value === "captain-hud");
+const dreamBusOnly = computed(() => standaloneMode.value === "dream-bus-only");
+
 function refreshDocTitle() {
   const suffix = FMZ_RELEASE_LABEL ? ` ${FMZ_RELEASE_LABEL}` : "";
   if (captainHudOnly.value) document.title = `战斗爽${suffix}`;
+  else if (dreamBusOnly.value) document.title = `宝宝巴士${suffix}`;
   else document.title = `机器猫的百宝箱${suffix}`;
 }
 
 function applyHashToState() {
   if (typeof window === "undefined") return;
   if (isEmptyAppHash(window.location.hash)) {
-    captainHudOnly.value = false;
+    standaloneMode.value = null;
     refreshDocTitle();
     return;
   }
   const parsed = parseAppHash(window.location.hash);
   if (parsed.kind === "captain-hud") {
-    captainHudOnly.value = true;
+    standaloneMode.value = "captain-hud";
+  } else if (parsed.kind === "dream-bus-only") {
+    standaloneMode.value = "dream-bus-only";
+    tab.value = "dreamBus";
   } else {
-    captainHudOnly.value = false;
+    standaloneMode.value = null;
     let nextTab = parsed.tab;
     if (!F_SANGUO_UI && nextTab === "sanguo") nextTab = firstAvailableMainTab();
     if (!F_RUINS_REBUILD && nextTab === "ruins") nextTab = firstAvailableMainTab();
@@ -225,7 +240,7 @@ function applyHashToState() {
       let seg = parsed.battleShowPath;
       if (!seg) {
         seg = formatBattleShowPath(loadBattleShowFromStorage());
-        replaceAppHash(formatAppHash(false, "battle", "total", seg));
+        replaceAppHash(formatAppHash(null, "battle", "total", seg));
       }
       battleShowPath.value = seg;
     }
@@ -237,7 +252,7 @@ function syncHashFromState() {
   if (typeof window === "undefined") return;
   replaceAppHash(
     formatAppHash(
-      captainHudOnly.value,
+      standaloneMode.value,
       tab.value,
       prePanelTab.value,
       tab.value === "battle" ? battleShowPath.value : null,
@@ -252,7 +267,7 @@ function onBattleShowPath(next: string) {
 }
 
 function selectTab(next: MainTab) {
-  captainHudOnly.value = false;
+  standaloneMode.value = null;
   tab.value = next;
   syncHashFromState();
 }
@@ -282,6 +297,7 @@ const songsRef = ref<any>(null);
 const douyuRef = ref<any>(null);
 const crimesRef = ref<any>(null);
 const danmakuRef = ref<any>(null);
+const dreamBusRef = ref<any>(null);
 
 /** PluginHost ref to access side panel state */
 const pluginHostRef = ref<InstanceType<typeof PluginHost> | null>(null);
@@ -353,7 +369,8 @@ function reloadPanel(t: MainTab) {
   if (__FEATURE_AUDIO__ && t === "songs") songsRef.value?.reload();
   if (__FEATURE_BAOBAO__ && t === "douyu") douyuRef.value?.reload();
   if (__FEATURE_CRIMES__ && t === "crimes") crimesRef.value?.reload();
-  if (__FEATURE_DOUYU_DANMAKU__ && t === "danmaku") danmakuRef.value?.reload();
+  if (F_DOUYU_DANMAKU && t === "danmaku") danmakuRef.value?.reload();
+  if (F_DREAM_BUS && t === "dreamBus") dreamBusRef.value?.reload();
 }
 
 async function openTreasuryDetailFromAvatar(memberId: string | number | null | undefined) {
@@ -382,7 +399,7 @@ function onApply() {
 
 function loadActivePanel() {
   if (captainHudOnly.value) return;
-  reloadPanel(tab.value);
+  reloadPanel(dreamBusOnly.value ? "dreamBus" : tab.value);
 }
 
 function onWindowHashChange() {
@@ -395,12 +412,12 @@ onMounted(() => {
   applyHashToState();
   if (
     typeof window !== "undefined" &&
-    !captainHudOnly.value &&
+    !standaloneMode.value &&
     (!window.location.hash || window.location.hash === "#")
   ) {
     replaceAppHash(
       formatAppHash(
-        false,
+        null,
         tab.value,
         prePanelTab.value,
         tab.value === "battle" ? battleShowPath.value : null,
@@ -432,7 +449,7 @@ watch(
 );
 
 watch(tab, (t, prev) => {
-  if (captainHudOnly.value) return;
+  if (standaloneMode.value) return;
   if (__FEATURE_TREASURY__ && t !== "treasury") treRef.value?.closeDlg?.();
   // Skip re-loading preliminary if already on that tab (it uses load() not reload())
   if (t === "pre" && prev === "pre") { /* noop */ }
@@ -466,6 +483,19 @@ watch(showBaobao, (visible) => {
     :poll-ms="3500"
     :sync-battle-show-to-hash="false"
   />
+  <template v-else-if="dreamBusOnly">
+    <SettingsBar v-model="settings" brand-title="宝宝巴士" @apply="onApply" />
+    <div class="app-body app-body--dream-bus-only">
+      <div class="app-main app-main--dream-bus-only">
+        <main>
+          <DreamBusPanel
+            v-if="F_DREAM_BUS && DreamBusPanel"
+            ref="dreamBusRef"
+          />
+        </main>
+      </div>
+    </div>
+  </template>
   <template v-else>
   <SettingsBar v-model="settings" @apply="onApply">
     <template #extra-actions>
@@ -489,6 +519,7 @@ watch(showBaobao, (visible) => {
     <button v-if="F_AUDIO" :class="{ on: tab === 'songs' }" type="button" @click="selectTab('songs')">忽闻宝声</button>
     <button v-if="F_CRIMES" :class="{ on: tab === 'crimes' }" type="button" @click="selectTab('crimes')">细数宝罪</button>
     <button v-if="F_DOUYU_DANMAKU" :class="{ on: tab === 'danmaku' }" type="button" @click="selectTab('danmaku')">窃听宝语</button>
+    <button v-if="F_DREAM_BUS" :class="{ on: tab === 'dreamBus' }" type="button" @click="selectTab('dreamBus')">宝宝巴士</button>
     <button v-if="F_RUINS_REBUILD" :class="{ on: tab === 'ruins' }" type="button" @click="selectTab('ruins')">废墟重建 · 调试</button>
     <button v-if="F_VOICE_CLONE" :class="{ on: tab === 'voice' }" type="button" @click="selectTab('voice')">幻化宝音</button>
   </nav>
@@ -545,6 +576,10 @@ watch(showBaobao, (visible) => {
     <DouyuDanmakuPanel
       v-if="F_DOUYU_DANMAKU && DouyuDanmakuPanel && tab === 'danmaku'"
       ref="danmakuRef"
+    />
+    <DreamBusPanel
+      v-if="F_DREAM_BUS && DreamBusPanel && tab === 'dreamBus'"
+      ref="dreamBusRef"
     />
     <RuinsRebuildPanel
       v-if="F_RUINS_REBUILD && RuinsRebuildPanel && tab === 'ruins'"
@@ -712,5 +747,15 @@ watch(showBaobao, (visible) => {
   max-width: 520px;
   margin: 0.75rem auto;
   padding: 0 0.75rem;
+}
+.app-body--dream-bus-only {
+  height: calc(100vh - 60px);
+}
+.app-main--dream-bus-only > main {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0.75rem 1.25rem 1.25rem;
 }
 </style>
