@@ -5,8 +5,9 @@ import DreamBusStationIcon from "./DreamBusStationIcon.vue";
 import { DREAM_BUS_LABEL_PRESETS } from "./dreamBusStationLabelLayout";
 import {
   fetchDreamBusConfig,
-  fetchDreamBusLive,
+  fetchDreamBusLiveSnapshot,
   fetchDreamBusRecords,
+  applyDreamBusSseEvent,
   dreamBusArrivalClock,
   dreamBusStationAccent,
   dreamBusStationName,
@@ -16,7 +17,7 @@ import {
   type DreamBusStation,
 } from "./dreamBusApi";
 import { dreamBusValueTier } from "./dreamBusMapLayout";
-import { prefetchDreamBusVoices } from "./dreamBusArrivalVoice";
+import { bindDreamBusVoiceUnlock, tryDreamBusVoiceBootUnlock, bindDreamBusVoiceVisibility, unlockDreamBusVoice, onDreamBusVoiceUnlockState, isDreamBusMobileTouch, isDreamBusVoiceUnlocked } from "./dreamBusArrivalVoice";
 
 const config = ref<DreamBusConfig | null>(null);
 const live = ref<DreamBusLive | null>(null);
@@ -24,7 +25,10 @@ const records = ref<DreamBusRecord[]>([]);
 const tick = ref(0);
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 let eventSource: EventSource | null = null;
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+
+const HEARTBEAT_VISIBLE_MS = 2000;
+const HEARTBEAT_HIDDEN_MS = 4000;
 
 const selectedHours = ref(2);
 const selectedRange = computed(() => selectedHours.value * 60);
@@ -35,6 +39,17 @@ const ratioMode = ref<RatioMode>("hour");
 const ratioValue = ref(1);
 const RATIO_HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => i + 1);
 const RATIO_DAY_OPTIONS = Array.from({ length: 7 }, (_, i) => i + 1);
+
+const showVoiceUnlockHint = ref(false);
+
+async function onVoiceUnlockTap() {
+  const ok = await unlockDreamBusVoice();
+  showVoiceUnlockHint.value = !ok && isDreamBusMobileTouch();
+}
+
+function refreshVoiceUnlockHint() {
+  showVoiceUnlockHint.value = isDreamBusMobileTouch() && !isDreamBusVoiceUnlocked();
+}
 
 const stations = computed<DreamBusStation[]>(() =>
   [...(config.value?.stations ?? [])].sort((a, b) => a.stationId - b.stationId),
@@ -95,7 +110,36 @@ async function loadConfig() {
 }
 
 async function loadLive() {
-  live.value = await fetchDreamBusLive();
+  const snap = await fetchDreamBusLiveSnapshot();
+  if (snap) live.value = snap.live;
+}
+
+async function runHeartbeat() {
+  const snap = await fetchDreamBusLiveSnapshot();
+  if (snap) live.value = snap.live;
+  tick.value++;
+}
+
+function heartbeatDelayMs(): number {
+  return typeof document !== "undefined" && document.hidden
+    ? HEARTBEAT_HIDDEN_MS
+    : HEARTBEAT_VISIBLE_MS;
+}
+
+function scheduleHeartbeat() {
+  if (heartbeatTimer) clearTimeout(heartbeatTimer);
+  heartbeatTimer = setTimeout(async () => {
+    await runHeartbeat();
+    scheduleHeartbeat();
+  }, heartbeatDelayMs());
+}
+
+function onVisibilityChange() {
+  scheduleHeartbeat();
+  if (typeof document !== "undefined" && !document.hidden) {
+    tick.value++;
+    void runHeartbeat();
+  }
 }
 
 async function loadRecords() {
@@ -117,8 +161,15 @@ function connectSSE() {
       const d = JSON.parse(e.data) as {
         live?: DreamBusLive;
         record?: DreamBusRecord | null;
+        ts?: number;
+        serverNow?: number;
+        leftRemaining?: number;
+        phaseEndsAt?: number;
       };
-      if (d.live) live.value = d.live;
+      applyDreamBusSseEvent(d);
+      if (d.live) {
+        live.value = d.live;
+      }
       if (d.record) {
         const exists = records.value.some((r) => r.sessionId === d.record!.sessionId);
         if (!exists) {
@@ -140,21 +191,41 @@ function cellTier(multiple?: number): "high" | "mid" | "low" {
   return dreamBusValueTier(multiple ?? 0);
 }
 
+let unbindVoiceUnlock: (() => void) | null = null;
+let unbindVoiceVisibility: (() => void) | null = null;
+let unbindVoiceUnlockState: (() => void) | null = null;
+
 onMounted(() => {
-  void prefetchDreamBusVoices();
+  void tryDreamBusVoiceBootUnlock();
+  unbindVoiceUnlock = bindDreamBusVoiceUnlock();
+  unbindVoiceVisibility = bindDreamBusVoiceVisibility();
+  unbindVoiceUnlockState = onDreamBusVoiceUnlockState((unlocked) => {
+    showVoiceUnlockHint.value = isDreamBusMobileTouch() && !unlocked;
+  });
+  refreshVoiceUnlockHint();
   void reload();
   connectSSE();
-  pollTimer = setInterval(() => {
-    void loadLive();
-  }, 10_000);
+  scheduleHeartbeat();
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", onVisibilityChange);
+  }
   tickTimer = setInterval(() => {
     tick.value++;
   }, 1000);
 });
 
 onUnmounted(() => {
+  unbindVoiceUnlock?.();
+  unbindVoiceUnlock = null;
+  unbindVoiceVisibility?.();
+  unbindVoiceVisibility = null;
+  unbindVoiceUnlockState?.();
+  unbindVoiceUnlockState = null;
+  if (typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+  }
   if (tickTimer) clearInterval(tickTimer);
-  if (pollTimer) clearInterval(pollTimer);
+  if (heartbeatTimer) clearTimeout(heartbeatTimer);
   if (eventSource) eventSource.close();
 });
 
@@ -163,6 +234,17 @@ defineExpose({ reload });
 
 <template>
   <div class="dream-bus-panel">
+    <button
+      v-if="showVoiceUnlockHint"
+      type="button"
+      class="db-voice-unlock"
+      aria-label="开启到站语音"
+      @click="onVoiceUnlockTap"
+      @touchend.prevent="onVoiceUnlockTap"
+    >
+      轻触开启语音
+    </button>
+
     <header class="db-header">
       <h2 class="db-title">宝宝巴士 · 到站观测</h2>
     </header>
@@ -287,6 +369,30 @@ defineExpose({ reload });
   width: min(100%, 72rem);
   margin: 0 auto;
   box-sizing: border-box;
+  position: relative;
+}
+
+.db-voice-unlock {
+  position: sticky;
+  top: 0.5rem;
+  z-index: 20;
+  align-self: center;
+  margin: 0 auto 0.25rem;
+  padding: 0.55rem 1.1rem;
+  border: 1px solid color-mix(in srgb, #ffb347 55%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, #ffb347 22%, #1a1208 78%);
+  color: #ffe8c8;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.db-voice-unlock:active {
+  transform: scale(0.98);
 }
 
 .db-header {
@@ -673,22 +779,53 @@ defineExpose({ reload });
 
 @media (max-width: 640px) {
   .db-section-head {
-    align-items: stretch;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem 0.5rem;
+  }
+
+  .db-section-title-wrap {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .db-section-title {
+    font-size: 0.9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .db-toolbar {
-    width: 100%;
+    width: auto;
+    flex: 0 0 auto;
     margin-left: 0;
-    justify-content: stretch;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    gap: 0.35rem;
   }
 
   .db-field {
-    flex: 1;
+    flex: 0 0 auto;
   }
 
   .db-select {
-    flex: 1;
-    min-width: 0;
+    flex: none;
+    min-width: 4.8rem;
+    min-height: 1.75rem;
+    padding: 0.22rem 1.5rem 0.22rem 0.5rem;
+    font-size: 0.76rem;
+  }
+
+  .db-segment {
+    flex-shrink: 0;
+  }
+
+  .db-segment-btn {
+    padding: 0.18rem 0.4rem;
+    font-size: 0.7rem;
+    min-height: 1.65rem;
   }
 
   .db-grid {

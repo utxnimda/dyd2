@@ -30,6 +30,7 @@ import { execSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { OPT_TO_SYSTEMD, systemdUnitsToStop } from "./fmz-opt-bundles.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -51,16 +52,6 @@ const SYNC_NGINX =
   process.env.FMZ_DEPLOY_SYNC_NGINX === "1" || /^true$/i.test(process.env.FMZ_DEPLOY_SYNC_NGINX || "");
 const REMOTE_NGINX_CONF_D = (process.env.FMZ_DEPLOY_NGINX_CONF_D || "/etc/nginx/conf.d").replace(/\/+$/, "");
 
-/** release/opt/<dir>/ → 远端 /opt/<dir>/ ；与 pack-release.mjs OPT_RELEASE_BUNDLES.remoteName 一致 */
-const OPT_TO_SYSTEMD = {
-  "fmz-danmaku-server": "fmz-danmaku",
-  "fmz-ai-agent-server": "fmz-ai-agent",
-  "fmz-audio-server": "fmz-audio",
-  "fmz-crimes-server": "fmz-crimes",
-  "fmz-defense-server": "fmz-defense",
-  "fmz-reactions-server": "fmz-reactions",
-};
-
 /** 同步后需在远端安装原生/依赖模块的服务目录 */
 const OPT_NEEDS_NPM = new Set([
   "fmz-ai-agent-server",
@@ -68,16 +59,6 @@ const OPT_NEEDS_NPM = new Set([
   "fmz-defense-server",
 ]);
 
-/** 按 package.json fmzFeatures 判定应停用的 systemd 单元（与 OPT_TO_SYSTEMD 值一致） */
-function backendUnitsToStop(features) {
-  const stop = [];
-  if (features.aiAgent !== true) stop.push("fmz-ai-agent");
-  if (features.voiceClone !== true) stop.push("fmz-voice-clone");
-  if (features.douyuDanmaku !== true && features.dreamBus !== true) {
-    stop.push("fmz-danmaku");
-  }
-  return stop;
-}
 if (!existsSync(SSH_KEY)) {
   console.error(`❌ SSH 私钥不存在: ${SSH_KEY}`);
   console.error(
@@ -252,8 +233,8 @@ if (!SKIP_BACKEND && existsSync(optLocalRoot)) {
         }
       }
       const npmJoined = npmSteps.length ? `${npmSteps.join(" && ")} && ` : "";
-      const restartCmd = `${npmJoined}systemctl restart ${uniqueUnits.join(" ")}`;
-      console.log("\n   🔁 远端依赖安装（如有）并重启: " + uniqueUnits.join(", "));
+      const restartCmd = `${npmJoined}systemctl enable ${uniqueUnits.join(" ")} && systemctl restart ${uniqueUnits.join(" ")}`;
+      console.log("\n   🔁 远端依赖安装（如有）并 enable + restart: " + uniqueUnits.join(", "));
       run(`${SSH_CMD} "${restartCmd}"`);
       console.log("   ✅ 后端服务已重启\n");
     }
@@ -281,13 +262,14 @@ if (!SKIP_BACKEND && existsSync(optLocalRoot)) {
 if (!SKIP_BACKEND) {
   const pkgFeatures =
     JSON.parse(readFileSync(join(root, "package.json"), "utf-8")).fmzFeatures || {};
-  const stopUnits = backendUnitsToStop(pkgFeatures);
+  const stopUnits = systemdUnitsToStop(pkgFeatures);
   if (stopUnits.length > 0) {
-    console.log("⏹️  停用已关闭特性的远端后端: " + stopUnits.join(", "));
-    run(`${SSH_CMD} "systemctl stop ${stopUnits.join(" ")} 2>/dev/null || true"`, {
-      ignoreError: true,
-    });
-    console.log("   ✅ 已发送 stop（未安装的单元会被忽略）\n");
+    console.log("⏹️  停用未纳入本版 release 的远端后端: " + stopUnits.join(", "));
+    run(
+      `${SSH_CMD} "systemctl stop ${stopUnits.join(" ")} 2>/dev/null || true; systemctl disable ${stopUnits.join(" ")} 2>/dev/null || true"`,
+      { ignoreError: true },
+    );
+    console.log("   ✅ 已 stop + disable（未安装的单元会被忽略）\n");
   }
 }
 
@@ -305,6 +287,8 @@ if (SYNC_NGINX) {
         console.log(`   $ ${uploadConf}`);
         run(uploadConf);
       }
+      // 旧版曾用 fmz-dashboard.conf，与 nginx-fmz-dashboard.conf 并存会触发 server_name 冲突
+      run(`${SSH_CMD} "rm -f ${REMOTE_NGINX_CONF_D}/fmz-dashboard.conf"`, { ignoreError: true });
       run(`${SSH_CMD} "nginx -t && systemctl reload nginx"`);
       console.log("   ✅ Nginx 已 reload\n");
     } else {

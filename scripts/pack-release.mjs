@@ -21,6 +21,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFil
 import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { OPT_RELEASE_BUNDLES } from "./fmz-opt-bundles.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
@@ -151,54 +152,8 @@ const skipConfig = process.argv.includes("--skip-config");
 /**
  * 与生产环境 /opt/<remoteName>/ 目录一致；仅在对应特性为 true 时纳入 release（赞踩见 include）。
  * 注：quota（用量看板）**不**走本流水线，仅使用 `npm run pack:quota`（`scripts/pack-quota.mjs`）。
- * copies: [ 仓库相对路径, 放入 opt 内文件名 ]
+ * copies 定义见 scripts/fmz-opt-bundles.mjs。
  */
-const OPT_RELEASE_BUNDLES = [
-  {
-    remoteName: "fmz-danmaku-server",
-    include: (f) => f.douyuDanmaku === true || f.dreamBus === true,
-    copies: [
-      ["server/douyu-danmaku-server.mjs", "douyu-danmaku-server.mjs"],
-      ["server/gemini-openai-compat-chat-filter.mjs", "gemini-openai-compat-chat-filter.mjs"],
-    ],
-  },
-  {
-    remoteName: "fmz-ai-agent-server",
-    include: (f) => f.aiAgent === true,
-    copies: [
-      ["server/ai-agent-server.mjs", "ai-agent-server.mjs"],
-      ["server/gemini-openai-compat-chat-filter.mjs", "gemini-openai-compat-chat-filter.mjs"],
-      ["deploy/fmz-ai-agent-server.package.json", "package.json"],
-    ],
-  },
-  {
-    remoteName: "fmz-audio-server",
-    include: (f) => f.audio === true,
-    copies: [["server/audio-extractor-server.mjs", "audio-extractor-server.mjs"]],
-  },
-  {
-    remoteName: "fmz-crimes-server",
-    include: (f) => f.crimes === true,
-    copies: [["server/crimes-server.mjs", "crimes-server.mjs"]],
-  },
-  {
-    remoteName: "fmz-defense-server",
-    include: (f) => f.sanguo === true,
-    copies: [
-      ["server/defense-tower-server.mjs", "defense-tower-server.mjs"],
-      ["server/package.json", "package.json"],
-    ],
-  },
-  {
-    remoteName: "fmz-reactions-server",
-    include: (f) =>
-      f.battle === true || f.treasury === true || f.preliminary === true || f.users === true,
-    copies: [
-      ["server/reactions-server.mjs", "reactions-server.mjs"],
-      ["server/package.json", "package.json"],
-    ],
-  },
-];
 
 /**
  * 与各 opt 目录并列：`douyu-danmaku-server.mjs` import `./fmz-static.mjs`；

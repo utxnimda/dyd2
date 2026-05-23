@@ -21,7 +21,7 @@ import { geminiEligibleForOpenAiCompatTextChat } from "./gemini-openai-compat-ch
 import { fmzStaticFileMtimeMs, readDouyuFallbackGiftMetricsFresh } from "./fmz-static.mjs";
 import {
   getDreamBusConfigCached,
-  getDreamBusLiveState,
+  getDreamBusLiveSnapshot,
   getDreamBusRecords,
   ingestDreamBusSession,
   loadDreamBusRecordsFromDisk,
@@ -3519,11 +3519,15 @@ function handleDreamBusSessionMessage(roomId, msg) {
   if (!msg || msg.type !== "dream_bus_session") return;
   try {
     const result = ingestDreamBusSession(roomId, msg);
+    const snap = getDreamBusLiveSnapshot();
     broadcastToSSE("dream-bus", {
-      live: result.live,
+      live: snap.live,
+      serverNow: snap.serverNow,
+      leftRemaining: snap.leftRemaining,
+      phaseEndsAt: snap.phaseEndsAt,
       record: result.record,
       roomId: String(roomId ?? "").trim(),
-      ts: Date.now(),
+      ts: snap.serverNow,
     });
   } catch (e) {
     console.warn(`[danmaku] dream_bus_session ingest failed: ${e.message}`);
@@ -4541,7 +4545,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if (path === "/dream-bus/live" && req.method === "GET") {
-    return jsonReply(res, { ok: true, live: getDreamBusLiveState() });
+    return jsonReply(res, { ok: true, ...getDreamBusLiveSnapshot() });
   }
   if (path === "/dream-bus/records" && req.method === "GET") {
     const limit = Math.min(5000, Math.max(1, Number(url.searchParams.get("limit")) || 1440));

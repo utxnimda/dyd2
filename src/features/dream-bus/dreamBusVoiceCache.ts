@@ -50,6 +50,11 @@ async function downloadToCache(remoteUrl: string): Promise<string | null> {
   }
 }
 
+/** 手势解锁路径：仅同步读内存，避免 iOS Safari 因 await 丢失用户激活 */
+export function resolveDreamBusVoicePlayUrlSync(remoteUrl: string): string {
+  return blobUrlByRemote.get(remoteUrl) ?? remoteUrl;
+}
+
 /** 优先内存 → Cache Storage → 网络下载并写入缓存 */
 export async function resolveDreamBusVoicePlayUrl(remoteUrl: string): Promise<string> {
   const cached = blobUrlByRemote.get(remoteUrl);
@@ -81,13 +86,12 @@ async function prefetchOne(remoteUrl: string): Promise<void> {
   if (downloaded) blobUrlByRemote.set(remoteUrl, downloaded);
 }
 
-/** 打开宝宝巴士页后预下载全部语音到本地（Cache + 内存 blob） */
+/** 打开宝宝巴士页后预下载全部语音到本地（Cache + 内存 blob；桌面 HTMLAudio 用） */
 export function prefetchDreamBusVoices(): Promise<void> {
   if (typeof window === "undefined") return Promise.resolve();
-  if (!prefetchPromise) {
-    prefetchPromise = Promise.all(DREAM_BUS_ALL_VOICE_URLS.map((u) => prefetchOne(u))).then(
-      () => undefined,
-    );
-  }
+  if (prefetchPromise) return prefetchPromise;
+  prefetchPromise = Promise.all(DREAM_BUS_ALL_VOICE_URLS.map((u) => prefetchOne(u))).then(
+    () => undefined,
+  );
   return prefetchPromise;
 }

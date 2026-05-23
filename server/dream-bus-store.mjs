@@ -123,6 +123,25 @@ export function getDreamBusLiveState() {
   return liveState ? { ...liveState } : null;
 }
 
+/** 服务端计算的 live 快照（含剩余秒数，供客户端心跳校准） */
+export function getDreamBusLiveSnapshot() {
+  const serverNow = Date.now();
+  if (!liveState) {
+    return { live: null, serverNow, leftRemaining: 0, phaseEndsAt: serverNow };
+  }
+  const updatedAt = Number(liveState.updatedAt) || 0;
+  const leftTime = Number(liveState.leftTime) || 0;
+  const elapsed =
+    updatedAt > 0 ? Math.max(0, (serverNow - updatedAt) / 1000) : 0;
+  const leftRemaining = Math.max(0, leftTime - elapsed);
+  return {
+    live: { ...liveState },
+    serverNow,
+    leftRemaining,
+    phaseEndsAt: serverNow + leftRemaining * 1000,
+  };
+}
+
 export function getDreamBusRecords(limit = 1440) {
   const n = Math.min(MAX_RECORDS, Math.max(1, Number(limit) || 1440));
   return records.slice(0, n);

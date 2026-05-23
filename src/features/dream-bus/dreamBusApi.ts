@@ -41,20 +41,99 @@ export type DreamBusRecord = {
   timeLabel?: string;
 };
 
+import {
+  resetDreamBusLiveHeartbeat,
+  syncDreamBusPhaseDeadline,
+} from "./dreamBusLiveClock";
+
 const API = "/__fmz_danmaku";
+
+export type DreamBusLiveSnapshot = {
+  live: DreamBusLive | null;
+  serverNow: number;
+  leftRemaining: number;
+  phaseEndsAt: number;
+};
+
+let lastAppliedSessionId = "";
+
+function applyDreamBusLiveSnapshot(j: Record<string, unknown>): DreamBusLiveSnapshot {
+  const live = (j?.live ?? null) as DreamBusLive | null;
+  const serverNow = Number(j?.serverNow ?? j?.ts);
+  let leftRemaining = Number(j?.leftRemaining);
+  const phaseEndsAt = Number(j?.phaseEndsAt);
+  const sessionId = String((live as DreamBusLive | null)?.sessionId ?? "").trim();
+
+  if (sessionId && lastAppliedSessionId && sessionId !== lastAppliedSessionId) {
+    resetDreamBusLiveHeartbeat();
+  }
+  if (sessionId) lastAppliedSessionId = sessionId;
+  else if (!live) lastAppliedSessionId = "";
+
+  if (live && Number.isFinite(serverNow)) {
+    if (!Number.isFinite(leftRemaining) && Number.isFinite(phaseEndsAt)) {
+      leftRemaining = Math.max(0, (phaseEndsAt - serverNow) / 1000);
+    }
+    if (!Number.isFinite(leftRemaining)) {
+      const updatedAt = Number(live.updatedAt) || 0;
+      const leftTime = Number(live.leftTime) || 0;
+      const elapsed = updatedAt > 0 ? Math.max(0, (serverNow - updatedAt) / 1000) : 0;
+      leftRemaining = Math.max(0, leftTime - elapsed);
+    }
+    syncDreamBusPhaseDeadline(serverNow, leftRemaining, sessionId);
+  } else if (!live) {
+    resetDreamBusLiveHeartbeat();
+    lastAppliedSessionId = "";
+  }
+
+  const endsAt =
+    Number.isFinite(phaseEndsAt) && phaseEndsAt > 0
+      ? phaseEndsAt
+      : Number.isFinite(serverNow) && Number.isFinite(leftRemaining)
+        ? serverNow + leftRemaining * 1000
+        : 0;
+
+  return {
+    live,
+    serverNow: Number.isFinite(serverNow) ? serverNow : 0,
+    leftRemaining: Number.isFinite(leftRemaining) ? leftRemaining : 0,
+    phaseEndsAt: endsAt,
+  };
+}
+
+/** SSE dream-bus 事件：同步时钟 + 阶段截止 */
+export function applyDreamBusSseEvent(d: {
+  live?: DreamBusLive | null;
+  serverNow?: number;
+  leftRemaining?: number;
+  phaseEndsAt?: number;
+  ts?: number;
+}): DreamBusLiveSnapshot {
+  return applyDreamBusLiveSnapshot({
+    live: d.live ?? null,
+    serverNow: d.serverNow ?? d.ts,
+    leftRemaining: d.leftRemaining,
+    phaseEndsAt: d.phaseEndsAt,
+  });
+}
+
+export async function fetchDreamBusLiveSnapshot(): Promise<DreamBusLiveSnapshot | null> {
+  const r = await fetch(`${API}/dream-bus/live`);
+  if (!r.ok) return null;
+  const j = await r.json();
+  return applyDreamBusLiveSnapshot(j as Record<string, unknown>);
+}
+
+export async function fetchDreamBusLive(): Promise<DreamBusLive | null> {
+  const snap = await fetchDreamBusLiveSnapshot();
+  return snap?.live ?? null;
+}
 
 export async function fetchDreamBusConfig(): Promise<DreamBusConfig | null> {
   const r = await fetch(`${API}/dream-bus/config`);
   if (!r.ok) return null;
   const j = await r.json();
   return (j?.config ?? null) as DreamBusConfig | null;
-}
-
-export async function fetchDreamBusLive(): Promise<DreamBusLive | null> {
-  const r = await fetch(`${API}/dream-bus/live`);
-  if (!r.ok) return null;
-  const j = await r.json();
-  return (j?.live ?? null) as DreamBusLive | null;
 }
 
 export async function fetchDreamBusRecords(limit = 1440): Promise<DreamBusRecord[]> {

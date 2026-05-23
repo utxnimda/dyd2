@@ -13,11 +13,13 @@ import {
   dreamBusWrapRowStepPx,
   DREAM_BUS_MOBILE_ICON_PX,
   DREAM_BUS_MOBILE_LABEL_MAX_PX,
+  DREAM_BUS_ROUTE_LAYOUT,
 } from "./dreamBusSpriteLayout";
 import {
   playDreamBusArrivalVoice,
   playDreamBusDepartureVoice,
   resetDreamBusArrivalVoiceSession,
+  onDreamBusVoiceUnlockState,
 } from "./dreamBusArrivalVoice";
 import type { DreamBusConfig, DreamBusLive } from "./dreamBusApi";
 import {
@@ -25,19 +27,23 @@ import {
   buildStationDriveTimings,
   dreamBusDriveSegmentContext,
 } from "./dreamBusMapLayout";
+import { dreamBusLiveLeftSec } from "./dreamBusLiveClock";
 import {
   createDreamBusRunnerAnimState,
   DREAM_BUS_DRIVE_SEGMENT_SEC,
+  DREAM_BUS_REVEAL_SEC,
   dreamBusDisplaySeconds,
   dreamBusDriveDurationSec,
   dreamBusDriveProgress01,
-  dreamBusInterpCountdown,
+  dreamBusRevealElapsedSec,
   dreamBusRunnerCountdownSec,
   dreamBusRunnerLeftPct,
+  dreamBusRunnerTopPx,
   dreamBusRunnerUsesRunAnim,
   syncDreamBusRunnerFromLive,
   tickDreamBusRunnerAnim,
 } from "./dreamBusRunnerAnim";
+import { dreamBusNowMs } from "./dreamBusServerClock";
 import DreamBusStationIcon from "./DreamBusStationIcon.vue";
 import { DREAM_BUS_LABEL_PRESETS } from "./dreamBusStationLabelLayout";
 
@@ -47,14 +53,16 @@ const props = defineProps<{
   clock: number;
 }>();
 
-const REVEAL_PHASE_SEC = 15;
+const REVEAL_PHASE_SEC = DREAM_BUS_REVEAL_SEC;
 const ROUTE_MOBILE_BP = 640;
 
 const animState = reactive(createDreamBusRunnerAnimState());
 const nowMs = ref(Date.now());
+const postDepartCountdownTotalSec = ref(REVEAL_PHASE_SEC);
 const isRouteMqMobile = ref(false);
 let routeMobileMq: MediaQueryList | null = null;
 let rafId = 0;
+let unbindVoiceUnlockRetry: (() => void) | null = null;
 
 function syncRouteMobile() {
   isRouteMqMobile.value = routeMobileMq?.matches ?? false;
@@ -86,8 +94,13 @@ const routeLabelPreset = computed(() => {
 function startAnimLoop() {
   cancelAnimationFrame(rafId);
   const loop = () => {
-    nowMs.value = Date.now();
+    nowMs.value = dreamBusNowMs();
     tickDreamBusRunnerAnim(animState, props.live, nowMs.value, routeWaypoints.value);
+    if (isWaiting.value) {
+      void maybePlayDepartureVoice();
+    } else {
+      void maybePlayHoldVoice();
+    }
     if (
       animState.phase === "wait" ||
       animState.phase === "drive" ||
@@ -100,32 +113,6 @@ function startAnimLoop() {
   };
   rafId = requestAnimationFrame(loop);
 }
-
-watch(
-  () => props.live,
-  (live) => {
-    syncDreamBusRunnerFromLive(animState, live, Date.now());
-    startAnimLoop();
-  },
-  { immediate: true, deep: true },
-);
-
-watch(
-  () => props.clock,
-  () => {
-    nowMs.value = Date.now();
-    syncDreamBusRunnerFromLive(animState, props.live, nowMs.value);
-    tickDreamBusRunnerAnim(animState, props.live, nowMs.value, routeWaypoints.value);
-    startAnimLoop();
-  },
-);
-
-watch(
-  () => animState.phase,
-  () => {
-    startAnimLoop();
-  },
-);
 
 const routeEl = ref<HTMLElement | null>(null);
 const routeWidthPx = ref(680);
@@ -146,12 +133,17 @@ onMounted(() => {
     routeResizeObserver = new ResizeObserver(syncRouteWidth);
     if (routeEl.value) routeResizeObserver.observe(routeEl.value);
   }
+  unbindVoiceUnlockRetry = onDreamBusVoiceUnlockState((unlocked) => {
+    if (unlocked) syncVoiceAfterLive(props.live);
+  });
 });
 
 onUnmounted(() => {
   cancelAnimationFrame(rafId);
   routeResizeObserver?.disconnect();
   routeMobileMq?.removeEventListener("change", syncRouteMobile);
+  unbindVoiceUnlockRetry?.();
+  unbindVoiceUnlockRetry = null;
 });
 
 const stations = computed(() =>
@@ -184,13 +176,25 @@ const valueRouteStopsPositioned = computed(() => {
 const routeWaypoints = computed(() => {
   const stops = valueRouteStopsPositioned.value;
   const startPct = routeGeometry.value.busStartLeftPct;
-  if (!stops.length) return [{ stationId: 0, leftPct: startPct, topPct: 50 }];
+  const compact = isRouteCompact.value;
+  const rowTop = (valueRank: number) =>
+    compact
+      ? dreamBusWrapBusTopPx(
+          dreamBusStopRowIndex(valueRank, routeStationsPerRow.value),
+          routeMobileGrid.value,
+        )
+      : DREAM_BUS_ROUTE_LAYOUT.busWrapTopPx;
+  const startTop = rowTop(0);
+  if (!stops.length) {
+    return [{ stationId: 0, leftPct: startPct, topPct: 50, topPx: startTop }];
+  }
   return [
-    { stationId: 0, leftPct: startPct, topPct: 50 },
+    { stationId: 0, leftPct: startPct, topPct: 50, topPx: startTop },
     ...stops.map((s) => ({
       stationId: s.stationId,
       leftPct: s.leftPct,
       topPct: s.topPct,
+      topPx: rowTop(s.valueRank),
     })),
   ];
 });
@@ -217,6 +221,12 @@ const driveElapsedSec = computed(() => {
   void nowMs.value;
   void props.clock;
   if (animState.phase !== "drive") return 0;
+  if (props.live?.status === "2") {
+    return Math.min(
+      driveDurationSec.value,
+      dreamBusRevealElapsedSec(props.live, nowMs.value),
+    );
+  }
   return Math.min(
     driveDurationSec.value,
     Math.max(0, (nowMs.value - animState.driveStartedAt) / 1000),
@@ -256,11 +266,172 @@ const isWaiting = computed(
   () => animState.phase === "wait" || props.live?.status === "0",
 );
 
+function valueRankForStationId(stationId: number): number {
+  const stop = valueRouteStopsPositioned.value.find((s) => s.stationId === stationId);
+  return stop?.valueRank ?? 0;
+}
+
+let lastHoldVoiceKey = "";
+let holdVoiceInFlight = false;
+let departureVoiceInFlight = false;
+
+async function maybePlayHoldVoice() {
+  if (holdVoiceInFlight) return;
+  if (animState.phase !== "hold" || animState.arrivedStationId <= 0) return;
+  const sessionId = animState.sessionId;
+  if (!sessionId) return;
+  const key = `${sessionId}:${animState.arrivedStationId}`;
+  if (key === lastHoldVoiceKey) return;
+  holdVoiceInFlight = true;
+  try {
+    const ok = await playDreamBusArrivalVoice(
+      valueRankForStationId(animState.arrivedStationId),
+      sessionId,
+    );
+    if (ok) lastHoldVoiceKey = key;
+  } finally {
+    holdVoiceInFlight = false;
+  }
+}
+
+async function maybePlayDepartureVoice() {
+  if (departureVoiceInFlight) return;
+  if (!isWaiting.value) return;
+  const sessionId = animState.sessionId || String(props.live?.sessionId ?? "");
+  if (!sessionId) return;
+  const leftSec = leftTimeDisplay.value;
+  if (leftSec > 7 || leftSec < 2) return;
+  departureVoiceInFlight = true;
+  try {
+    await playDreamBusDepartureVoice(sessionId);
+  } finally {
+    departureVoiceInFlight = false;
+  }
+}
+
+function syncVoiceAfterLive(live: DreamBusLive | null) {
+  void maybePlayHoldVoice();
+  if (live && String(live.status) === "0") {
+    void maybePlayDepartureVoice();
+  }
+}
+
+watch(
+  () => [animState.phase, animState.arrivedStationId, animState.sessionId] as const,
+  () => {
+    maybePlayHoldVoice();
+  },
+);
+
+watch(
+  () => props.live?.sessionId,
+  (sid, prev) => {
+    if (sid !== prev) {
+      lastHoldVoiceKey = "";
+      resetDreamBusArrivalVoiceSession();
+    }
+  },
+);
+
+watch(
+  () =>
+    [
+      isWaiting.value,
+      leftTimeDisplay.value,
+      animState.sessionId || String(props.live?.sessionId ?? ""),
+    ] as const,
+  () => {
+    maybePlayDepartureVoice();
+  },
+);
+
+watch(
+  () => [routeWaypoints.value.length, props.config?.stations?.length ?? 0] as const,
+  () => {
+    syncDreamBusRunnerFromLive(animState, props.live, dreamBusNowMs(), routeWaypoints.value);
+    syncVoiceAfterLive(props.live);
+    startAnimLoop();
+  },
+);
+
+watch(
+  () => props.live,
+  (live) => {
+    syncDreamBusRunnerFromLive(animState, live, dreamBusNowMs(), routeWaypoints.value);
+    if (live?.status === "2") {
+      const left = dreamBusLiveLeftSec(live, dreamBusNowMs());
+      postDepartCountdownTotalSec.value = Math.max(REVEAL_PHASE_SEC, left);
+    }
+    syncVoiceAfterLive(live);
+    startAnimLoop();
+  },
+  { immediate: true, deep: true },
+);
+
+watch(
+  () => props.clock,
+  () => {
+    nowMs.value = dreamBusNowMs();
+    syncDreamBusRunnerFromLive(animState, props.live, nowMs.value, routeWaypoints.value);
+    tickDreamBusRunnerAnim(animState, props.live, nowMs.value, routeWaypoints.value);
+    maybePlayDepartureVoice();
+    startAnimLoop();
+  },
+);
+
+/** 进入爬行时快照 leftTime 总量，供爬行 + 休假进度条共用 */
+watch(
+  () => props.live?.sessionId,
+  (sid, prev) => {
+    if (sid && prev && sid !== prev) {
+      postDepartCountdownTotalSec.value = REVEAL_PHASE_SEC;
+    }
+  },
+);
+
+watch(
+  () =>
+    [
+      animState.phase,
+      animState.driveStartedAt,
+      animState.sessionId,
+      props.live?.status,
+      props.live?.sessionId,
+    ] as const,
+  ([phase, driveStartedAt]) => {
+    const live = props.live;
+    if (live?.status !== "2") return;
+    if (phase === "drive" && driveStartedAt) {
+      const left = dreamBusLiveLeftSec(live, dreamBusNowMs());
+      postDepartCountdownTotalSec.value = Math.max(REVEAL_PHASE_SEC, left);
+      return;
+    }
+    if (phase === "hold") {
+      const left = dreamBusLiveLeftSec(live, dreamBusNowMs());
+      postDepartCountdownTotalSec.value = Math.max(
+        postDepartCountdownTotalSec.value,
+        REVEAL_PHASE_SEC,
+        left,
+      );
+    }
+  },
+);
+
+watch(
+  () => animState.phase,
+  (phase, prev) => {
+    if (phase === "hold" && prev !== "hold") {
+      void maybePlayHoldVoice();
+    }
+    startAnimLoop();
+  },
+);
+
 const isDriving = computed(() => animState.phase === "drive");
 
-const isOnVacation = computed(
-  () => animState.phase === "drive" || animState.phase === "hold",
-);
+const isOnVacation = computed(() => animState.phase === "hold");
+
+const isCrawling = computed(() => animState.phase === "drive");
 
 const revealedStation = computed(() => {
   if (animState.phase !== "hold") return 0;
@@ -286,27 +457,37 @@ function leftPctToProgressPct(leftPct: number): number {
   return Math.max(0, Math.min(100, ((leftPct - routeStartLeftPct.value) / span) * 100));
 }
 
+/** 发车后爬行 + 休假：共用 live.leftTime 驱动进度条 */
+function postDepartCountdownProgressPct(nowMs: number): number | null {
+  const live = props.live;
+  if (live?.status !== "2") return null;
+  if (animState.phase !== "drive" && animState.phase !== "hold") return null;
+  const left = dreamBusLiveLeftSec(live, nowMs);
+  const total = postDepartCountdownTotalSec.value;
+  const clampedLeft = Math.max(0, Math.min(total, left));
+  return ((total - clampedLeft) / total) * 100;
+}
+
 const phaseProgressPct = computed(() => {
   void nowMs.value;
   void props.clock;
 
-  if (animState.phase === "wait" || animState.phase === "drive") {
+  if (animState.phase === "wait" || props.live?.status === "0") {
     return dreamBusDriveProgress01(animState, props.live, nowMs.value, routeWaypoints.value) * 100;
   }
 
-  if (animState.phase === "hold") {
-    const left = dreamBusRunnerLeftPct(animState, routeWaypoints.value, nowMs.value);
+  if (animState.phase === "drive" || animState.phase === "hold") {
+    const postDepartPct = postDepartCountdownProgressPct(nowMs.value);
+    if (postDepartPct != null) return postDepartPct;
+    if (animState.phase === "drive") {
+      return dreamBusDriveProgress01(animState, props.live, nowMs.value, routeWaypoints.value) * 100;
+    }
+    const left = dreamBusRunnerLeftPct(animState, routeWaypoints.value, nowMs.value, props.live);
     return leftPctToProgressPct(left);
   }
 
-  const live = props.live;
-  if (live?.status === "0") {
-    return dreamBusDriveProgress01(animState, live, nowMs.value, routeWaypoints.value) * 100;
-  }
-  if (live?.status === "2") {
-    const left = dreamBusInterpCountdown(live.leftTime, live.updatedAt, nowMs.value);
-    const clamped = Math.max(0, Math.min(REVEAL_PHASE_SEC, left));
-    return ((REVEAL_PHASE_SEC - clamped) / REVEAL_PHASE_SEC) * 100;
+  if (props.live?.status === "2") {
+    return postDepartCountdownProgressPct(nowMs.value) ?? 0;
   }
 
   return 0;
@@ -343,48 +524,13 @@ const compactRouteHeightPx = computed(() =>
     : null,
 );
 
-function valueRankForStationId(stationId: number): number {
-  const stop = valueRouteStopsPositioned.value.find((s) => s.stationId === stationId);
-  return stop?.valueRank ?? 0;
-}
-
-const busRowIndex = computed(() => {
-  void nowMs.value;
-  void props.clock;
-
-  if (!isRouteCompact.value) return 0;
-
-  if (animState.phase === "hold") {
-    return dreamBusStopRowIndex(
-      valueRankForStationId(animState.arrivedStationId),
-      routeStationsPerRow.value,
-    );
-  }
-
-  if (animState.phase === "drive") {
-    const elapsed = Math.max(0, (nowMs.value - animState.driveStartedAt) / 1000);
-    const segIdx = Math.min(
-      Math.max(0, routeWaypoints.value.length - 2),
-      Math.floor(elapsed / DREAM_BUS_DRIVE_SEGMENT_SEC),
-    );
-    const nextWp = routeWaypoints.value[segIdx + 1] ?? routeWaypoints.value[segIdx];
-    if (!nextWp || nextWp.stationId <= 0) return 0;
-    return dreamBusStopRowIndex(
-      valueRankForStationId(nextWp.stationId),
-      routeStationsPerRow.value,
-    );
-  }
-
-  return 0;
-});
-
 const busWrapStyle = computed(() => {
   const style: Record<string, string> = {
     left: `${busLeftPct.value}%`,
     width: busWrapWidth.value,
   };
   if (isRouteCompact.value) {
-    style.top = `${dreamBusWrapBusTopPx(busRowIndex.value, routeMobileGrid.value)}px`;
+    style.top = `${busTopPx.value}px`;
   }
   return style;
 });
@@ -394,42 +540,6 @@ function stopRowIndex(valueRank: number): number {
     ? dreamBusStopRowIndex(valueRank, routeStationsPerRow.value)
     : 0;
 }
-
-let lastHoldVoiceKey = "";
-
-watch(
-  () => [animState.phase, animState.arrivedStationId, animState.sessionId] as const,
-  ([phase, stationId, sessionId]) => {
-    if (phase !== "hold" || stationId <= 0) return;
-    const key = `${sessionId}:${stationId}`;
-    if (key === lastHoldVoiceKey) return;
-    lastHoldVoiceKey = key;
-    playDreamBusArrivalVoice(valueRankForStationId(stationId), sessionId);
-  },
-);
-
-watch(
-  () => props.live?.sessionId,
-  (sid, prev) => {
-    if (sid !== prev) {
-      lastHoldVoiceKey = "";
-      resetDreamBusArrivalVoiceSession();
-    }
-  },
-);
-
-watch(
-  () =>
-    [
-      isWaiting.value,
-      leftTimeDisplay.value,
-      animState.sessionId || String(props.live?.sessionId ?? ""),
-    ] as const,
-  ([waiting, leftSec, sessionId]) => {
-    if (!waiting || leftSec !== 5 || !sessionId) return;
-    playDreamBusDepartureVoice(sessionId);
-  },
-);
 
 const progressMode = computed<"idle" | "wait" | "drive" | "reveal">(() => {
   if (animState.phase === "wait" || props.live?.status === "0") return "wait";
@@ -441,7 +551,22 @@ const progressMode = computed<"idle" | "wait" | "drive" | "reveal">(() => {
 const busLeftPct = computed(() => {
   void nowMs.value;
   void props.clock;
-  return dreamBusRunnerLeftPct(animState, routeWaypoints.value, nowMs.value);
+  return dreamBusRunnerLeftPct(animState, routeWaypoints.value, nowMs.value, props.live);
+});
+
+const busTopPx = computed(() => {
+  void nowMs.value;
+  void props.clock;
+  const fallback = isRouteCompact.value
+    ? dreamBusWrapBusTopPx(0, routeMobileGrid.value)
+    : DREAM_BUS_ROUTE_LAYOUT.busWrapTopPx;
+  return dreamBusRunnerTopPx(
+    animState,
+    routeWaypoints.value,
+    nowMs.value,
+    fallback,
+    props.live,
+  );
 });
 
 const busIsRunning = computed(() => dreamBusRunnerUsesRunAnim(animState));
@@ -470,6 +595,7 @@ const progressCountdownText = computed(() => {
   if (!showProgressCountdown.value) return "";
   const n = leftTimeDisplay.value;
   if (isWaiting.value) return `还有 ${n} 秒发车`;
+  if (isCrawling.value) return `宝宝爬行中 ${n} 秒`;
   if (isOnVacation.value) return `宝宝休假还剩 ${n} 秒`;
   return "";
 });
@@ -686,6 +812,11 @@ const progressCountdownText = computed(() => {
   background: linear-gradient(90deg, #48c9b0, #7dcea0);
 }
 
+.db-progress--reveal .db-progress-glow {
+  box-shadow: 0 0 10px color-mix(in srgb, #48c9b0 55%, transparent);
+  opacity: 0.75;
+}
+
 .db-progress--idle .db-progress-fill {
   background: color-mix(in srgb, var(--fg, #eee) 25%, transparent);
   width: 0 !important;
@@ -814,5 +945,25 @@ const progressCountdownText = computed(() => {
 .db-value-route--compact .db-value-route-line--row {
   left: 4%;
   right: 4%;
+}
+
+.db-value-route--mobile-grid .db-value-stop {
+  max-width: 52px;
+}
+
+.db-value-route--mobile-grid .db-value-route-line--row {
+  left: 2%;
+  right: 1%;
+}
+
+@media (max-width: 640px) {
+  .db-value-route-wrap {
+    padding-left: 0.35rem;
+    padding-right: 0.25rem;
+  }
+
+  .db-value-route {
+    margin: 0;
+  }
 }
 </style>

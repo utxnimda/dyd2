@@ -35,17 +35,33 @@ export const DREAM_BUS_WRAP_COL_GAP_PX = 8;
 export const DREAM_BUS_MIN_STATION_CENTER_GAP_PX = 60;
 
 /** 车尾与站牌右缘的间距 */
-export const DREAM_BUS_BOARD_TAIL_GAP_PX = 6;
+export const DREAM_BUS_BOARD_TAIL_GAP_PX = -6;
 /** 站牌右缘到首站左缘：略大于一个车宽（额外空隙） */
 export const DREAM_BUS_BOARD_TO_FIRST_EXTRA_PX = 4;
 
 /** 手机端：固定每行 3 站，共 4 行 */
-export const DREAM_BUS_MOBILE_ROW_STEP_PX = 78;
+export const DREAM_BUS_MOBILE_ROW_STEP_PX = 82;
 export const DREAM_BUS_MOBILE_LINE_BELOW_ROW_PX = 48;
 export const DREAM_BUS_MOBILE_BOARD_TOP_PX = 8;
 export const DREAM_BUS_MOBILE_STATIONS_PER_ROW = 3;
-export const DREAM_BUS_MOBILE_ICON_PX = 44;
-export const DREAM_BUS_MOBILE_LABEL_MAX_PX = 58;
+export const DREAM_BUS_MOBILE_ICON_PX = 40;
+export const DREAM_BUS_MOBILE_LABEL_MAX_PX = 52;
+/** 手机端站牌左缘距路线区左边界（尽量贴左，给右侧 3 列留宽） */
+export const DREAM_BUS_MOBILE_BOARD_LEFT_MARGIN_PX = 0;
+/** 手机端站牌宽度 */
+export const DREAM_BUS_MOBILE_BOARD_WIDTH_PX = 72;
+/** 手机端巴士占位宽 */
+export const DREAM_BUS_MOBILE_BUS_WIDTH_PX = 76;
+/** 手机端：站牌右缘到首站中心，约为半车宽（不再留整车间隙） */
+export const DREAM_BUS_MOBILE_FIRST_STOP_BUS_FACTOR = 0.42;
+/** 手机端：三站一行时中心最小间距（避免 label 胶囊重叠） */
+export const DREAM_BUS_MOBILE_MIN_STATION_CENTER_GAP_PX = 54;
+/** 手机端：每行首站中心不低于此比例（把最左城往右收） */
+export const DREAM_BUS_MOBILE_ROW_LEFT_RATIO = 0.48;
+/** 手机端：每行末站中心不高于此比例（把最右城往左收） */
+export const DREAM_BUS_MOBILE_ROW_RIGHT_RATIO = 0.9;
+/** @deprecated 手机端行末站改用 ROW_RIGHT_RATIO */
+export const DREAM_BUS_MOBILE_LAYOUT_RIGHT_RATIO = 0.97;
 
 /** 桌面换行：行高（50px 图标 + label） */
 export const DREAM_BUS_DESKTOP_WRAP_ROW_STEP_PX = 96;
@@ -81,7 +97,7 @@ export function dreamBusCompactStopCenterPx(
 
   if (stopsInRow <= 1) return reversed ? leftMaxPx : firstStopCenterPx;
 
-  const step = span / (stopsInRow - 1);
+  const step = Math.max(span / (stopsInRow - 1), minGapPx);
   if (!reversed) return firstStopCenterPx + step * slotInRow;
   return leftMaxPx - step * slotInRow;
 }
@@ -154,15 +170,21 @@ function resolveRouteLayoutMetrics(opts?: DreamBusRouteLayoutOpts) {
   const L = DREAM_BUS_ROUTE_LAYOUT;
   const mobile = opts?.mobile ?? false;
   return {
-    boardWidthPx: mobile ? 82 : L.stationWidthPx,
-    busWidthPx: mobile ? 92 : L.busWrapWidthPx,
+    boardWidthPx: mobile ? DREAM_BUS_MOBILE_BOARD_WIDTH_PX : L.stationWidthPx,
+    busWidthPx: mobile ? DREAM_BUS_MOBILE_BUS_WIDTH_PX : L.busWrapWidthPx,
     stopWidthPx: mobile
       ? DREAM_BUS_MOBILE_LABEL_MAX_PX
       : DREAM_BUS_ROUTE_STOP_WIDTH_PX,
-    boardLeftMarginPx: mobile ? 8 : DREAM_BUS_BOARD_LEFT_MARGIN_PX,
-    boardTailGapPx: mobile ? 4 : DREAM_BUS_BOARD_TAIL_GAP_PX,
-    boardToFirstExtraPx: DREAM_BUS_BOARD_TO_FIRST_EXTRA_PX,
-    firstStopBusFactor: 1,
+    boardLeftMarginPx: mobile
+      ? DREAM_BUS_MOBILE_BOARD_LEFT_MARGIN_PX
+      : DREAM_BUS_BOARD_LEFT_MARGIN_PX,
+    boardTailGapPx: mobile ? -10 : DREAM_BUS_BOARD_TAIL_GAP_PX,
+    boardToFirstExtraPx: mobile ? 2 : DREAM_BUS_BOARD_TO_FIRST_EXTRA_PX,
+    firstStopBusFactor: mobile ? DREAM_BUS_MOBILE_FIRST_STOP_BUS_FACTOR : 1,
+    layoutRightRatio: mobile ? DREAM_BUS_MOBILE_LAYOUT_RIGHT_RATIO : 0.94,
+    minStationCenterGapPx: mobile
+      ? DREAM_BUS_MOBILE_MIN_STATION_CENTER_GAP_PX
+      : DREAM_BUS_MIN_STATION_CENTER_GAP_PX,
   };
 }
 
@@ -180,6 +202,23 @@ function dreamBusFirstStopCenterPx(M: ReturnType<typeof resolveRouteLayoutMetric
     M.boardToFirstExtraPx +
     stopHalf
   );
+}
+
+/** 手机端多行：站点行的左右边界（首站往右、末站往左，避免三列拉太开） */
+function dreamBusMobileRowSpanPx(
+  layoutWidth: number,
+  naturalFirstStopCenterPx: number,
+  minGapPx: number,
+): { firstCenterPx: number; leftMaxPx: number } {
+  const firstCenterPx = Math.max(
+    naturalFirstStopCenterPx,
+    layoutWidth * DREAM_BUS_MOBILE_ROW_LEFT_RATIO,
+  );
+  const leftMaxPx = Math.max(
+    layoutWidth * DREAM_BUS_MOBILE_ROW_RIGHT_RATIO,
+    firstCenterPx + minGapPx * 2,
+  );
+  return { firstCenterPx, leftMaxPx };
 }
 
 /** 桌面多行：当前宽度下一行最多放几站 */
@@ -241,9 +280,14 @@ export function dreamBusRouteAnchorLayout(
   const firstStopCenterPx = dreamBusFirstStopCenterPx(M);
 
   const layoutWidth = compact
-    ? Math.max(routeWidthPx, 280)
+    ? Math.max(routeWidthPx, mobileGrid ? routeWidthPx : 280)
     : Math.max(routeWidthPx, DREAM_BUS_ROUTE_REF_WIDTH_PX);
-  const leftMaxPx = layoutWidth * 0.94;
+  const naturalLeftMaxPx = layoutWidth * M.layoutRightRatio;
+  const mobileRowSpan = mobileGrid
+    ? dreamBusMobileRowSpanPx(layoutWidth, firstStopCenterPx, M.minStationCenterGapPx)
+    : null;
+  const stationFirstCenterPx = mobileRowSpan?.firstCenterPx ?? firstStopCenterPx;
+  const stationLeftMaxPx = mobileRowSpan?.leftMaxPx ?? naturalLeftMaxPx;
 
   let stopLeftPcts: number[] = [];
   let stationsPerRow = Math.max(1, stopCount);
@@ -265,17 +309,18 @@ export function dreamBusRouteAnchorLayout(
         i,
         cols,
         stopCount,
-        firstStopCenterPx,
-        leftMaxPx,
+        stationFirstCenterPx,
+        stationLeftMaxPx,
+        M.minStationCenterGapPx,
       );
       return (centerPx / layoutWidth) * 100;
     });
   } else if (stopCount === 1) {
-    stopLeftPcts = [(firstStopCenterPx / layoutWidth) * 100];
+    stopLeftPcts = [(stationFirstCenterPx / layoutWidth) * 100];
   } else {
-    const span = Math.max(0, leftMaxPx - firstStopCenterPx);
+    const span = Math.max(0, stationLeftMaxPx - stationFirstCenterPx);
     stopLeftPcts = Array.from({ length: stopCount }, (_, i) => {
-      const centerPx = firstStopCenterPx + (span * i) / (stopCount - 1);
+      const centerPx = stationFirstCenterPx + (span * i) / (stopCount - 1);
       return (centerPx / layoutWidth) * 100;
     });
   }

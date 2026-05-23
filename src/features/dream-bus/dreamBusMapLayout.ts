@@ -17,6 +17,8 @@ export type DreamBusRoutePoint = {
   stationId: number;
   leftPct: number;
   topPct: number;
+  /** 多行路线区：巴士 wrap 的绝对 top（px）；省略则用 topPct */
+  topPx?: number;
 };
 
 /** 星级标签色带：5–10 橙、12–20 青、40+ 红 */
