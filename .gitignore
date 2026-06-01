@@ -9,6 +9,10 @@ server/data/audio/
 server/local-ai-agent.env
 # 本机 deploy 用 SSH/Web 路径（从 deploy.local.env.example 复制）
 deploy/deploy.local.env
+deploy/.fmz-ai-gateway.env.staging
+deploy/.voice-clone-keys.staging.json
+# SSH 私钥（路径见 deploy/servers.json，勿提交）
+token/
 .fmz-dev/
 downloads/
 __pycache__/

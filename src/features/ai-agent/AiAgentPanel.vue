@@ -119,7 +119,7 @@ async function fetchModels() {
       });
       const raw = await res.text();
       if (!res.ok) {
-        modelsHint.value = `无法获取模型列表（HTTP ${res.status}）${raw ? `：${raw.slice(0, 200)}` : "。请确认本地已启动 ai-agent-server（8792）且 Vite 配置了 /__fmz_ai_agent 代理。"}`;
+        modelsHint.value = `无法获取模型列表（HTTP ${res.status}）${raw ? `：${raw.slice(0, 200)}` : "。生产环境由主站 Nginx 将 /__fmz_ai_agent 转发到 AI 网关机；开发请用 npm run dev 并确保 deploy/servers.json 中网关可达。"}`;
         availableModels.value = [];
         return "done";
       }
@@ -174,7 +174,7 @@ async function fetchModels() {
       console.warn("[ai-agent] Failed to fetch models:", err);
       availableModels.value = [];
       modelsHint.value =
-        "无法连接 AI 代理（/__fmz_ai_agent）。请在本机运行 npm run dev:all，并用能提供该前缀的站点打开（局域网访问时需反代或未关闭跨设备限制）。";
+        "无法连接 AI 代理（/__fmz_ai_agent）。请确认主站已反代到 AI 网关机，或开发时用 npm run dev（Vite 会按 deploy.local.env / servers.json 转发）。";
       return "network";
     }
   };

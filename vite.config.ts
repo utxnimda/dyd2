@@ -51,6 +51,61 @@ function addSimpleProxy(prefix: string, target: string) {
   };
 }
 
+/** 开发时 AI 代理：默认本机 8792；设 FMZ_DEV_AI_AGENT_UPSTREAM=http://43.160.205.247:8792 可走远端网关（需 FMZ_REMOTE_SERVICE_SECRET） */
+function loadDevAiGatewayEnv() {
+  let secret = (process.env.FMZ_REMOTE_SERVICE_SECRET || "").trim();
+  let upstream = (process.env.FMZ_DEV_AI_AGENT_UPSTREAM || "").trim();
+  const envPath = join(__dirname, "deploy", "deploy.local.env");
+  if (existsSync(envPath)) {
+    for (const raw of readFileSync(envPath, "utf-8").split("\n")) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq < 1) continue;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if (
+        val.length >= 2 &&
+        ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
+      ) {
+        val = val.slice(1, -1);
+      }
+      if (key === "FMZ_REMOTE_SERVICE_SECRET" && !secret) secret = val;
+      if (key === "FMZ_DEV_AI_AGENT_UPSTREAM" && !upstream) upstream = val;
+    }
+  }
+  if (!upstream) {
+    try {
+      const servers = JSON.parse(readFileSync(join(__dirname, "deploy", "servers.json"), "utf-8"));
+      const gw = servers?.dianfanbao?.aiGateway;
+      const host = servers?.[gw?.target]?.host;
+      const port = gw?.ports?.aiAgent ?? 8792;
+      if (host) upstream = `http://${host}:${port}`;
+    } catch {
+      /* ignore */
+    }
+  }
+  return {
+    upstream: (upstream || "http://127.0.0.1:8792").replace(/\/+$/, ""),
+    secret,
+  };
+}
+
+function addAiAgentDevProxy() {
+  const { upstream, secret } = loadDevAiGatewayEnv();
+  apiProxy["/__fmz_ai_agent"] = {
+    target: upstream,
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/__fmz_ai_agent/, ""),
+    configure: (proxy) => {
+      if (!secret) return;
+      proxy.on("proxyReq", (proxyReq) => {
+        proxyReq.setHeader("X-FMZ-Remote-Secret", secret);
+      });
+    },
+  };
+}
+
 // FMZ API proxy (needed by battle/treasury/users/preliminary)
 if (features.battle || features.treasury || features.users || features.preliminary) {
   apiProxy["/__fmz_api"] = {
@@ -110,9 +165,9 @@ if (features.douyuDanmaku || features.dreamBus) {
   addSimpleProxy("/__fmz_danmaku", "http://127.0.0.1:8791");
 }
 
-// AI Agent proxy server (needed by aiAgent)
+// AI Agent：开发时 Vite 转发到远端网关或本机；生产由主站 Nginx 转发（见 deploy/AI_GATEWAY_SPLIT.md）
 if (features.aiAgent) {
-  addSimpleProxy("/__fmz_ai_agent", "http://127.0.0.1:8792");
+  addAiAgentDevProxy();
 }
 
 // Voice Clone server (needed by voiceClone)

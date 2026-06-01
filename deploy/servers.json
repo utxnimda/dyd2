@@ -1,0 +1,27 @@
+{
+  "dianfanbao": {
+    "label": "www.dianfanbao.net",
+    "host": "118.195.150.4",
+    "key": "token/118.195.150.4.pem",
+    "user": "root",
+    "webRoot": "/var/www/fmz-dashboard",
+    "role": "primary",
+    "aiGateway": {
+      "target": "tencent-43",
+      "ports": { "aiAgent": 8792, "voiceClone": 8793 },
+      "optSkipOnPrimary": ["fmz-ai-agent-server", "fmz-voice-clone-server"],
+      "optDeployOnGateway": ["fmz-ai-agent-server", "fmz-voice-clone-server"]
+    }
+  },
+  "tencent-43": {
+    "label": "43.160.205.247",
+    "host": "43.160.205.247",
+    "key": "token/43.160.205.247.pem",
+    "user": "root",
+    "webRoot": "/var/www/fmz-dashboard",
+    "role": "ai-gateway",
+    "deployStatic": false,
+    "aiBindHost": "0.0.0.0",
+    "optDeployOnGateway": ["fmz-ai-agent-server", "fmz-voice-clone-server"]
+  }
+}

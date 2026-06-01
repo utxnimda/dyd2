@@ -22,6 +22,12 @@ import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OPT_RELEASE_BUNDLES } from "./fmz-opt-bundles.mjs";
+import {
+  resolveAiGateway,
+  writeDanmakuEnvAiRemote,
+  writeNginxRemoteSecretInc,
+  writeNginxRemoteUpstreamsConf,
+} from "./fmz-server-roles.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
@@ -253,26 +259,44 @@ if (!skipData) {
 /*  server/*.mjs → release/<label>/opt/<fmz-*-server>/（与 /opt 对齐）   */
 /* ------------------------------------------------------------------ */
 
+/** @param {typeof OPT_RELEASE_BUNDLES[number]} bundle */
+function packOptBundle(bundle, archivedOpt) {
+  if (archivedOpt.includes(bundle.remoteName)) return;
+  const destDir = join(target, "opt", bundle.remoteName);
+  mkdirSync(destDir, { recursive: true });
+  let ok = true;
+  for (const [relFrom, baseName] of bundle.copies.concat(FMZ_STATIC_OPT_EXTRA_COPIES)) {
+    const absFrom = join(root, relFrom);
+    const absTo = join(destDir, baseName);
+    if (!existsSync(absFrom)) {
+      console.warn(`  [opt] ⚠️  跳过 ${bundle.remoteName}：缺少源文件 ${relFrom}`);
+      ok = false;
+      break;
+    }
+    copyFileSync(absFrom, absTo);
+  }
+  if (ok) {
+    archivedOpt.push(bundle.remoteName);
+    console.log(`  [opt] 已复制 → release/${label}/opt/${bundle.remoteName}/`);
+  }
+}
+
 const archivedOpt = [];
 if (!skipOpt) {
   for (const bundle of OPT_RELEASE_BUNDLES) {
     if (!bundle.include(features)) continue;
-    const destDir = join(target, "opt", bundle.remoteName);
-    mkdirSync(destDir, { recursive: true });
-    let ok = true;
-    for (const [relFrom, baseName] of bundle.copies.concat(FMZ_STATIC_OPT_EXTRA_COPIES)) {
-      const absFrom = join(root, relFrom);
-      const absTo = join(destDir, baseName);
-      if (!existsSync(absFrom)) {
-        console.warn(`  [opt] ⚠️  跳过 ${bundle.remoteName}：缺少源文件 ${relFrom}`);
-        ok = false;
-        break;
-      }
-      copyFileSync(absFrom, absTo);
+    packOptBundle(bundle, archivedOpt);
+  }
+  const aiGwPack = resolveAiGateway("dianfanbao");
+  if (aiGwPack?.optDeployOnGateway?.length) {
+    for (const remoteName of aiGwPack.optDeployOnGateway) {
+      const bundle = OPT_RELEASE_BUNDLES.find((b) => b.remoteName === remoteName);
+      if (bundle) packOptBundle(bundle, archivedOpt);
     }
-    if (ok) {
-      archivedOpt.push(bundle.remoteName);
-      console.log(`  [opt] 已复制 → release/${label}/opt/${bundle.remoteName}/`);
+    if (aiGwPack.optDeployOnGateway.some((n) => archivedOpt.includes(n))) {
+      console.log(
+        `  [opt] AI 网关分离：已强制纳入 ${aiGwPack.optDeployOnGateway.filter((n) => archivedOpt.includes(n)).join(", ")}（供 43.160.205.247 部署）`,
+      );
     }
   }
   if (archivedOpt.length === 0) {
@@ -293,9 +317,12 @@ if (!skipConfig) {
   const nginxPairs = [
     ["deploy/nginx-fmz-dashboard.conf", join(cfgNginx, "nginx-fmz-dashboard.conf")],
     ["deploy/nginx-fmz-dashboard-locations.inc", join(cfgNginx, "nginx-fmz-dashboard-locations.inc")],
+    ["deploy/nginx-fmz-remote-upstreams.conf", join(cfgNginx, "fmz-remote-upstreams.conf")],
   ];
   const systemdPairs = [
     ["deploy/fmz-ai-agent.service", join(cfgSystemd, "fmz-ai-agent.service")],
+    ["deploy/fmz-voice-clone.service", join(cfgSystemd, "fmz-voice-clone.service")],
+    ["deploy/fmz-ai-gateway.env.example", join(cfgSystemd, "fmz-ai-gateway.env.example")],
     ["deploy/fmz-danmaku.env.example", join(cfgSystemd, "fmz-danmaku.env.example")],
     [
       "deploy/fmz-danmaku.service.d-ai-report.conf.example",
@@ -313,6 +340,16 @@ if (!skipConfig) {
   if (any) {
     archivedConfigDirs = true;
     console.log(`  [config] 已复制 → release/${label}/config/{nginx,systemd}/`);
+  }
+  const aiGw = resolveAiGateway("dianfanbao");
+  if (aiGw) {
+    writeNginxRemoteUpstreamsConf(join(cfgNginx, "fmz-remote-upstreams.conf"), aiGw);
+    writeNginxRemoteSecretInc(join(cfgNginx, "fmz-remote-secret.inc"), "");
+    writeDanmakuEnvAiRemote(join(target, "config", "danmaku-ai-gateway.env"), aiGw);
+    archivedConfigDirs = true;
+    console.log(
+      `  [config] AI 网关分离：upstream → ${aiGw.host}；已生成 danmaku-ai-gateway.env / fmz-remote-upstreams.conf`,
+    );
   }
   if (features.dreamBus === true && features.douyuDanmaku !== true) {
     const roomId = String(process.env.FMZ_DREAM_BUS_ROOM_ID || "9046690").trim();

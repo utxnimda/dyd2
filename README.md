@@ -12,6 +12,8 @@
 | [`deploy/RELEASE_AND_DEPLOY.md`](deploy/RELEASE_AND_DEPLOY.md) | 版本号、`pack` 细节、**远端**静态与 Nginx、各 `fmz-*` 服务部署与自检（篇幅长） |
 | [`deploy/tencent-cdn-plan2-8443-origin.md`](deploy/tencent-cdn-plan2-8443-origin.md) | CDN / 8443 回源等控制台操作 |
 | [`deploy/deploy.local.env.example`](deploy/deploy.local.env.example) | 本机 `deploy` 用 SSH/Web 路径环境变量样例 |
+| [`deploy/servers.json`](deploy/servers.json) | 多机 SSH 预设（密钥路径 `token/*.pem`，不含私钥内容） |
+| [`deploy/AI_GATEWAY_SPLIT.md`](deploy/AI_GATEWAY_SPLIT.md) | **AI 网关分离**：主站 → 43.160.205.247（HTTP + 共享密钥） |
 | [`server/local-ai-agent.env.example`](server/local-ai-agent.env.example) | `ai-agent-server` 与本机密钥、代理、`FMZ_TRIGGER_AI_MODEL` 等 |
 | [`server/data/ai-agent-keys.example.json`](server/data/ai-agent-keys.example.json) | 多厂商 Key 模板（复制为 **`ai-agent-keys.json`**，勿提交） |
 | [`.cursor/rules/fmz-release-workflow.mdc`](.cursor/rules/fmz-release-workflow.mdc) | **操作指令**（口语 → 打包/提交/发布）与默认**马上更新**远端 |
@@ -91,7 +93,8 @@ npm run dev
 
 | 模块 | 配置位置 | 入库 | 说明 |
 |------|----------|------|------|
-| **发布 / SSH** | 复制 [`deploy/deploy.local.env.example`](deploy/deploy.local.env.example) → **`deploy/deploy.local.env`**（同目录）；变量含 **`FMZ_DEPLOY_SSH_KEY`**（`.pem` 路径）、`FMZ_DEPLOY_SSH_USER`、`FMZ_DEPLOY_SSH_HOST`、`FMZ_DEPLOY_WEB_ROOT`；可选 `FMZ_DEPLOY_SKIP_BACKEND`、`FMZ_DEPLOY_SYNC_NGINX` | `deploy.local.env` **勿提交**（已 gitignore） | 根目录执行 `deploy/load-deploy-env.ps1` 加载；手工命令里的 `-i` 须与 `FMZ_DEPLOY_SSH_KEY` 一致 |
+| **发布 / SSH** | 将 `.pem` 放入 **`token/`**（已 gitignore）；复制 [`deploy/deploy.local.env.example`](deploy/deploy.local.env.example) → **`deploy/deploy.local.env`**，设置 **`FMZ_DEPLOY_TARGET`**（`dianfanbao` = 118.195.150.4 / www.dianfanbao.net，`tencent-43` = 43.160.205.247）；主机与密钥路径见 [`deploy/servers.json`](deploy/servers.json)。也可直接写 `FMZ_DEPLOY_SSH_KEY` 等覆盖单项；可选 `FMZ_DEPLOY_SKIP_BACKEND`、`FMZ_DEPLOY_SYNC_NGINX` | `deploy.local.env`、`token/*.pem` **勿提交** | `npm run deploy` 会自动读 `deploy.local.env`；PowerShell 手工 ssh 前可 `. ./deploy/load-deploy-env.ps1`。切第二台：`FMZ_DEPLOY_TARGET=tencent-43` 或 `node scripts/deploy.mjs --target=tencent-43` |
+| **AI 网关分离** | 网关机 **`/etc/fmz-ai-gateway.env`**（`GEMINI_API_KEY`、`FISH_AUDIO_API_KEY`、`FMZ_REMOTE_SERVICE_SECRET`、代理）；主站同上 Secret + **`FMZ_DEPLOY_SYNC_NGINX=1`**；[`deploy/AI_GATEWAY_SPLIT.md`](deploy/AI_GATEWAY_SPLIT.md) | 机密 **勿提交** | 远端：**AI :8792**、**Fish 音声 :8793**；主站 **`/__fmz_audio` 仍本机 8789**（音频提取不分离） |
 | **AI 网关** | [`server/local-ai-agent.env.example`](server/local-ai-agent.env.example) · [`server/data/ai-agent-keys.example.json`](server/data/ai-agent-keys.example.json) → 复制为 **`ai-agent-keys.json`** | **勿提交** | 环境变量优先于 JSON 同名字段；字段 `gemini` / `openai` / `qwen` 与 `GEMINI_API_KEY` 等对应关系见 `ai-agent-server.mjs` |
 | **斗鱼弹幕** `douyu-danmaku-server` | `FMZ_TRIGGER_AI_MODEL`、`AI_AGENT_INTERNAL_URL` / `AI_AGENT_PORT`；**日报体积**：`FMZ_AI_REPORT_MAX_GIFT_LINES`（默认 650）、`FMZ_AI_REPORT_VERBATIM_DM_SAMPLE`（分段时原文抽样行数，默认 160）、`FMZ_AI_REPORT_DAILY_FORCE_CHUNK_CHARS`、`FMZ_AI_REPORT_DAILY_FORCE_MIN_PARTS`、`FMZ_AI_REPORT_CHUNK_DM_LINES`、`FMZ_AI_REPORT_CONTEXT_RETRY_MAX`（上下文过长时自动收窄分块重试）等 | 生产可用 **`deploy/fmz-danmaku.env.example`** → 远端 `/opt/fmz-danmaku-server/danmaku.env` + systemd `EnvironmentFile=`（见 `RELEASE_AND_DEPLOY.md` §13.2） | 见 `douyu-danmaku-server.mjs` 顶部常量；`local-ai-agent.env.example` 仅示例 AI 网关变量 |
 | **赞踩** `reactions-server` | 服务端：`FMZ_REACTIONS_SECRET`、`PORT`、`FMZ_DATA_DIR` 等（见 `server/reactions-server.mjs` 头部注释） | 服务端配置 | 浏览器侧在设置栏填写 **「赞踩 API 密钥」**，须与 `FMZ_REACTIONS_SECRET` 一致 |

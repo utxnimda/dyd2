@@ -12,6 +12,8 @@ export const OPT_RELEASE_BUNDLES = [
       ["server/douyu-danmaku-server.mjs", "douyu-danmaku-server.mjs"],
       ["server/dream-bus-store.mjs", "dream-bus-store.mjs"],
       ["server/gemini-openai-compat-chat-filter.mjs", "gemini-openai-compat-chat-filter.mjs"],
+      ["server/fmz-ai-gateway-client.mjs", "fmz-ai-gateway-client.mjs"],
+      ["server/fmz-remote-service-auth.mjs", "fmz-remote-service-auth.mjs"],
     ],
   },
   {
@@ -19,8 +21,17 @@ export const OPT_RELEASE_BUNDLES = [
     include: (f) => f.aiAgent === true,
     copies: [
       ["server/ai-agent-server.mjs", "ai-agent-server.mjs"],
+      ["server/fmz-remote-service-auth.mjs", "fmz-remote-service-auth.mjs"],
       ["server/gemini-openai-compat-chat-filter.mjs", "gemini-openai-compat-chat-filter.mjs"],
       ["deploy/fmz-ai-agent-server.package.json", "package.json"],
+    ],
+  },
+  {
+    remoteName: "fmz-voice-clone-server",
+    include: (f) => f.voiceClone === true,
+    copies: [
+      ["server/voice-clone-server.mjs", "voice-clone-server.mjs"],
+      ["server/fmz-remote-service-auth.mjs", "fmz-remote-service-auth.mjs"],
     ],
   },
   {
@@ -57,6 +68,7 @@ export const OPT_RELEASE_BUNDLES = [
 export const OPT_TO_SYSTEMD = {
   "fmz-danmaku-server": "fmz-danmaku",
   "fmz-ai-agent-server": "fmz-ai-agent",
+  "fmz-voice-clone-server": "fmz-voice-clone",
   "fmz-audio-server": "fmz-audio",
   "fmz-crimes-server": "fmz-crimes",
   "fmz-defense-server": "fmz-defense",
@@ -75,10 +87,8 @@ export function systemdUnitsForFeatures(features = {}) {
     .filter(Boolean);
 }
 
-/** 远端应 stop + disable 的单元（未纳入当前特性；voice-clone 无 opt 目录） */
+/** 远端应 stop + disable 的单元（未纳入当前特性） */
 export function systemdUnitsToStop(features = {}) {
   const active = new Set(systemdUnitsForFeatures(features));
-  const stop = Object.values(OPT_TO_SYSTEMD).filter((unit) => !active.has(unit));
-  if (features.voiceClone !== true) stop.push("fmz-voice-clone");
-  return [...new Set(stop)];
+  return Object.values(OPT_TO_SYSTEMD).filter((unit) => !active.has(unit));
 }

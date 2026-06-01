@@ -21,6 +21,11 @@ import { dirname, join, extname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
+import {
+  checkRemoteServiceAuth,
+  getServiceBindHost,
+  remoteServiceAuthFailureResponse,
+} from "./fmz-remote-service-auth.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.VOICE_CLONE_PORT || "8793", 10);
@@ -515,7 +520,7 @@ async function rvcTrain(modelName, audioFiles, config) {
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-FMZ-Remote-Secret");
 }
 
 function json(res, data, status = 200) {
@@ -528,7 +533,12 @@ function error(res, msg, status = 500) {
   json(res, { error: msg }, status);
 }
 
+const BIND_HOST = getServiceBindHost("127.0.0.1");
+
 const server = http.createServer(async (req, res) => {
+  const auth = checkRemoteServiceAuth(req, { bindHost: BIND_HOST, logTag: "voice-clone" });
+  if (remoteServiceAuthFailureResponse(req, res, auth, (r, st, d) => json(r, d, st))) return;
+
   cors(res);
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
@@ -844,8 +854,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`[voice-clone] Voice Clone Server listening on http://127.0.0.1:${PORT}`);
+server.listen(PORT, BIND_HOST, () => {
+  console.log(`[voice-clone] Voice Clone Server listening on http://${BIND_HOST}:${PORT}`);
   const config = loadConfig();
   console.log(`[voice-clone] Backend: ${config.backend}`);
 });

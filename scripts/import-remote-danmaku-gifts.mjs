@@ -14,36 +14,22 @@
  *   node scripts/import-remote-danmaku-gifts.mjs --only=records
  */
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveDeployConfig } from "./fmz-deploy-env.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** `scp -r remote:…/danmaku/<leaf>` 写入本机 danmaku 下同名目录 */
 const LOCAL_DANMAKU_DIR = join(root, "server", "data", "danmaku");
 
-function loadDeployLocalEnvOptional() {
-  const p = join(root, "deploy", "deploy.local.env");
-  if (!existsSync(p)) return;
-  const txt = readFileSync(p, "utf-8");
-  for (const raw of txt.split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq < 1) continue;
-    const key = line.slice(0, eq).trim();
-    let val = line.slice(eq + 1).trim();
-    if (
-      val.length >= 2 &&
-      ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
-    ) {
-      val = val.slice(1, -1);
-    }
-    if (key && !(key in process.env)) process.env[key] = val;
-  }
+let deployCfg;
+try {
+  deployCfg = resolveDeployConfig({ rootDir: root });
+} catch (e) {
+  console.error(`❌ ${e instanceof Error ? e.message : e}`);
+  process.exit(1);
 }
-
-loadDeployLocalEnvOptional();
 
 const dryRun =
   process.argv.includes("--dry-run") || /^1|true$/i.test(process.env.FMZ_IMPORT_DRY_RUN || "");
@@ -56,9 +42,7 @@ if (!mode) {
   process.exit(1);
 }
 
-const SSH_KEY = (process.env.FMZ_DEPLOY_SSH_KEY || String.raw`D:\nimda1.pem`).trim();
-const REMOTE_USER = (process.env.FMZ_DEPLOY_SSH_USER || "root").trim();
-const REMOTE_HOST = (process.env.FMZ_DEPLOY_SSH_HOST || "118.195.150.4").trim();
+const { sshKey: SSH_KEY, remoteUser: REMOTE_USER, remoteHost: REMOTE_HOST } = deployCfg;
 const REMOTE_DANMAKU_DATA = (
   process.env.FMZ_REMOTE_DANMAKU_DATA || "/opt/fmz-danmaku-server/data/danmaku"
 ).replace(/\/+$/, "");

@@ -2611,8 +2611,9 @@ let aiAgentListedModelIdsCache = { ids: [], fetchedAt: 0 };
 const AI_AGENT_MODEL_IDS_CACHE_TTL_MS = 120_000;
 
 async function fetchAiAgentListedModelIdsFresh() {
+  const { aiGatewayFetchHeaders } = await import("./fmz-ai-gateway-client.mjs");
   const res = await fetch(`${AI_AGENT_INTERNAL_URL}/models`, {
-    headers: { Accept: "application/json" },
+    headers: aiGatewayFetchHeaders({ Accept: "application/json" }),
   });
   if (!res.ok) return [];
   let j;
@@ -2996,9 +2997,13 @@ function hideAiReportEntry(roomId, entryId) {
 }
 
 async function chatAiAgentAccumulate(modelId, messages) {
+  const { aiGatewayFetchHeaders } = await import("./fmz-ai-gateway-client.mjs");
   const res = await fetch(`${AI_AGENT_INTERNAL_URL}/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    headers: aiGatewayFetchHeaders({
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    }),
     body: JSON.stringify({ modelId, messages }),
   });
   if (!res.ok) {

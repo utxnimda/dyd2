@@ -606,7 +606,7 @@ ssh -i "D:/path/to/your-key.pem" root@118.195.150.4 "systemctl restart fmz-danma
 
 ## 附录 A：SSH 连接与密钥
 
-**以本机为准**：`scripts/deploy.mjs` 默认私钥为 **`D:\nimda1.pem`**、主机 **`118.195.150.4`**；推荐复制 [`deploy/deploy.local.env.example`](deploy.local.env.example) 为 `deploy.local.env` 后按需覆盖。下文 **IP / 路径** 仅为历史示例。
+**以本机为准**：密钥放在仓库 **`token/`**，预设见 [`deploy/servers.json`](servers.json)；`FMZ_DEPLOY_TARGET=dianfanbao`（118.195.150.4 / www.dianfanbao.net）或 `tencent-43`（43.160.205.247）。复制 [`deploy/deploy.local.env.example`](deploy.local.env.example) 为 `deploy.local.env`。下文 **IP / 路径** 仅为历史示例。
 
 ### 服务器信息（示例）
 

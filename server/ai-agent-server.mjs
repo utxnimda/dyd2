@@ -13,6 +13,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
 import { geminiEligibleForOpenAiCompatTextChat } from "./gemini-openai-compat-chat-filter.mjs";
+import {
+  checkRemoteServiceAuth,
+  getServiceBindHost,
+  remoteServiceAuthFailureResponse,
+} from "./fmz-remote-service-auth.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.AI_AGENT_PORT || "8792", 10);
@@ -689,7 +694,7 @@ function sendJson(res, status, data) {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, X-FMZ-Remote-Secret",
   });
   res.end(body);
 }
@@ -703,13 +708,18 @@ function readBody(req) {
   });
 }
 
+const BIND_HOST = getServiceBindHost("127.0.0.1");
+
 const server = http.createServer(async (req, res) => {
+  const auth = checkRemoteServiceAuth(req, { bindHost: BIND_HOST, logTag: "ai-agent" });
+  if (remoteServiceAuthFailureResponse(req, res, auth, sendJson)) return;
+
   // CORS preflight
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type, X-FMZ-Remote-Secret",
       "Access-Control-Max-Age": "86400",
     });
     return res.end();
@@ -825,8 +835,16 @@ const server = http.createServer(async (req, res) => {
 
 (async () => {
   await refreshModelProvidersFromGoogle();
-  server.listen(PORT, "127.0.0.1", () => {
-    console.log(`[ai-agent] 🤖 AI Agent proxy server running on http://127.0.0.1:${PORT}`);
+  server.listen(PORT, BIND_HOST, () => {
+    console.log(`[ai-agent] 🤖 AI Agent proxy server running on http://${BIND_HOST}:${PORT}`);
+    if (BIND_HOST !== "127.0.0.1" && BIND_HOST !== "localhost") {
+      console.log(
+        "[ai-agent]    远端网关模式：请配置 FMZ_REMOTE_SERVICE_SECRET，并在主站 Nginx / 弹幕服务注入 X-FMZ-Remote-Secret",
+      );
+      console.log(
+        "[ai-agent]    建议在云安全组仅放行主站 IP 访问本机 TCP " + PORT,
+      );
+    }
     const available = getAvailableModels();
     if (available.length === 0) {
       console.log(

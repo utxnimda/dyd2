@@ -1,8 +1,8 @@
 {
   "name": "fmz-dashboard",
   "private": true,
-  "version": "1.1.56",
-  "fmzReleaseLabel": "v1.1.56",
+  "version": "1.1.58",
+  "fmzReleaseLabel": "v1.1.58",
   "fmzFeatures": {
     "sanguo": true,
     "sanguoUi": false,
@@ -17,7 +17,7 @@
     "crimes": true,
     "douyuDanmaku": false,
     "dreamBus": true,
-    "aiAgent": false,
+    "aiAgent": true,
     "voiceClone": false,
     "ruinsRebuild": false
   },
@@ -41,6 +41,9 @@
     "check:reactions": "node scripts/check-reactions.mjs",
     "pack": "node scripts/bump-patch.mjs && vite build && node scripts/pack-release.mjs",
     "deploy": "node scripts/deploy.mjs",
+    "deploy:ai-gateway": "node scripts/deploy-ai-gateway.mjs",
+    "sync:ai-gateway": "node scripts/sync-ai-gateway-remote.mjs",
+    "verify:ai-gateway": "node scripts/verify-ai-gateway-remote.mjs",
     "import:remote-danmaku-gifts": "node scripts/import-remote-danmaku-gifts.mjs",
     "import:remote-danmaku-data": "node scripts/import-remote-danmaku-gifts.mjs",
     "pack:quota": "node scripts/pack-quota.mjs",

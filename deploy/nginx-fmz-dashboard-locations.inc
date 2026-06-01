@@ -6,6 +6,8 @@
     index index.html;
 
     set $fmz_upstream_browser_origin "https://fmz.dongdongne.com";
+    # 共享密钥（分离部署时由 deploy 写入 fmz-remote-secret.inc；无文件时为空，仅本机 loopback 可用）
+    include /etc/nginx/conf.d/fmz-remote-secret.inc;
 
     location / {
         try_files $uri $uri/ /index.html;
@@ -106,12 +108,13 @@
     }
 
     location /__fmz_ai_agent/ {
-        proxy_pass http://127.0.0.1:8792/;
+        proxy_pass http://fmz_ai_agent_upstream/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-FMZ-Remote-Secret $fmz_remote_service_secret;
         # SSE support: disable buffering for streaming AI responses
         proxy_buffering off;
         proxy_cache off;
@@ -121,12 +124,13 @@
     }
 
     location /__fmz_voice_clone/ {
-        proxy_pass http://127.0.0.1:8793/;
+        proxy_pass http://fmz_voice_clone_upstream/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-FMZ-Remote-Secret $fmz_remote_service_secret;
         proxy_connect_timeout 60s;
         proxy_send_timeout 300s;
         proxy_read_timeout 300s;

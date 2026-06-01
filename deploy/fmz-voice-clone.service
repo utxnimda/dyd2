@@ -1,0 +1,17 @@
+[Unit]
+Description=FMZ Voice Clone server (Fish Audio / RVC gateway)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/fmz-voice-clone-server
+ExecStart=/usr/bin/node /opt/fmz-voice-clone-server/voice-clone-server.mjs
+Restart=always
+RestartSec=5
+Environment=VOICE_CLONE_PORT=8793
+Environment=FMZ_SERVICE_BIND_HOST=0.0.0.0
+Environment=NODE_ENV=production
+EnvironmentFile=-/etc/fmz-ai-gateway.env
+
+[Install]
+WantedBy=multi-user.target
